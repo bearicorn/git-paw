@@ -2,7 +2,11 @@
 //! grid session (bare or supervised), through the same attach primitives
 //! ([`super::launch`]) a start-time agent uses.
 
+use std::path::Path;
+
+use crate::agents;
 use crate::broker;
+use crate::command_runner::RealCommandRunner;
 use crate::config::{self, SupervisorConfig};
 use crate::detect;
 use crate::error::PawError;
@@ -34,6 +38,8 @@ pub struct AddOptions {
     pub cli: Option<String>,
     /// `--from-spec`: attach the branch of this spec.
     pub from_spec: Option<String>,
+    /// `--no-rebase`: do not rebase an existing branch onto the default branch.
+    pub no_rebase: bool,
 }
 
 /// What [`add`] attached.
@@ -66,6 +72,7 @@ pub fn add(
         branch: branch_arg,
         cli: cli_flag,
         from_spec,
+        no_rebase,
     } = opts;
     let branch_arg = branch_arg.as_deref();
     let cli_flag = cli_flag.as_deref();
@@ -214,6 +221,23 @@ pub fn add(
     // 4.5 Take the advisory lock for the rest of the critical section.
     let _lock = crate::lock::SessionLock::acquire(&repo_root)?;
 
+    // Never rebase over uncommitted work: a dirty reused worktree attaches on
+    // its current HEAD instead, exactly as if --no-rebase had been passed.
+    let skip_reason = if no_rebase {
+        None
+    } else {
+        rebase_skip_reason(&repo_root, &branch)?
+    };
+    let no_rebase = if let Some(reason) = skip_reason {
+        out.warn(&format!(
+            "notice: rebase skipped for '{branch}': {reason}. \
+             Pass --no-rebase to attach without a rebase."
+        ));
+        true
+    } else {
+        no_rebase
+    };
+
     // Build the shared attach context (mirrors supervisor's loop setup).
     let default_sup = SupervisorConfig::default();
     let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
@@ -263,7 +287,7 @@ pub fn add(
         session_backends: &session_backends,
         inter_agent_rules_peers: Some(&all_branches),
         strict_guard,
-        no_rebase: false,
+        no_rebase,
         placement: config.worktree_placement(),
         worktree_runtime: &worktree_runtime,
         clis: &config.clis,
@@ -278,7 +302,17 @@ pub fn add(
         prompt,
         entry_point,
         mut entry,
-    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot, out)?;
+    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot, out).map_err(
+        |e| match e {
+            PawError::WorktreeError(msg) if msg.starts_with(git::REBASE_FAILED) => {
+                PawError::WorktreeError(format!(
+                    "{msg}\nhint: run `git paw add {branch} --no-rebase` to attach the branch \
+                 without rebasing it."
+                ))
+            }
+            other => other,
+        },
+    )?;
     // Capture the new worktree's path before `entry` is moved into the
     // session, so we can register it as a live broker watch target below.
     let new_worktree_path = entry.worktree_path.clone();
@@ -433,4 +467,27 @@ pub fn add(
         pane_index: new_pane_idx,
         paused,
     })
+}
+
+/// Why `add` must not rebase `branch`, or `None` when the rebase may run.
+///
+/// The worktree holding the branch is judged as `remove` judges it, so
+/// git-paw-managed entries alone count as clean. Unlike `remove`, a failed
+/// status check counts as dirty: skipping a rebase loses nothing, while
+/// rebasing over work we could not see might.
+fn rebase_skip_reason(repo_root: &Path, branch: &str) -> Result<Option<String>, PawError> {
+    let Some(worktree) = git::find_worktree_for_branch_with(&RealCommandRunner, repo_root, branch)?
+    else {
+        return Ok(None);
+    };
+    match git::uncommitted_files(&worktree) {
+        Ok(files) if files.iter().any(|f| !agents::is_managed_path(&worktree, f)) => Ok(Some(
+            "its worktree has uncommitted changes, which are left untouched".to_string(),
+        )),
+        Ok(_) => Ok(None),
+        Err(e) => Ok(Some(format!(
+            "could not check its worktree for uncommitted changes ({})",
+            e.to_string().trim_end()
+        ))),
+    }
 }

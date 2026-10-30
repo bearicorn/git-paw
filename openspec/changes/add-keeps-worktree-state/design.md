@@ -70,6 +70,11 @@ work": a worktree whose only entries are git-paw's injected sidecar or `.git-paw
 clean and is rebased as before. Untracked user files count as dirty. A rebase would usually leave
 them alone, but they are the worker's in-progress work, and skipping a rebase is never destructive.
 
+One departure from `remove`: when `git status` fails on the worktree (for example its directory
+was deleted while still registered), `remove` treats it as clean, but `add` treats it as dirty and
+skips the rebase with a notice saying the check failed. Skipping a rebase never loses work;
+rebasing over work that could not be seen might.
+
 Edge case: a tracked `AGENTS.md` that carries only an old git-paw managed block counts as managed
 (clean), yet git treats it as an unstaged change and refuses the rebase. That case goes to the D1
 fallback: `add` fails before attaching, nothing is lost, and the error names `--no-rebase`. Current

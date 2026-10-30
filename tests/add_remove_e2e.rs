@@ -2140,3 +2140,531 @@ fn adding_a_sixth_agent_to_a_pre_relocation_session_keeps_its_offset() {
         std::panic::resume_unwind(e);
     }
 }
+
+// --- add keeps a reused worktree's state (`add-keeps-worktree-state`) ---
+
+/// A supervisor config (broker off) whose default CLI is `cat`, plus a second
+/// CLI `my-agent` — a stub on a test `PATH` that `exec`s `cat` — so a CLI swap
+/// has somewhere to swap to. Returns the `PATH` to run `git paw` with.
+fn write_swap_config(repo: &Path, bin_dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script_path = bin_dir.join("my-agent");
+    fs::write(&script_path, "#!/bin/sh\nexec cat\n").expect("write stub CLI");
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "default_cli = \"cat\"\n\n[supervisor]\nenabled = true\ncli = \"cat\"\n\n\
+         [clis.my-agent]\ncommand = \"my-agent\"\n",
+    )
+    .expect("write config");
+
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    format!("{}:{inherited}", bin_dir.display())
+}
+
+/// `add feat/x --cli my-agent` plus `extra` — once `feat/x` is detached the
+/// session has no agent whose CLI `add` could fall back to.
+fn add_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["add", "feat/x", "--cli", "my-agent"];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Run `git paw <args>` in `repo` against the test socket and `HOME`.
+fn paw(
+    repo: &Path,
+    home: &Path,
+    tmux_env: &TmuxTestEnv,
+    path_env: &str,
+    args: &[&str],
+) -> std::process::Output {
+    let mut c = cmd();
+    tmux_env.apply_assert(&mut c);
+    c.current_dir(repo)
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .env("PATH", path_env)
+        .args(args)
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run git paw")
+}
+
+/// Run `git <args>` in `dir`, asserting success; returns trimmed stdout.
+fn git_ok(dir: &Path, args: &[&str]) -> String {
+    let out = StdCommand::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git spawn");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Whether `ancestor` is an ancestor of `descendant` in `repo`.
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    StdCommand::new("git")
+        .current_dir(repo)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .status()
+        .expect("git merge-base")
+        .success()
+}
+
+/// Start a session with `feat/x`, give the branch a commit of its own, detach
+/// it with `remove --keep-worktree`, then advance `main` with `main_file`.
+/// Returns the session name and the kept worktree's path.
+fn kept_worktree_behind_main(
+    repo: &Path,
+    home: &Path,
+    tmux_env: &TmuxTestEnv,
+    path_env: &str,
+    branch_file: (&str, &str),
+    main_file: (&str, &str),
+) -> (String, std::path::PathBuf) {
+    let session = start_session(repo, home, tmux_env, "feat/x");
+    let wt = repo.parent().unwrap().join("repo-feat-x");
+    assert!(
+        wt.exists(),
+        "worktree for 'feat/x' should exist after start"
+    );
+    commit_in(&wt, branch_file.0, branch_file.1, "agent work");
+
+    let removed = paw(
+        repo,
+        home,
+        tmux_env,
+        path_env,
+        &["remove", "feat/x", "--keep-worktree"],
+    );
+    assert!(
+        removed.status.success(),
+        "remove --keep-worktree failed; stderr:\n{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    commit_in(repo, main_file.0, main_file.1, "main moves on");
+    (session, wt)
+}
+
+/// Maps to scenarios "A CLI swap on a dirty kept worktree completes" and "The
+/// skip notice stays off stdout" (the GP-87 repro: before the fix this `add`
+/// failed with `rebase onto main failed`).
+#[test]
+#[serial]
+fn a_cli_swap_on_a_dirty_kept_worktree_completes() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fs::write(wt.join("README.md"), "# edited, not committed\n").expect("modify tracked");
+        fs::write(wt.join("scratch.txt"), "untracked work\n").expect("write untracked");
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+        let stash_before = git_ok(tr.path(), &["stash", "list"]);
+
+        let out = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(
+            out.status.success(),
+            "add on a dirty kept worktree must complete; stderr:\n{stderr}"
+        );
+        assert_eq!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            fs::read_to_string(wt.join("README.md")).unwrap(),
+            "# edited, not committed\n"
+        );
+        assert_eq!(
+            fs::read_to_string(wt.join("scratch.txt")).unwrap(),
+            "untracked work\n"
+        );
+        assert_eq!(git_ok(tr.path(), &["stash", "list"]), stash_before);
+        assert!(
+            stderr.contains("feat/x") && stderr.contains("--no-rebase"),
+            "stderr must carry the skip notice naming the branch and --no-rebase:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("--no-rebase") && !stdout.contains("uncommitted"),
+            "the skip notice must stay off stdout:\n{stdout}"
+        );
+        let receipt = read_receipt(home.path(), &session);
+        assert!(
+            receipt.contains("my-agent"),
+            "feat/x should be re-registered with my-agent; receipt:\n{receipt}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "A modified tracked file alone blocks the rebase": the
+/// exact GP-87 shape — one modified tracked file and nothing untracked, which
+/// git itself refuses to rebase over.
+#[test]
+#[serial]
+fn add_skips_the_rebase_over_a_modified_tracked_file() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let edited = "# edited, not committed\n";
+        fs::write(wt.join("README.md"), edited).expect("modify tracked");
+        assert_eq!(
+            git_ok(&wt, &["status", "--porcelain"]),
+            "M README.md",
+            "the only change must be the modified tracked file"
+        );
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+
+        let out = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(out.status.success(), "add failed; stderr:\n{stderr}");
+        assert_eq!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(fs::read_to_string(wt.join("README.md")).unwrap(), edited);
+        assert!(
+            stderr.contains("rebase skipped for 'feat/x'") && stderr.contains("--no-rebase"),
+            "stderr must carry the skip notice:\n{stderr}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "A worktree whose status cannot be read is not rebased":
+/// the kept worktree is still registered but its directory is gone, so
+/// `git status` fails there.
+#[test]
+#[serial]
+fn add_skips_the_rebase_when_the_worktree_status_cannot_be_read() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let tip_before = branch_tip(tr.path(), "feat/x").expect("feat/x exists");
+        fs::remove_dir_all(&wt).expect("delete the kept worktree's directory");
+
+        let out = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(
+            stderr.contains("rebase skipped for 'feat/x'")
+                && stderr.contains("could not check its worktree")
+                && stderr.contains("--no-rebase"),
+            "a failed status check must skip the rebase with the notice:\n{stderr}"
+        );
+        assert_eq!(
+            branch_tip(tr.path(), "feat/x").as_deref(),
+            Some(tip_before.as_str()),
+            "feat/x must not be rebased; stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("rebase onto main failed"),
+            "add must not attempt the rebase:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("error: Worktree: git status failed"),
+            "the status failure must not abort add:\n{stderr}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "git-paw-managed files alone do not block the rebase".
+#[test]
+#[serial]
+fn add_rebases_a_kept_worktree_whose_only_changes_are_managed() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fs::create_dir_all(wt.join(".git-paw/tmp")).expect("create managed dir");
+        fs::write(wt.join(".git-paw/tmp/state.txt"), "git-paw state\n").expect("managed file");
+
+        let out = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(out.status.success(), "add failed; stderr:\n{stderr}");
+        assert!(
+            is_ancestor(tr.path(), "main", "feat/x"),
+            "feat/x should be rebased onto main"
+        );
+        assert!(
+            !stderr.contains("--no-rebase"),
+            "no skip notice expected for managed-only changes:\n{stderr}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "Explicit --no-rebase on a dirty worktree prints no skip
+/// notice".
+#[test]
+#[serial]
+fn add_no_rebase_on_a_dirty_worktree_prints_no_notice() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fs::write(wt.join("scratch.txt"), "untracked work\n").expect("write untracked");
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+
+        let out = paw(
+            tr.path(),
+            home.path(),
+            &tmux_env,
+            &path_env,
+            &add_args(&["--no-rebase"]),
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(
+            out.status.success(),
+            "add --no-rebase failed; stderr:\n{stderr}"
+        );
+        assert_eq!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            fs::read_to_string(wt.join("scratch.txt")).unwrap(),
+            "untracked work\n"
+        );
+        assert!(
+            !stderr.contains("rebase skipped"),
+            "an explicit --no-rebase prints no skip notice:\n{stderr}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "--no-rebase keeps the branch on its base".
+#[test]
+#[serial]
+fn add_no_rebase_keeps_a_clean_kept_worktree_on_its_base() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+        let kept = paw(
+            tr.path(),
+            home.path(),
+            &tmux_env,
+            &path_env,
+            &add_args(&["--no-rebase"]),
+        );
+        assert!(
+            kept.status.success(),
+            "add --no-rebase failed; stderr:\n{}",
+            String::from_utf8_lossy(&kept.stderr)
+        );
+        assert_eq!(
+            git_ok(&wt, &["rev-parse", "HEAD"]),
+            head_before,
+            "--no-rebase must leave feat/x's HEAD unchanged"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "A clean existing branch is rebased by default".
+#[test]
+#[serial]
+fn add_rebases_a_clean_kept_worktree_by_default() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("work.txt", "agent work\n"),
+        ("main2.txt", "main\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+        let rebased = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stderr = String::from_utf8_lossy(&rebased.stderr).to_string();
+        assert!(rebased.status.success(), "add failed; stderr:\n{stderr}");
+        assert!(
+            is_ancestor(tr.path(), "main", "feat/x"),
+            "a clean kept feat/x should be rebased onto main by default"
+        );
+        assert_ne!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
+        assert!(
+            !stderr.contains("rebase skipped"),
+            "a clean worktree prints no skip notice:\n{stderr}"
+        );
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Maps to scenario "A failed rebase names --no-rebase and attaches nothing".
+#[test]
+#[serial]
+fn a_failed_add_rebase_names_no_rebase_and_attaches_nothing() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let bin = TempDir::new().unwrap();
+    let path_env = write_swap_config(tr.path(), bin.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    // Both sides add the same file with different content, so the rebase
+    // conflicts.
+    let (session, wt) = kept_worktree_behind_main(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &path_env,
+        ("shared.txt", "branch side\n"),
+        ("shared.txt", "main side\n"),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let head_before = git_ok(&wt, &["rev-parse", "HEAD"]);
+        let panes_before = list_pane_count(&tmux_env, &session);
+        let receipt_before = read_receipt(home.path(), &session);
+
+        let out = paw(tr.path(), home.path(), &tmux_env, &path_env, &add_args(&[]));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        assert!(!out.status.success(), "a conflicting rebase must fail add");
+        assert!(
+            stderr.contains("rebase onto main failed") && stderr.contains("--no-rebase"),
+            "the error must keep git's text and name --no-rebase:\n{stderr}"
+        );
+        assert_eq!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(list_pane_count(&tmux_env, &session), panes_before);
+        assert_eq!(read_receipt(home.path(), &session), receipt_before);
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
