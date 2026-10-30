@@ -12,6 +12,11 @@ ignore = [
     # ratatui publishes a release with a fixed lru version. Ignored on
     # 2026-04-14 during the v0.4.0 release audit.
     "RUSTSEC-2026-0002",
+
+    # rmcp < 3.9 reads HTTP client response bodies without a size limit
+    # (RUSTSEC-2026-0462). git-paw uses only the stdio and server features,
+    # not the reqwest or unix-socket clients. Remove when rmcp is 3.9 or later.
+    "RUSTSEC-2026-0462",
 ]
 
 [licenses]
