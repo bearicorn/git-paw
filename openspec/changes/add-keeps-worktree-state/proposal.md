@@ -30,8 +30,11 @@ the new tip in the middle of its task. `start` has a `--no-rebase` opt-out; `add
 ### Modified Capabilities
 
 - `git-add-remove-branch`: *git paw add subcommand* gains `--no-rebase`; *Worktree creation reuses
-  start conventions* states `add`'s rebase step with `start`'s semantics; a new requirement,
-  *add never rebases over uncommitted work*, covers the dirty-worktree case.
+  start conventions* states `add`'s rebase step with `start`'s semantics; new requirements
+  (*add never rebases over uncommitted work*, *add judges uncommitted work as remove does*,
+  *add treats an unreadable worktree as dirty*, *add attaches a dirty worktree without a
+  rebase*, *A failed add rebase names --no-rebase*)
+  cover the dirty-worktree case.
 
 ## Impact
 

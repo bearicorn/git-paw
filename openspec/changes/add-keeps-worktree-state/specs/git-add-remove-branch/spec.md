@@ -107,12 +107,6 @@ SHALL NOT be rebased, regardless of the flag.
 
 When `git paw add` would rebase a branch that is checked out in an existing worktree, the system SHALL first check that worktree for uncommitted changes, and when it has any, `add` SHALL NOT rebase the branch and SHALL NOT stash, commit, reset, check out over, or otherwise modify or discard any of those changes.
 
-A worktree has uncommitted changes when the uncommitted-work detection used by `remove` (NUL-delimited `git status --porcelain -z`, per "Robust uncommitted-work detection") reports at least one entry — modified, staged, renamed, deleted or untracked — that is not git-paw-managed under "Uncommitted-work safety". A worktree whose only entries are git-paw-managed SHALL be treated as clean.
-
-On a worktree with uncommitted changes, `add` SHALL continue exactly as if `--no-rebase` had been passed: it SHALL reuse the worktree, attach the agent on the branch's current HEAD and exit zero. It SHALL print one notice on stderr (never stdout) that names the branch, says the rebase was skipped because the worktree has uncommitted changes, and names `--no-rebase`. When `--no-rebase` is passed, no check is needed and no skip notice SHALL be printed.
-
-When a rebase that `add` does attempt fails (for example a conflict, or git refusing for a state the detection did not report), `add` SHALL exit non-zero before spawning a pane or changing the session JSON, the branch SHALL be left at its pre-rebase HEAD under `create_worktree`'s abort contract, and the error SHALL name `--no-rebase`.
-
 #### Scenario: A CLI swap on a dirty kept worktree completes
 
 - **GIVEN** an active session whose agent `feat/x` has a modified tracked file and an untracked file in its worktree
@@ -125,11 +119,18 @@ When a rebase that `add` does attempt fails (for example a conflict, or git refu
 - **AND** `git stash list` SHALL be unchanged
 - **AND** stderr SHALL contain a notice naming `feat/x` and `--no-rebase`
 
-#### Scenario: The skip notice stays off stdout
+#### Scenario: A modified tracked file alone blocks the rebase
 
-- **GIVEN** a kept worktree with uncommitted changes
-- **WHEN** `git paw add` skips its rebase
-- **THEN** the notice SHALL be written to stderr and nothing about the skip SHALL be written to stdout
+- **GIVEN** a kept worktree for `feat/x` whose only change is one modified tracked file
+- **AND** the default branch has gained commits since `feat/x` was based on it
+- **WHEN** the user runs `git paw add feat/x`
+- **THEN** the command SHALL exit zero without rebasing `feat/x`
+- **AND** the modified file SHALL be byte-identical to its state before the command
+- **AND** stderr SHALL contain the skip notice naming `feat/x` and `--no-rebase`
+
+### Requirement: add judges uncommitted work as remove does
+
+`add` SHALL treat a worktree as having uncommitted changes when the uncommitted-work detection used by `remove` (NUL-delimited `git status --porcelain -z`, per "Robust uncommitted-work detection") reports at least one entry — modified, staged, renamed, deleted or untracked — that is not git-paw-managed under "Uncommitted-work safety". A worktree whose only entries are git-paw-managed SHALL be treated as clean.
 
 #### Scenario: git-paw-managed files alone do not block the rebase
 
@@ -139,11 +140,37 @@ When a rebase that `add` does attempt fails (for example a conflict, or git refu
 - **THEN** `feat/x` SHALL be rebased onto the default branch
 - **AND** no skip notice SHALL be printed
 
+### Requirement: add treats an unreadable worktree as dirty
+
+When the uncommitted-work detection fails for the worktree holding the branch, `add` SHALL treat that worktree as having uncommitted changes rather than abort, and its skip notice SHALL say the check failed.
+
+#### Scenario: A worktree whose status cannot be read is not rebased
+
+- **GIVEN** a kept worktree for `feat/x` that is still registered with git but whose directory was deleted
+- **WHEN** the user runs `git paw add feat/x`
+- **THEN** `add` SHALL NOT abort on the failed status check and SHALL NOT attempt the rebase
+- **AND** `feat/x`'s tip SHALL be unchanged
+- **AND** stderr SHALL contain a skip notice naming `feat/x`, the failed check and `--no-rebase`
+
+### Requirement: add attaches a dirty worktree without a rebase
+
+On a worktree with uncommitted changes, `add` SHALL continue exactly as if `--no-rebase` had been passed: it SHALL reuse the worktree, attach the agent on the branch's current HEAD and exit zero. It SHALL print one notice on stderr (never stdout) that names the branch, says the rebase was skipped because the worktree has uncommitted changes, and names `--no-rebase`. When `--no-rebase` is passed, no check is needed and no skip notice SHALL be printed.
+
+#### Scenario: The skip notice stays off stdout
+
+- **GIVEN** a kept worktree with uncommitted changes
+- **WHEN** `git paw add` skips its rebase
+- **THEN** the notice SHALL be written to stderr and nothing about the skip SHALL be written to stdout
+
 #### Scenario: Explicit --no-rebase on a dirty worktree prints no skip notice
 
 - **GIVEN** a kept worktree with uncommitted changes
 - **WHEN** the user runs `git paw add feat/x --no-rebase`
 - **THEN** the agent SHALL be attached, the branch SHALL NOT be rebased, the uncommitted changes SHALL be unchanged, and no skip notice SHALL be printed
+
+### Requirement: A failed add rebase names --no-rebase
+
+When a rebase that `add` does attempt fails (for example a conflict, or git refusing for a state the detection did not report), `add` SHALL exit non-zero before spawning a pane or changing the session JSON, the branch SHALL be left at its pre-rebase HEAD under `create_worktree`'s abort contract, and the error SHALL name `--no-rebase`.
 
 #### Scenario: A failed rebase names --no-rebase and attaches nothing
 

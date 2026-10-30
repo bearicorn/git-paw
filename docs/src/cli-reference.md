@@ -250,6 +250,7 @@ Arguments:
 Options:
       --cli <CLI>              AI CLI for the new pane (defaults to the session's default CLI)
       --from-spec <FROM_SPEC>  Derive branch + CLI from a spec (OpenSpec change, Markdown spec, Spec Kit feature, or Superpowers plan)
+      --no-rebase              Skip rebasing the existing branch onto the default branch before opening its worktree
   -h, --help                   Print help
 ```
 
@@ -258,7 +259,19 @@ Options:
 git paw add feat/new-thing
 git paw add feat/api --cli codex
 git paw add --from-spec add-export
+git paw add feat/api --cli codex --no-rebase
 ```
+
+**Rebase on add.** Like `start`, `add` rebases a branch that already exists onto the default branch before it opens or reuses the worktree; `--no-rebase` skips that and leaves the branch's HEAD unchanged. A branch `add` creates is never rebased. When the branch is already checked out in a worktree that has uncommitted changes (anything other than git-paw's own `.git-paw/` files), `add` skips the rebase on its own: it prints one notice on stderr naming the branch and `--no-rebase`, attaches the agent on the branch's current HEAD, and does not stash, commit, reset or otherwise touch those changes. The same happens when git cannot report the worktree's status (for example its directory was deleted), with a notice saying the check failed. If a rebase that `add` does attempt fails (for example a conflict), `add` exits non-zero before creating a pane or changing the session, the branch stays at its old HEAD, and the error names `--no-rebase`.
+
+**Swapping a worker's CLI.** Detach the agent but keep its worktree, then attach it again with another CLI:
+
+```bash
+git paw remove feat/api --keep-worktree
+git paw add feat/api --cli codex --no-rebase
+```
+
+`--no-rebase` keeps the worker on its current base in the middle of its task; leave it off if you want the branch brought up to date (a worktree with uncommitted changes is never rebased either way).
 
 Validation happens before any side effect: an unknown `--cli` errors with the detected CLI ids, and an unknown `--from-spec` errors with the discovered spec candidates — no worktree or pane is created in either case.
 

@@ -54,6 +54,12 @@ Rebases that **don't** happen:
 - A brand-new branch (one git-paw creates via `git worktree add -b`
   during this launch) is not rebased. It's already at the current
   default-branch tip by construction.
+- `git paw add --no-rebase` attaches an existing branch at its current
+  HEAD, with the same meaning as `start --no-rebase`.
+- `git paw add` onto a branch whose worktree has uncommitted changes
+  (anything besides git-paw's own `.git-paw/` files) skips the rebase on
+  its own, prints a notice on stderr naming `--no-rebase`, and leaves the
+  changes untouched — nothing is stashed, committed or reset.
 
 ### Resolving the default branch without `origin/HEAD`
 
@@ -208,6 +214,7 @@ undisturbed.
 git paw add feat/new-thing              # attach a worktree + pane, session's default CLI
 git paw add feat/api --cli codex        # choose the CLI for the new pane
 git paw add --from-spec add-export      # derive branch + CLI from a discovered spec
+git paw add feat/api --no-rebase        # attach an existing branch without rebasing it
 ```
 
 What it does:
@@ -229,7 +236,11 @@ What it does:
    agent fails with the same "split into multiple sessions" message
    `start` uses.
 4. Creates the worktree (same naming and idempotent-create behaviour as
-   `start`; re-adding an existing worktree reuses it) and attaches the
+   `start`; re-adding an existing worktree reuses it). An existing branch
+   is rebased onto the default branch first unless you pass `--no-rebase`
+   or its worktree has uncommitted changes (see
+   [Rebase on start](#rebase-on-start)); a failed rebase stops `add` before
+   any pane is created, with an error naming `--no-rebase`. It then attaches the
    agent through the **same** boot pipeline a start-time agent uses — the
    broker boot block, the sidecar spec body (`.git-paw/AGENTS.local.md`), and
    the initial prompt are byte-identical.
@@ -259,6 +270,19 @@ restart, at most one sweep-interval of latency.
 pane is created but its prompt is held unsubmitted — the agent stays
 paused with the rest of the session and begins on the next
 `git paw start`.
+
+**Swapping a worker's CLI:** keep the worktree on `remove`, then `add` the
+branch back with the other CLI:
+
+```bash
+git paw remove feat/api --keep-worktree
+git paw add feat/api --cli codex --no-rebase
+```
+
+The worker's uncommitted changes and commits stay as they were.
+`--no-rebase` also keeps it on its current base mid-task; without the flag
+a clean worktree is rebased onto the default branch, while one with
+uncommitted changes is attached as is, with a notice.
 
 ### `git paw remove` — detach a single agent
 

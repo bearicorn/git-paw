@@ -149,11 +149,13 @@ fn run(command: Command) -> Result<(), PawError> {
             branch,
             cli,
             from_spec,
+            no_rebase,
         } => {
             let opts = commands::add::AddOptions {
                 branch,
                 cli,
                 from_spec,
+                no_rebase,
             };
             commands::add::add(&repo_context()?, opts, &mut CliOutput)?;
             Ok(())

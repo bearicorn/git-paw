@@ -293,10 +293,15 @@ pub enum Command {
                       Works on every session built with the agent grid. A live session started \
                       by an earlier git-paw with the tiled layout is refused: stop it and run \
                       `git paw start` to relaunch it in the grid layout.\n\n\
+                      An existing branch is rebased onto the default branch first, as `start` \
+                      does; --no-rebase skips that. When the branch's worktree has uncommitted \
+                      changes, the rebase is skipped automatically (with a notice on stderr) and \
+                      the changes are left untouched.\n\n\
                       Examples:\n  \
                       git paw add feat/new-thing\n  \
                       git paw add feat/api --cli codex\n  \
-                      git paw add --from-spec add-export"
+                      git paw add --from-spec add-export\n  \
+                      git paw add feat/api --cli codex --no-rebase"
     )]
     Add {
         /// Branch to attach. Omit when using --from-spec (the branch is
@@ -322,6 +327,15 @@ pub enum Command {
             help = "Derive branch + CLI from a spec (OpenSpec change, Markdown spec, Spec Kit feature, or Superpowers plan)"
         )]
         from_spec: Option<String>,
+
+        /// Skip rebasing an existing branch onto the default branch before its
+        /// worktree is opened or reused (same meaning as `start --no-rebase`).
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip rebasing the existing branch onto the default branch before opening its worktree"
+        )]
+        no_rebase: bool,
     },
 
     /// Detach a single agent from a running session
@@ -1425,10 +1439,40 @@ mod tests {
                 branch,
                 cli,
                 from_spec,
+                no_rebase,
             } => {
                 assert_eq!(branch.as_deref(), Some("feat/new"));
                 assert!(cli.is_none());
                 assert!(from_spec.is_none());
+                assert!(!no_rebase, "add without --no-rebase parses no_rebase false");
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_no_rebase_parses_with_cli() {
+        let cli = parse(&["add", "feat/x", "--no-rebase", "--cli", "my-agent"]);
+        match cli.command.unwrap() {
+            Command::Add { no_rebase, cli, .. } => {
+                assert!(no_rebase);
+                assert_eq!(cli.as_deref(), Some("my-agent"));
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_no_rebase_combines_with_from_spec() {
+        let cli = parse(&["add", "--from-spec", "add-export", "--no-rebase"]);
+        match cli.command.unwrap() {
+            Command::Add {
+                no_rebase,
+                from_spec,
+                ..
+            } => {
+                assert!(no_rebase);
+                assert_eq!(from_spec.as_deref(), Some("add-export"));
             }
             other => panic!("expected Add, got {other:?}"),
         }
@@ -1740,7 +1784,13 @@ mod tests {
             ),
             (
                 &["add", "--help"],
-                &["--cli", "--from-spec", "git paw add feat/api --cli codex"],
+                &[
+                    "--cli",
+                    "--from-spec",
+                    "git paw add feat/api --cli codex",
+                    "--no-rebase",
+                    "Skip rebasing the existing branch onto the default branch",
+                ],
             ),
             (
                 &["remove", "--help"],

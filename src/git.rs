@@ -273,10 +273,10 @@ pub struct WorktreeCreation {
 /// Returns the path of the worktree (main repo or any sibling worktree) that
 /// currently has `branch` checked out, if any.
 ///
-/// Private, and reached only from [`rebase_branch_onto_default_with`], which
-/// already carries a runner — so unlike the public entry points there is no
-/// no-runner wrapper to preserve.
-fn find_worktree_for_branch_with(
+/// Reached from [`rebase_branch_onto_default_with`] and from `git paw add`'s
+/// uncommitted-work check, both of which pass a runner — so unlike the public
+/// entry points there is no no-runner wrapper.
+pub(crate) fn find_worktree_for_branch_with(
     runner: &dyn CommandRunner,
     repo_root: &Path,
     branch: &str,
@@ -303,6 +303,12 @@ fn find_worktree_for_branch_with(
     }
     Ok(None)
 }
+
+/// Prefix of the [`PawError::WorktreeError`] that
+/// [`rebase_branch_onto_default_with`] returns when the rebase fails. Callers
+/// that react to that failure match on this constant, so rewording it cannot
+/// silently break them.
+pub(crate) const REBASE_FAILED: &str = "rebase onto main failed";
 
 /// Rebases `branch` onto the repo's default branch, running inside a live
 /// worktree if `branch` is checked out mid-session.
@@ -361,7 +367,7 @@ pub(crate) fn rebase_branch_onto_default_with(
             let _ = runner.run("git", &["-C", &repo_cwd, "checkout", orig]);
         }
         return Err(PawError::WorktreeError(format!(
-            "rebase onto main failed: {stderr}"
+            "{REBASE_FAILED}: {stderr}"
         )));
     }
 
