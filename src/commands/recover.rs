@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::agent_cli::{LaunchSession, resolve_for_launch};
 use crate::broker;
 use crate::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
 use crate::error::PawError;
@@ -20,41 +21,22 @@ use super::helpers::{
 use super::launch::LaunchOutcome;
 use super::{CommandContext, Output};
 
-/// Builds the recovery-time CLI launch command for `entry`: the command
-/// configured for the entry's CLI identity ([`config::launch_command`] —
-/// `entry.cli` is the `[clis.<name>]` key, not necessarily a binary name),
-/// the resolved approval flags for `approval` (`supervisor-config`'s "every
-/// launch path that spawns a worker CLI" requirement — recovery is a launch
-/// path like any other), and, when the entry carries an assigned
-/// `cli_session_id` AND its CLI resolves a `resume_args` template, the
-/// rendered resume arguments — restoring the worker's conversation context
-/// (`worker-session-id-capture` design D4). Resume args are appended AFTER
-/// the approval flags, mirroring how `attach_agent` appends session-id args
-/// after the bare CLI command.
+/// Builds the pane command that resumes `entry`'s recorded session id. A CLI
+/// without a resume template launches fresh.
 ///
-/// Recovery never fails because a resume template is absent: an entry
-/// without an id, or a CLI without a resume template, launches with just its
-/// approval flags, exactly as every other launch path does for an
-/// unconfigured CLI.
+/// # Errors
+///
+/// Refuses an ambiguous PATH shim.
 fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     entry: &WorktreeEntry,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
-) -> String {
-    let agent_flags = config::resolve_approval_flags(&entry.cli, &approval, clis);
-    let launch = config::launch_command(&entry.cli, clis);
-    let mut cli_command = if agent_flags.is_empty() {
-        launch
-    } else {
-        format!("{launch} {agent_flags}")
-    };
-    if let Some(id) = entry.cli_session_id.as_deref()
-        && let Some(args) = config::resolve_resume_args(&entry.cli, id, clis)
-    {
-        cli_command.push(' ');
-        cli_command.push_str(&args);
-    }
-    cli_command
+) -> Result<String, PawError> {
+    let session = entry
+        .cli_session_id
+        .as_deref()
+        .map_or(LaunchSession::None, LaunchSession::Resume);
+    Ok(resolve_for_launch(&entry.cli, clis)?.launch_command(&approval, session))
 }
 
 /// Options for [`recover`].
@@ -293,12 +275,14 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
         surfaces: existing
             .worktrees
             .iter()
-            .map(|entry| SurfaceSpec {
-                label: entry.branch.clone(),
-                owner: entry.worktree_path.clone(),
-                launch_command: cli_command_for_recovery(entry, approval, clis),
+            .map(|entry| {
+                Ok(SurfaceSpec {
+                    label: entry.branch.clone(),
+                    owner: entry.worktree_path.clone(),
+                    launch_command: cli_command_for_recovery(entry, approval, clis)?,
+                })
             })
-            .collect(),
+            .collect::<Result<_, PawError>>()?,
         env: broker_url
             .map(|url| vec![("GIT_PAW_BROKER_URL".to_string(), url.to_string())])
             .unwrap_or_default(),
@@ -358,16 +342,18 @@ fn recover_supervisor_session(
     let agent_panes: Vec<SurfaceSpec> = existing
         .worktrees
         .iter()
-        .map(|entry| SurfaceSpec {
-            label: entry.branch.clone(),
-            owner: entry.worktree_path.clone(),
-            launch_command: cli_command_for_recovery(
-                entry,
-                supervisor_cfg.agent_approval,
-                &config.clis,
-            ),
+        .map(|entry| {
+            Ok(SurfaceSpec {
+                label: entry.branch.clone(),
+                owner: entry.worktree_path.clone(),
+                launch_command: cli_command_for_recovery(
+                    entry,
+                    supervisor_cfg.agent_approval,
+                    &config.clis,
+                )?,
+            })
         })
-        .collect();
+        .collect::<Result<_, PawError>>()?;
 
     let env_vars: Vec<(String, String)> = broker_url
         .map(|url| vec![("GIT_PAW_BROKER_URL".to_string(), url.to_string())])
@@ -418,7 +404,7 @@ mod tests {
         let e = entry("claude", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
             "claude --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
@@ -429,7 +415,7 @@ mod tests {
         let e = entry("claude", None);
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
             "claude"
         );
     }
@@ -440,7 +426,7 @@ mod tests {
         let e = entry("my-agent", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
             "my-agent"
         );
     }
@@ -454,7 +440,7 @@ mod tests {
         let e = entry("claude", None);
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
             "claude --permission-mode acceptEdits"
         );
     }
@@ -479,11 +465,42 @@ mod tests {
                 resume_args: Some("--continue {{SESSION_ID}}".to_string()),
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::FullAuto, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::FullAuto, &clis).unwrap(),
             "my-agent --my-flag --continue 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
+        );
+    }
+
+    /// Spec scenario "Recovery builds the full command" (`cli-provider`).
+    #[test]
+    fn recovery_carries_approval_flags_then_resume_args() {
+        let e = entry("claude", Some("abc-123"));
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &HashMap::new()).unwrap(),
+            "claude --permission-mode acceptEdits --resume abc-123"
+        );
+    }
+
+    /// A recovered worker keeps its entry's `args`, before the approval
+    /// flags, so a per-profile model survives recovery.
+    #[test]
+    fn recovery_carries_the_entry_args() {
+        let e = entry("claude", Some("abc-123"));
+        let clis = HashMap::from([(
+            "claude".to_string(),
+            CustomCli {
+                command: "claude".to_string(),
+                args: Some("--model sonnet".to_string()),
+                ..CustomCli::default()
+            },
+        )]);
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
+            "claude --model sonnet --permission-mode acceptEdits --resume abc-123"
         );
     }
 
@@ -495,7 +512,7 @@ mod tests {
         let e = entry("unmapped-cli", None);
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
             "unmapped-cli"
         );
     }

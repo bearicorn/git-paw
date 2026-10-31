@@ -204,6 +204,16 @@ pub struct CliProbe {
     pub custom: bool,
 }
 
+/// One `[clis.<id>]` entry and whether a launch would refuse it as an
+/// ambiguous PATH shim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliIdentityProbe {
+    /// The entry's key.
+    pub id: String,
+    /// The refusal a launch would report, or `None` when it is unambiguous.
+    pub ambiguity: Option<String>,
+}
+
 /// Configuration facts read from `.git-paw/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigProbe {
@@ -403,6 +413,8 @@ pub struct Probes {
     pub environment: EnvironmentProbe,
     /// Detected AI CLIs.
     pub clis: Vec<CliProbe>,
+    /// Every `[clis.*]` entry's launch identity.
+    pub cli_identities: Vec<CliIdentityProbe>,
     /// Configuration facts.
     pub config: ConfigProbe,
     /// Spec-system facts.
@@ -613,6 +625,31 @@ pub fn check_clis(clis: &[CliProbe]) -> Vec<CheckResult> {
         "detected CLIs",
         format!("{} available: {listed}", clis.len()),
     )]
+}
+
+/// One row per `[clis.*]` entry: ✗ when a launch would refuse it as an
+/// ambiguous PATH shim, so doctor is never green while `start` refuses.
+#[must_use]
+pub fn check_cli_identities(entries: &[CliIdentityProbe]) -> Vec<CheckResult> {
+    entries
+        .iter()
+        .map(|entry| {
+            let name = format!("[clis.{}]", entry.id);
+            match &entry.ambiguity {
+                None => CheckResult::ok(GROUP_CLIS, name, "launches unambiguously"),
+                Some(error) => CheckResult::fail(
+                    GROUP_CLIS,
+                    name,
+                    error.clone(),
+                    format!(
+                        "rename the [clis.{id}] key, or set [clis.{id}] command to the full \
+                         path of the executable you mean",
+                        id = entry.id
+                    ),
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Config checks: the file parses, the resolved worktree placement, and any
@@ -1224,6 +1261,7 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     let mut checks = check_environment(&probes.environment);
     checks.push(check_sandbox(&probes.sandbox));
     checks.extend(check_clis(&probes.clis));
+    checks.extend(check_cli_identities(&probes.cli_identities));
     checks.extend(crate::cli_setup::doctor::check_cli_setup(&probes.cli_setup));
     checks.extend(crate::cli_setup::doctor::check_broad_grants(
         &probes.broad_grants,
@@ -1460,6 +1498,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
     Probes {
         environment,
         clis: probe_clis(&config),
+        cli_identities: probe_cli_identities(&config),
         cli_setup: probe_cli_setup(repo_root),
         broad_grants: probe_broad_grants(repo_root),
         grant_residue: probe_grant_residue(repo_root),
@@ -1517,6 +1556,21 @@ fn probe_clis(config: &PawConfig) -> Vec<CliProbe> {
         .map(|cli| CliProbe {
             name: cli.binary_name,
             custom: cli.source == crate::detect::CliSource::Custom,
+        })
+        .collect()
+}
+
+/// Sorted by key so the report is stable.
+fn probe_cli_identities(config: &PawConfig) -> Vec<CliIdentityProbe> {
+    let mut ids: Vec<&String> = config.clis.keys().collect();
+    ids.sort();
+    ids.into_iter()
+        .map(|id| CliIdentityProbe {
+            id: id.clone(),
+            ambiguity: crate::agent_cli::CliProfile::resolve(id, &config.clis)
+                .ensure_unambiguous()
+                .err()
+                .map(|e| e.to_string()),
         })
         .collect()
 }

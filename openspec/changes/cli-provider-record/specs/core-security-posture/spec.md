@@ -17,7 +17,7 @@ the reader adapts to their CLI, OS, and stack.
 - **WHEN** a reader follows the sandbox chapter
 - **THEN** it provides a worked macOS (`sandbox-exec`) example and a worked Linux/WSL (`bwrap`) example, each confining writes to the worktree while leaving reads and network open, framed as adapt-to-your-setup starting points
 
-#### Scenario: The wrapper is pointed at by `command`
+#### Scenario: PATH-resolvable wrapper requirement is documented
 - **WHEN** the docs explain how to point a CLI at the wrapper
 - **THEN** they state that git-paw launches the executable `command` resolves to, so `command` may be the wrapper's path and the wrapper need not be on PATH under the entry's name
 - **AND** they state that a wrapper kept on PATH under the entry's name must be the same file `command` resolves to, or git-paw refuses to launch that CLI rather than guess which one was meant

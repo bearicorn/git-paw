@@ -29,6 +29,7 @@
 /// CLI-name table.
 pub const DEFAULT_SUBMIT_DELAY_MS: u64 = 1500;
 
+pub mod agent_cli;
 pub mod agents;
 pub mod broker;
 pub mod cli;

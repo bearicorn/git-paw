@@ -30,6 +30,7 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
+pub(crate) use prompt_profile::merge_prompt_profile;
 pub use prompt_profile::{
     CliPromptProfile, CliPromptProfileOverride, claude_prompt_profile, resolve_prompt_profile,
 };
@@ -673,6 +674,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_approval_args(&config, path)?;
             validate_session_templates(&config, path)?;
             validate_headless_args(&config, path)?;
+            validate_cli_families(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -820,6 +822,26 @@ fn validate_headless_args(config: &PawConfig, path: &Path) -> Result<(), PawErro
                 "{}: [clis.{name}] headless_args is empty; omit it to use the built-in \
                  headless form, or set the arguments that run one non-interactive turn",
                 path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a `[clis.<name>].family` that names no in-tree provider family.
+///
+/// A typo'd family would otherwise resolve `generic` and silently drop the
+/// native flags, templates and MCP form the operator asked for, so it fails
+/// the load, naming the key and the accepted values.
+fn validate_cli_families(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        if let Some(family) = cli.family.as_deref()
+            && family.parse::<crate::agent_cli::CliFamily>().is_err()
+        {
+            return Err(PawError::ConfigError(format!(
+                "{}: [clis.{name}] family has unknown value '{family}' (expected one of: {})",
+                path.display(),
+                crate::agent_cli::CliFamily::accepted_names()
             )));
         }
     }
@@ -1214,10 +1236,22 @@ worktree_placement = "child"
 # honoured from this file alone; restart the MCP server after changing it).
 # allow_repo_writes = false
 
-# Custom CLI definitions.
+# Custom CLI definitions. The pane launches `command` (an executable on PATH
+# or a path, e.g. a wrapper script); a CLI with no entry launches by its name.
 # [clis.my-agent]
 # command = "/usr/local/bin/my-agent"
 # display_name = "My Agent"
+#
+# Arguments appended to every launch of this CLI, before the approval flags.
+# For per-worker models, give each worker profile its own [clis.*] entry.
+# Put permission flags in approval_args, not here.
+# args = "--model sonnet"
+#
+# The provider family this CLI is a variant of: "claude", "codex", "agy",
+# "qwen", "cursor-agent" or "generic". It supplies that CLI's native approval
+# flags, session templates and MCP default. Unset, a known CLI name keeps its
+# own family and any other name is "generic".
+# family = "claude"
 #
 # Templates for assigning/resuming this CLI's own session id at launch and
 # recovery. Each MUST contain {{SESSION_ID}}; omit both to launch unchanged

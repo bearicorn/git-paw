@@ -259,33 +259,28 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
     })
 }
 
-/// Resolves the leading binary token of `cli`, matching the convention
-/// [`super::resolve_submit_delay_ms`] uses so a CLI invoked with trailing
-/// flags (e.g. `"mycli --foo"`) still keys on its own `[clis.<name>]` entry.
-fn base_token(cli: &str) -> &str {
-    cli.split_whitespace().next().unwrap_or(cli)
-}
-
-/// Resolves the effective [`CliPromptProfile`] for `cli`, consulting (per
-/// field, in order): the `[clis.<name>].prompt_profile` override, then the
-/// embedded Claude Code default ([`claude_prompt_profile`]).
+/// Resolves the effective [`CliPromptProfile`] for the CLI identity `cli`:
+/// the `[clis.<id>].prompt_profile` override field by field over the
+/// provider family's profile.
 ///
-/// An absent override — either no `[clis.<name>]` entry at all, an entry
-/// with no `prompt_profile` table, or a `prompt_profile` table missing a
-/// given field — resolves that field to the embedded default rather than
-/// empty (D2). A CLI with no profile of its own therefore degrades to
-/// today's behaviour rather than to no detection at all (`cli-prompt-profiles`
-/// capability, "An unrecognised CLI resolves a usable profile").
+/// An absent override falls back to the default for that field, not to an
+/// empty value, so a CLI with no profile still gets usable detection (D2).
 #[must_use]
 pub fn resolve_prompt_profile<S: std::hash::BuildHasher>(
     cli: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> CliPromptProfile {
-    let default = claude_prompt_profile();
-    let Some(override_) = clis
-        .get(base_token(cli))
-        .and_then(|c| c.prompt_profile.as_ref())
-    else {
+    crate::agent_cli::CliProfile::resolve(cli, clis).prompt_profile()
+}
+
+/// Overlays `override_` on `default` field by field: a field the override
+/// sets wins, every other field keeps the default's value.
+#[must_use]
+pub(crate) fn merge_prompt_profile(
+    default: &CliPromptProfile,
+    override_: Option<&CliPromptProfileOverride>,
+) -> CliPromptProfile {
+    let Some(override_) = override_ else {
         return default.clone();
     };
     CliPromptProfile {
@@ -442,6 +437,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         assert_eq!(
@@ -471,6 +468,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         assert_eq!(
@@ -518,6 +517,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         let resolved = resolve_prompt_profile("mycli", &clis);
@@ -560,6 +561,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         assert_eq!(
@@ -587,6 +590,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         assert_eq!(

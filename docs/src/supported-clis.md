@@ -48,6 +48,63 @@ detected list, so there a `[clis.cursor]` entry is the route to take.
 interactive picker, and the picker is built from the detected list — an
 undetected `cursor` has no row to pre-select, so the setting has no effect.
 
+## Provider families
+
+Every agent CLI resolves into one provider **family**, and the family supplies
+the facts git-paw has encoded for that CLI. Only five CLIs have encoded facts;
+every other CLI — the remaining detected ones and every unrecognised custom
+entry — resolves the `generic` family.
+
+| Family | Known CLI | Native approval flags | Session-id / resume | Headless form | MCP boot form |
+|--------|-----------|-----------------------|---------------------|---------------|---------------|
+| `claude` | `claude` | `auto`, `full-auto` | Yes | `-p` | Yes |
+| `codex` | `codex` | `auto`, `full-auto` | No | `exec` | Yes |
+| `agy` | `agy` | `full-auto` | No | No | Yes |
+| `qwen` | `qwen` | `full-auto` | No | No | No |
+| `cursor-agent` | `cursor-agent` | none | No | No | Yes |
+| `generic` | every other CLI | none | No | No | No |
+
+`generic` is the fallback: git-paw launches the CLI and observes its terminal
+with the default prompt-shape profile, exactly as it treats any CLI it knows
+nothing about. Nothing fails because a CLI is `generic`.
+
+### Declaring a variant
+
+A `[clis.<name>]` entry whose key is not a known CLI name is `generic` unless
+it says otherwise. To make a Claude Code variant (another config directory, a
+pinned model, a wrapper script) behave like Claude Code, declare its family:
+
+```toml
+[clis.claude-oss]
+command = "/home/me/bin/claude-oss"   # binary or wrapper the pane launches
+family = "claude"                     # Claude's flags, templates, MCP form
+args = "--model sonnet"               # appended to every launch
+```
+
+The family is never guessed from `command`: `[clis.foo] command =
+"/usr/local/bin/claude"` stays `generic` until it declares `family = "claude"`.
+Any override on the entry (`approval_args`, `session_id_args`, `resume_args`,
+`headless_args`, `mcp`) still wins over the family's row. An unknown `family`
+value fails the config load and lists the accepted values.
+
+### Migrating from PATH shims
+
+Before v0.17.0 git-paw launched a custom entry by its key, so each entry
+needed an executable of that name on `PATH` — often a small shim that set an
+environment variable and passed fixed flags. The configured `command` is
+launched now, so the shim is no longer needed:
+
+- point `command` at the real binary, or at the wrapper script itself;
+- move fixed flags (model, effort) into `args`;
+- move permission flags into `approval_args`, not `args`, so they follow the
+  session's approval level instead of being repeated;
+- add `family` for a variant of a known CLI.
+
+A shim left on `PATH` under the entry's key that is a different file from
+`command` makes the launch ambiguous, and git-paw refuses to start that CLI
+until you rename the key or set `command` to the full path you mean;
+`git paw doctor` flags it too — see [Custom CLIs](configuration/README.md#custom-clis).
+
 ## Headless (one-shot) form
 
 The `--unattended` drive loop can hand a judgment call to the orchestrator CLI
@@ -114,7 +171,7 @@ Custom CLIs appear alongside detected ones in the selection prompt. See [Configu
 
 ## Deduplication
 
-If a custom CLI has the same binary name as a detected one, the custom definition takes precedence. This lets you override the path or display name of a detected CLI.
+If a custom CLI has the same binary name as a detected one, the custom definition takes precedence. This lets you override the path or display name of a detected CLI: `[clis.claude] command = "/opt/alt/claude"` launches that install, and keeps the `claude` family because `claude` is a known name.
 
 ## Missing CLIs
 

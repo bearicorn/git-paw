@@ -432,43 +432,29 @@ fn slugify_branch(branch: &str) -> String {
     crate::broker::messages::slugify_branch(branch)
 }
 
-/// Built-in CLI identities known to speak MCP (Model Context Protocol) well
-/// enough to receive the MCP tool form of the boot block (capability
-/// `mcp-agent-publish`). This is step 2 of [`cli_speaks_mcp`]'s resolution
-/// order — consulted only when the identity's `[clis.<name>]` entry does not
-/// state an explicit `mcp` value.
-///
-/// An identity this list has no opinion on is treated as non-MCP (design D4):
-/// a boot block naming tools a CLI cannot call would strand the agent at t=0,
-/// so the safe default is the helper-script form.
-const MCP_CAPABLE_CLIS: &[&str] = &["claude", "codex", "cursor-agent", "agy"];
-
 /// Returns whether the CLI *identity* `cli` speaks MCP, deciding which form of
 /// the boot block it receives.
 ///
-/// Resolution order, all keyed on the leading whitespace-delimited token of
-/// `cli` (identities may carry trailing flags, e.g. `"claude --foo"`):
+/// Delegates to the CLI's resolved record
+/// ([`crate::agent_cli::CliProfile::mcp_capable`]), keyed on the leading
+/// whitespace-delimited token of `cli`:
 ///
 /// 1. An explicit `mcp = true` / `mcp = false` on the matching
-///    `[clis.<token>]` entry wins outright — including over the built-in
-///    table, so a built-in MCP CLI can be opted out.
-/// 2. Otherwise the built-in [`MCP_CAPABLE_CLIS`] table.
-/// 3. Otherwise not MCP-capable, so the helper-script form is used.
+///    `[clis.<id>]` entry wins outright — including over the family default,
+///    so a built-in MCP CLI can be opted out.
+/// 2. Otherwise the default of the CLI's provider family: the `claude`,
+///    `codex`, `cursor-agent` and `agy` families are MCP-capable, and a known
+///    CLI resolves its own family.
+/// 3. Otherwise not MCP-capable, so the helper-script form is used (a boot
+///    block naming tools a CLI cannot call would strand the agent at t=0).
 ///
-/// The lookup uses the identity — the `[clis.<name>]` key, or a built-in /
-/// pass-through name — and deliberately never the resolved launch command.
-/// `[clis.claude-oss] command = "claude"` is a variant that reads a different
-/// config dir, which may not have git-paw's MCP server registered; inheriting
-/// `claude`'s MCP form from the command's basename would hand that agent a
-/// boot block naming tools it cannot call and strand it at t=0. The user opts
-/// in with `mcp = true` once the server is registered for that variant.
+/// The lookup uses the identity, never the resolved launch command:
+/// `[clis.claude-oss] command = "claude"` may read a config dir without
+/// git-paw's MCP server registered, so it gets the MCP form only by opting
+/// in — with `mcp = true` or by declaring `family = "claude"`.
 #[must_use]
 pub fn cli_speaks_mcp<S: BuildHasher>(cli: &str, clis: &HashMap<String, CustomCli, S>) -> bool {
-    let identity = cli.split_whitespace().next().unwrap_or(cli);
-    match clis.get(identity).and_then(|entry| entry.mcp) {
-        Some(explicit) => explicit,
-        None => MCP_CAPABLE_CLIS.contains(&identity),
-    }
+    crate::agent_cli::CliProfile::resolve(cli, clis).mcp_capable()
 }
 
 /// Builds the standardized boot instruction block for agent initialization.
@@ -5209,6 +5195,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 resume_args: None,
                 mcp,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         clis

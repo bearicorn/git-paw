@@ -65,6 +65,8 @@ fn clis_with_adversarial_profile() -> std::collections::HashMap<String, CustomCl
             resume_args: None,
             mcp: None,
             headless_args: None,
+            family: None,
+            args: None,
         },
     );
     clis
