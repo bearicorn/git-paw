@@ -2,7 +2,9 @@
 
 ## Purpose
 Keeps the bundled supervisor and coordination skills project-agnostic by driving stack- and backend-specific content through config-sourced placeholder substitutions (`{{DOC_TOOL_COMMAND}}`, `{{DEV_ALLOWLIST_PRESET}}`, `{{SPEC_PATH_DOCTRINE}}`) that read naturally when empty, and enforcing a CI no-language-leak audit that flags hardcoded implementation-language tokens or project-specific commit conventions in the exported skills.
+
 ## Requirements
+
 ### Requirement: New supervisor config keys for doc tooling
 
 The system SHALL accept new `[supervisor]` config fields
@@ -295,7 +297,7 @@ The rendered spec-path doctrine (the `SPEC_PATH_DOCTRINE` skill substitution) SH
 
 ### Requirement: Spec Kit boot task-prompt does not point at the OpenSpec artifacts path
 
-The per-agent task prompt built by `build_task_prompt` for a `SpecBackendKind::SpecKit` entry SHALL NOT direct the worker to an `openspec/changes/<id>/` sibling directory — the Spec Kit decomposition already embeds the feature spec, implementation plan, and task phase inline in the sidecar, so no such directory exists to read. The `Markdown` backend's task prompt is unaffected.
+The per-agent task prompt built by `build_task_prompt` for a `SpecBackendKind::SpecKit` entry SHALL NOT direct the worker to an `openspec/changes/<id>/` sibling directory — the Spec Kit decomposition already embeds the feature spec, implementation plan, and task phase inline in the sidecar, so no such directory exists to read.
 
 #### Scenario: Spec Kit task prompt does not reference the OpenSpec artifacts path
 
@@ -372,3 +374,17 @@ The framing sentences of the headless escalation context SHALL be authored in th
 - **WHEN** the context renderer's source is inspected
 - **THEN** its framing prose SHALL be loaded via `include_str!` of the bundled `assets/escalation-framing.md` (from `src/supervisor/escalation.rs`, `include_str!("../../assets/escalation-framing.md")`)
 
+### Requirement: Markdown boot task-prompt does not point at the OpenSpec artifacts path
+
+The per-agent task prompt for a `SpecBackendKind::Markdown` entry SHALL point the worker at the gitignored sidecar, which carries the full spec body, and SHALL state that the single spec file is the whole contract. It SHALL NOT direct the worker to an `openspec/changes/<id>/` directory, which a Markdown spec does not have.
+
+#### Scenario: Markdown task prompt does not reference the OpenSpec artifacts path
+
+- **WHEN** the per-agent task prompt is built for a `SpecBackendKind::Markdown` entry
+- **THEN** it SHALL point the agent at the gitignored sidecar
+- **AND** it SHALL NOT contain `openspec/changes/`
+
+#### Scenario: No non-OpenSpec task prompt names the OpenSpec artifacts path
+
+- **WHEN** the per-agent task prompt is built for a Markdown, Spec Kit and Superpowers entry
+- **THEN** none of the three prompts SHALL contain `openspec/changes/`
