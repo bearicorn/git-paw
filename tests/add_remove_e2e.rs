@@ -2255,8 +2255,7 @@ fn kept_worktree_behind_main(
 }
 
 /// Maps to scenarios "A CLI swap on a dirty kept worktree completes" and "The
-/// skip notice stays off stdout" (the GP-87 repro: before the fix this `add`
-/// failed with `rebase onto main failed`).
+/// skip notice stays off stdout".
 #[test]
 #[serial]
 fn a_cli_swap_on_a_dirty_kept_worktree_completes() {
@@ -2323,7 +2322,7 @@ fn a_cli_swap_on_a_dirty_kept_worktree_completes() {
 }
 
 /// Maps to scenario "A modified tracked file alone blocks the rebase": the
-/// exact GP-87 shape — one modified tracked file and nothing untracked, which
+/// exact CLI-swap shape — one modified tracked file and nothing untracked, which
 /// git itself refuses to rebase over.
 #[test]
 #[serial]

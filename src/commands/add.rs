@@ -307,7 +307,7 @@ pub fn add(
             PawError::WorktreeError(msg) if msg.starts_with(git::REBASE_FAILED) => {
                 PawError::WorktreeError(format!(
                     "{msg}\nhint: run `git paw add {branch} --no-rebase` to attach the branch \
-                 without rebasing it."
+                     without rebasing it."
                 ))
             }
             other => other,

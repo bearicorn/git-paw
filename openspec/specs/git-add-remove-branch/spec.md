@@ -14,7 +14,7 @@ agent CLI (defaulting to the session's default CLI),
 `--from-spec <change>` to resolve the branch name and CLI from a
 spec, and `--no-rebase` (boolean, default `false`) to skip rebasing
 an existing branch onto the default branch, with the meaning given
-in "Worktree creation reuses start conventions". `--no-rebase` MAY be
+in "add rebases an existing branch unless --no-rebase". `--no-rebase` MAY be
 combined with `--cli` and `--from-spec`, and SHALL carry a `help`
 string. The subcommand SHALL fail with an actionable error when no
 session is active for the repository.
@@ -67,16 +67,9 @@ The `add` subcommand SHALL create the worktree using the same
 naming convention, base-branch resolution, and idempotent-create
 behaviour as `git paw start`. Adding a branch whose worktree
 already exists SHALL reuse the existing worktree rather than error.
-
-The `add` subcommand SHALL invoke `create_worktree` with
-`rebase_onto_main = !no_rebase`, matching `start`'s `--no-rebase`
-semantics: without `--no-rebase`, a branch that already exists
-locally SHALL be rebased onto the repository's default branch before
-its worktree is opened or reused (subject to "add never rebases over
-uncommitted work"); with `--no-rebase`, the branch SHALL NOT be
-rebased and its HEAD SHALL be unchanged by `add`. A branch that does
-not yet exist SHALL be created as `create_worktree` specifies and
-SHALL NOT be rebased, regardless of the flag.
+A branch that does not yet exist SHALL be created as
+`create_worktree` specifies and SHALL NOT be rebased, regardless of
+`--no-rebase`.
 
 #### Scenario: Worktree naming matches start
 
@@ -90,21 +83,6 @@ SHALL NOT be rebased, regardless of the flag.
 - **WHEN** the user runs `git paw add feat/x`
 - **THEN** the command SHALL reuse the existing worktree without
   error
-
-#### Scenario: A clean existing branch is rebased by default
-
-- **GIVEN** an active session and a branch `feat/x` whose worktree was kept on disk by `git paw remove feat/x --keep-worktree` and has no uncommitted changes
-- **AND** the default branch has gained commits since `feat/x` was last based on it
-- **WHEN** the user runs `git paw add feat/x`
-- **THEN** `feat/x` SHALL be rebased onto the default branch, as `git paw start` would do for an existing branch
-- **AND** the agent SHALL be attached in the reused worktree
-
-#### Scenario: --no-rebase keeps the branch on its base
-
-- **GIVEN** the same session, kept clean worktree and advanced default branch
-- **WHEN** the user runs `git paw add feat/x --no-rebase`
-- **THEN** `feat/x`'s HEAD after the command SHALL equal its HEAD before the command
-- **AND** the agent SHALL be attached in the reused worktree
 
 ### Requirement: Pane spawn with grid re-tiling
 
@@ -687,6 +665,31 @@ The `add` and `remove` subcommands SHALL operate on every live session whose rec
 - **GIVEN** a live supervised session saved by an earlier binary with `dashboard_pane = Some(1)` and agents from pane 2
 - **WHEN** the user runs `git paw add feat/new`
 - **THEN** the new agent SHALL be added after the existing agents and the existing agents' panes SHALL keep their indices
+
+### Requirement: add rebases an existing branch unless --no-rebase
+
+The `add` subcommand SHALL invoke `create_worktree` with
+`rebase_onto_main = !no_rebase`, matching `start`'s `--no-rebase`
+semantics: without `--no-rebase`, a branch that already exists
+locally SHALL be rebased onto the repository's default branch before
+its worktree is opened or reused (subject to "add never rebases over
+uncommitted work"); with `--no-rebase`, the branch SHALL NOT be
+rebased and its HEAD SHALL be unchanged by `add`.
+
+#### Scenario: A clean existing branch is rebased by default
+
+- **GIVEN** an active session and a branch `feat/x` whose worktree was kept on disk by `git paw remove feat/x --keep-worktree` and has no uncommitted changes
+- **AND** the default branch has gained commits since `feat/x` was last based on it
+- **WHEN** the user runs `git paw add feat/x`
+- **THEN** `feat/x` SHALL be rebased onto the default branch, as `git paw start` would do for an existing branch
+- **AND** the agent SHALL be attached in the reused worktree
+
+#### Scenario: --no-rebase keeps the branch on its base
+
+- **GIVEN** the same session, kept clean worktree and advanced default branch
+- **WHEN** the user runs `git paw add feat/x --no-rebase`
+- **THEN** `feat/x`'s HEAD after the command SHALL equal its HEAD before the command
+- **AND** the agent SHALL be attached in the reused worktree
 
 ### Requirement: add never rebases over uncommitted work
 
