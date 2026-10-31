@@ -63,10 +63,17 @@ display_name = "My Agent"
 command = "ollama-code"
 display_name = "Local LLM"
 
+# A Claude Code variant pinned to one model: `family` gives it Claude's native
+# flags, session templates and MCP form; `args` is appended to every launch.
+[clis.sonnet]
+command = "claude"
+family = "claude"
+args = "--model sonnet"
+
 # A custom CLI is also the seam for the optional FS-scoped sandbox: point
-# `command` at a PATH-resolvable wrapper that execs the real CLI under
-# sandbox-exec/bwrap. git-paw launches a CLI by its name on PATH, so the wrapper
-# must be on PATH (not just a script path). See the FS-Scoped Sandbox guide.
+# `command` at a wrapper that execs the real CLI under sandbox-exec/bwrap.
+# git-paw launches the configured `command`, so it may be the wrapper's path;
+# the wrapper need not be on PATH. See the FS-Scoped Sandbox guide.
 
 # Named presets for quick launch
 [presets.backend]
@@ -494,16 +501,35 @@ different things:
   emitted as exactly one shell word: single-quoted (with embedded single
   quotes escaped) whenever it contains any character outside the portable
   safe set `A-Z a-z 0-9 _ - . / + , : @ %`, so a path containing spaces or
-  shell metacharacters is neither word-split nor expanded. Approval flags
-  and session-id / resume arguments are appended after it.
+  shell metacharacters is neither word-split nor expanded. Every launch path
+  builds the pane command the same way: `command`, then `args`, then the
+  approval flags, then the session-id arguments (or, on recovery, the resume
+  arguments).
 - **The `<name>` key is the CLI's identity.** Approval-flag, session-id and
-  resume-template, prompt-profile, settle-delay, and MCP-capability lookups
+  resume-template, prompt-profile, settle-delay, and MCP-capability overrides
   all resolve against the key, as does the `cli` recorded in each saved
   worktree entry. A CLI name with no matching entry (a built-in detected
   CLI, or an explicit pass-through name) launches under that name unchanged.
+- **`family` decides the built-in rows.** Where the entry sets no override,
+  the built-in approval flags, session-id / resume / headless templates and
+  MCP default come from the entry's [provider family](../supported-clis.md#provider-families).
+  A known CLI name keeps its own family; any other entry is `generic` (no
+  built-in rows) unless it declares `family`. The family is never guessed
+  from `command`.
 
 So `[clis.claude-variant] command = "claude"` launches `claude` while every
-per-CLI override and the saved session still read `claude-variant`.
+per-CLI override and the saved session still read `claude-variant`; add
+`family = "claude"` to give it Claude's native flags and templates too.
+
+> **Ambiguous PATH shims are refused.** When an entry's key is not a known
+> CLI name but an executable with that name is also on `PATH` and is a
+> different file from the one `command` resolves to, git-paw refuses to
+> launch that CLI and names both paths. Before v0.17.0 such a shim (for
+> example a sandbox wrapper named after the key) was what ran; now
+> `command` runs, so git-paw stops rather than silently bypass the shim.
+> Point `command` at the one you mean, or remove the shim. A known name
+> (`[clis.claude] command = "/opt/alt/claude"`) is an explicit override and
+> is never refused.
 
 ### Via config file
 
@@ -519,6 +545,15 @@ display_name = "Local LLM"
 # A claude-family variant that reads a non-default config directory.
 [clis.claude-variant]
 command = "claude"
+# The provider family this entry is a variant of: "claude", "codex", "agy",
+# "qwen", "cursor-agent" or "generic". It supplies the built-in approval
+# flags, session / headless templates and MCP default wherever this entry
+# sets no override. Unset, a known CLI name keeps its own family and any
+# other name is "generic". An unknown value fails the config load.
+family = "claude"
+# Arguments appended verbatim to every launch of this CLI, after `command`
+# and before the approval flags. Give each worker profile its own entry.
+args = "--model opus"
 # Boot-prompt settle delay (ms) before the submit Enter. git-paw injects
 # the boot block, waits this long for a paste-aware CLI to settle the
 # paste, then sends Enter separately. Default suits most CLIs; raise it
@@ -552,7 +587,7 @@ resume_args = "--resume {{SESSION_ID}}"
 headless_args = "-p"
 # Whether this CLI speaks MCP, deciding which form of the coordination boot
 # block it receives. Unset by default (and omitted from written config), in
-# which case the built-in MCP-capable set decides. Only set `true` once
+# which case the provider family decides. Only set `true` once
 # git-paw's MCP server is registered for THIS CLI — see the field table.
 # mcp = true
 
@@ -567,6 +602,8 @@ approval_markers = ["proceed? (y/n)"]
 |-------|----------|---------|
 | `command` | yes | Command or path to the CLI binary — what the pane launches, emitted as one shell word. Must be non-empty; a blank value is rejected at config load, naming the entry. |
 | `display_name` | no | Human-readable name shown in prompts. |
+| `family` | no | The [provider family](../supported-clis.md#provider-families) this CLI is a variant of: `claude`, `codex`, `agy`, `qwen`, `cursor-agent` or `generic`. Supplies the built-in approval flags, session-id / resume / headless templates and MCP default wherever the entry sets no override. Unset, a known CLI name keeps its own family and any other name resolves `generic`; never inferred from `command`. An unknown value is rejected at config load, listing the accepted values. Omitted when the config is written back. |
+| `args` | no | Arguments appended verbatim after `command` on every launch of this CLI (start, `add`, recovery, readiness relaunch), before the approval flags. In a pane, `args` is interpreted by the pane's shell, so it carries the same trust as `command`: quoting and expansion apply, and anyone who can edit the config can run anything there. The headless orchestrator hand-off splits `args` on whitespace instead (no shell, so quoting is not supported there). Put permission flags in `approval_args`, not here. Omitted when the config is written back. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
 | `settings_path` | no | Path to the CLI's claude-format settings file. **Parse-only**: accepted and preserved across a load/save round-trip so existing configurations keep working, but git-paw never reads, writes, or acts on it — not even [`git paw setup-cli`](../user-guide/cli-setup.md), whose only target is the main checkout's project-local settings file. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
@@ -591,15 +628,18 @@ Whether a CLI receives the MCP tool form of the
 resolved in this order:
 
 1. `mcp = true` or `mcp = false` on the matching `[clis.<name>]` entry;
-2. otherwise the built-in MCP-capable set — exactly `claude`, `codex`,
-   `cursor-agent`, and `agy`;
+2. otherwise the default of the CLI's provider family — the `claude`,
+   `codex`, `cursor-agent` and `agy` families are MCP-capable, and a known
+   CLI resolves its own family, so with no `[clis]` entries the MCP-capable
+   CLIs are exactly `claude`, `codex`, `cursor-agent`, and `agy`;
 3. otherwise not MCP-capable, so the `broker.sh` helper form is used.
 
 The lookup uses the CLI **identity** (the `[clis.<name>]` key, or the
 built-in / pass-through name), never the resolved `command`. That is why
 `[clis.claude-oss] command = "claude"` does not inherit `claude`'s MCP form:
 a variant typically reads a different config directory, which may not have
-git-paw's MCP server registered.
+git-paw's MCP server registered. It opts in with `mcp = true`, or by declaring
+`family = "claude"`; an explicit `mcp = false` still wins over the family.
 
 > **Warning:** setting `mcp = true` for a CLI that does not have git-paw's
 > MCP server registered strands the agent at boot — the boot block names

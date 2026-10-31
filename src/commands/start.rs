@@ -30,14 +30,15 @@ use super::helpers::{
     warn_if_broker_is_exposed,
 };
 use super::launch::{
-    LaunchOutcome, build_task_prompt, compose_launch_prompt, gate_pane_or_fail_on_dialog,
-    submit_prompt_to_pane, write_repo_discovery_file, write_repo_discovery_file_with_agents,
+    LaunchOutcome, build_task_prompt, compose_launch_prompt, dry_run_launch_line,
+    gate_pane_or_fail_on_dialog, submit_prompt_to_pane, write_repo_discovery_file,
+    write_repo_discovery_file_with_agents,
 };
 use super::purge::{created_branch_base, invalidate_if_stale};
 use super::recover::recover_session_detached;
 use super::spec_mode::{SpecMode, apply_spec_mode};
 use super::supervisor::{SupervisorOptions, supervisor};
-use crate::config::resolve_submit_delay_ms;
+use crate::agent_cli::{LaunchSession, resolve_for_launch};
 
 /// Options for [`start`]: the `git paw start` flags, plus the picker the
 /// branch and CLI selection runs through when the flags leave it open.
@@ -209,9 +210,11 @@ pub fn start(
         out.line(&format!("  Session:  {session_name}"));
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
+        let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
         for (branch, cli) in &selection.mappings {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
             out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
+            out.line(&dry_run_launch_line(cli, approval, &config.clis)?);
         }
         return Ok(LaunchOutcome::Done);
     }
@@ -265,7 +268,15 @@ pub fn start(
         .unwrap_or(&default_sup)
         .agent_approval;
 
-    for (branch, cli) in &selection.mappings {
+    // Resolve every CLI record before any worktree exists, so an ambiguous
+    // PATH shim refuses the launch with nothing created.
+    let profiles = selection
+        .mappings
+        .iter()
+        .map(|(_, cli)| resolve_for_launch(cli, &config.clis))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for ((branch, cli), profile) in selection.mappings.iter().zip(&profiles) {
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
 
         // Provision runtime state (declared env copies, this agent's port
@@ -341,14 +352,10 @@ pub fn start(
             )?;
         }
 
-        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
         plan.surfaces.push(SurfaceSpec {
             label: branch.clone(),
             owner: wt.path.clone(),
-            launch_command: apply_approval_flags(
-                &config::launch_command(cli, &config.clis),
-                &agent_flags,
-            ),
+            launch_command: profile.launch_command(approval, LaunchSession::None),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -467,11 +474,10 @@ pub fn start(
     // showing an unanswered first-run trust/bypass dialog MUST NOT receive the
     // boot block on top of it, so the launch fails loudly instead.
     if broker_config.enabled {
-        for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
+        for (idx, ((branch, cli), profile)) in selection.mappings.iter().zip(&profiles).enumerate()
+        {
             let pane_idx = layout.agent_index(idx);
-            let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-            let cli_command =
-                apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
+            let cli_command = profile.launch_command(approval, LaunchSession::None);
             gate_pane_or_fail_on_dialog(
                 &backend,
                 &session_name,
@@ -483,7 +489,7 @@ pub fn start(
             let boot_block = crate::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
-                crate::skills::cli_speaks_mcp(cli, &config.clis),
+                profile.mcp_capable(),
             );
             let prefill =
                 compose_launch_prompt(Some(&boot_block), None, &state.worktrees[idx].worktree_path);
@@ -655,9 +661,11 @@ pub fn start_with_specs(
         out.line(&format!("  Session:  {session_name}"));
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
+        let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
         for (branch, cli) in &mappings {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
             out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
+            out.line(&dry_run_launch_line(cli, approval, &config.clis)?);
         }
         return Ok(LaunchOutcome::Done);
     }
@@ -762,7 +770,12 @@ fn launch_spec_session(
         .unwrap_or(&default_sup)
         .agent_approval;
 
-    for (branch, cli) in mappings {
+    let profiles = mappings
+        .iter()
+        .map(|(_, cli)| resolve_for_launch(cli, &config.clis))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for ((branch, cli), profile) in mappings.iter().zip(&profiles) {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
 
         // Same seam as `start`: provision after create, before the pane is
@@ -840,14 +853,10 @@ fn launch_spec_session(
             )?;
         }
 
-        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
         plan.surfaces.push(SurfaceSpec {
             label: branch.clone(),
             owner: wt.path.clone(),
-            launch_command: apply_approval_flags(
-                &config::launch_command(cli, &config.clis),
-                &agent_flags,
-            ),
+            launch_command: profile.launch_command(approval, LaunchSession::None),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -967,11 +976,9 @@ fn launch_spec_session(
     // pre-fill above), so a blind submit into a pane still showing an
     // unanswered first-run trust/bypass dialog could accidentally accept it.
     let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
-    for (idx, (branch, cli)) in mappings.iter().enumerate() {
+    for (idx, ((branch, cli), profile)) in mappings.iter().zip(&profiles).enumerate() {
         let pane_idx = layout.agent_index(idx);
-        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-        let cli_command =
-            apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
+        let cli_command = profile.launch_command(approval, LaunchSession::None);
         gate_pane_or_fail_on_dialog(
             &backend,
             &session_name,
@@ -982,18 +989,14 @@ fn launch_spec_session(
         )?;
         let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
         let boot_block = broker_config.enabled.then(|| {
-            crate::skills::build_boot_block(
-                branch,
-                &broker_config.url(),
-                crate::skills::cli_speaks_mcp(cli, &config.clis),
-            )
+            crate::skills::build_boot_block(branch, &broker_config.url(), profile.mcp_capable())
         });
         let prompt = compose_launch_prompt(
             boot_block.as_deref(),
             Some(&task_prompt.prose),
             &state.worktrees[idx].worktree_path,
         );
-        let delay = resolve_submit_delay_ms(cli, &config.clis);
+        let delay = profile.submit_delay_ms();
         submit_prompt_to_pane(&backend, &session_name, pane_idx, &prompt, delay);
         if let Some(entry_point) = task_prompt.entry_point {
             pending_entry_points.push(PendingEntryPoint {
@@ -1322,9 +1325,14 @@ fn submit_held_boot_prompts(
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
-        let agent_flags = config::resolve_approval_flags(&wt.cli, &approval, &config.clis);
-        let cli_command =
-            apply_approval_flags(&config::launch_command(&wt.cli, &config.clis), &agent_flags);
+        let profile = match resolve_for_launch(&wt.cli, &config.clis) {
+            Ok(profile) => profile,
+            Err(e) => {
+                blocked.push(format!("  {} (pane {pane_idx}): {e}", wt.branch));
+                continue;
+            }
+        };
+        let cli_command = profile.launch_command(&approval, LaunchSession::None);
 
         match gate_pane_or_fail_on_dialog(
             backend,
@@ -1336,7 +1344,7 @@ fn submit_held_boot_prompts(
         ) {
             Ok(()) => {
                 if let Some(pending) = wt.pending_boot_prompt.take() {
-                    let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
+                    let delay = profile.submit_delay_ms();
                     submit_prompt_to_pane(backend, &session_name, pane_idx, &pending, delay);
                     // Taken INSIDE this arm, against the pane index already
                     // resolved above: a prompt the gate blocked, or whose
@@ -1387,38 +1395,4 @@ fn submit_held_boot_prompts(
     // After the blocked report, so a user reading stderr sees what was held
     // before the launch blocks waiting for the panes that were not.
     submit_entry_points(backend, &session_name, pending_entry_points, out);
-}
-
-/// Appends `flags` to `command` with a single separating space, or returns
-/// `command` unchanged when `flags` is empty — no trailing separator —
-/// matching the supervisor path's (`attach_agent`'s) pane-command
-/// construction.
-///
-/// `command` is the pane's *launch command* (see
-/// [`config::launch_command`]), not the CLI identity: approval flags are
-/// resolved by identity but appended after the command the pane runs.
-fn apply_approval_flags(command: &str, flags: &str) -> String {
-    if flags.is_empty() {
-        command.to_string()
-    } else {
-        format!("{command} {flags}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_approval_flags_empty_yields_bare_cli_no_trailing_separator() {
-        assert_eq!(apply_approval_flags("echo", ""), "echo");
-    }
-
-    #[test]
-    fn apply_approval_flags_non_empty_joins_with_single_space() {
-        assert_eq!(
-            apply_approval_flags("echo", "--full-auto"),
-            "echo --full-auto"
-        );
-    }
 }

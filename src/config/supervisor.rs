@@ -936,16 +936,15 @@ impl AutoApproveConfig {
     }
 }
 
-/// Returns the built-in CLI-specific permission flag for `cli` at the given
+/// Returns the built-in permission flag for the known CLI `cli` at the given
 /// approval `level`, or an empty string if the combination has no mapped
 /// flag.
 ///
-/// This is the built-in-table step of [`resolve_approval_flags`]; prefer
-/// that function when a loaded config (and thus its `[clis.<name>]`
-/// overrides) is available. Rows verified against upstream CLI docs
-/// 2026-07-15; the Claude `Auto` row was confirmed against the live Claude
-/// Code `--permission-mode` enumeration (`default` / `acceptEdits` / `plan` /
-/// `bypassPermissions`) 2026-09-04.
+/// The row comes from the provider family `cli` resolves as a known CLI name
+/// ([`crate::agent_cli::CliFamily::of_known`]); an unknown name resolves the
+/// `generic` family, which has no flags. This is the built-in-table step of
+/// [`resolve_approval_flags`]; prefer that function when a loaded config (and
+/// thus its `[clis.<name>]` overrides and declared families) is available.
 ///
 /// # Examples
 ///
@@ -970,19 +969,16 @@ impl AutoApproveConfig {
 /// ```
 #[must_use]
 pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
-    match (cli, level) {
-        ("claude" | "agy", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
-        ("claude", ApprovalLevel::Auto) => "--permission-mode acceptEdits",
-        ("codex", ApprovalLevel::FullAuto) => "--dangerously-bypass-approvals-and-sandbox",
-        ("codex", ApprovalLevel::Auto) => "--sandbox workspace-write",
-        ("qwen", ApprovalLevel::FullAuto) => "--yolo",
-        _ => "",
-    }
+    crate::agent_cli::CliFamily::of_known(cli)
+        .unwrap_or(crate::agent_cli::CliFamily::Generic)
+        .provider()
+        .approval_flags(*level)
 }
 
 /// Resolves the permission flags for `cli` at `level`, consulting (in
 /// order): the per-CLI `[clis.<name>].approval_args` override, the built-in
-/// [`approval_flags`] table, then `""` (no flags).
+/// row of the CLI's provider family, then `""` (no flags). Delegates to the
+/// CLI's resolved record ([`crate::agent_cli::CliProfile::approval_flags`]).
 ///
 /// The override is the seam for custom or variant CLIs (e.g. a claude-oss
 /// entry launched via `CLAUDE_CONFIG_DIR`) to get native flags without a
@@ -1018,6 +1014,8 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///         resume_args: None,
 ///         mcp: None,
 ///         headless_args: None,
+///         family: None,
+///         args: None,
 ///     },
 /// );
 /// assert_eq!(
@@ -1031,13 +1029,7 @@ pub fn resolve_approval_flags<S: std::hash::BuildHasher>(
     level: &ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
 ) -> String {
-    if let Some(args) = clis
-        .get(cli)
-        .and_then(|c| c.approval_args.get(level.kebab_name()))
-    {
-        return args.clone();
-    }
-    approval_flags(cli, level).to_string()
+    crate::agent_cli::CliProfile::resolve(cli, clis).approval_flags(level)
 }
 
 /// The placeholder every `session_id_args` / `resume_args` template must
@@ -1045,35 +1037,9 @@ pub fn resolve_approval_flags<S: std::hash::BuildHasher>(
 /// time.
 pub const SESSION_ID_PLACEHOLDER: &str = "{{SESSION_ID}}";
 
-/// Built-in `session_id_args` template for `cli`, or `None` if the CLI has
-/// no known flag for assigning a session id at launch.
-///
-/// Verified against the Claude Code CLI's `--session-id <uuid>` flag
-/// 2026-09-15 (`worker-session-id-capture` task 1.2).
-#[must_use]
-fn built_in_session_id_args(cli: &str) -> Option<&'static str> {
-    match cli {
-        "claude" => Some("--session-id {{SESSION_ID}}"),
-        _ => None,
-    }
-}
-
-/// Built-in `resume_args` template for `cli`, or `None` if the CLI has no
-/// known flag for resuming a previously assigned session.
-///
-/// Verified against the Claude Code CLI's `--resume <uuid>` flag
-/// 2026-09-15 (`worker-session-id-capture` task 1.2).
-#[must_use]
-fn built_in_resume_args(cli: &str) -> Option<&'static str> {
-    match cli {
-        "claude" => Some("--resume {{SESSION_ID}}"),
-        _ => None,
-    }
-}
-
 /// Resolves the session-id-assignment template for `cli`, consulting (in
 /// order): the per-CLI `[clis.<name>].session_id_args` override, the
-/// built-in [`built_in_session_id_args`] table, then `None` (no template —
+/// built-in row of the CLI's provider family, then `None` (no template —
 /// the CLI is not assigned an id).
 ///
 /// When a template resolves, `id` is substituted for
@@ -1098,17 +1064,13 @@ pub fn resolve_session_id_args<S: std::hash::BuildHasher>(
     id: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> Option<String> {
-    let template = clis
-        .get(cli)
-        .and_then(|c| c.session_id_args.as_deref())
-        .or_else(|| built_in_session_id_args(cli))?;
-    Some(template.replace(SESSION_ID_PLACEHOLDER, id))
+    crate::agent_cli::CliProfile::resolve(cli, clis).session_id_args(id)
 }
 
 /// Resolves the session-resume template for `cli`, consulting (in order):
-/// the per-CLI `[clis.<name>].resume_args` override, the built-in
-/// [`built_in_resume_args`] table, then `None` (no template — the CLI
-/// cannot be resumed).
+/// the per-CLI `[clis.<name>].resume_args` override, the built-in row of the
+/// CLI's provider family, then `None` (no template — the CLI cannot be
+/// resumed).
 ///
 /// When a template resolves, `id` is substituted for
 /// [`SESSION_ID_PLACEHOLDER`] and the rendered string returned.
@@ -1132,11 +1094,7 @@ pub fn resolve_resume_args<S: std::hash::BuildHasher>(
     id: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> Option<String> {
-    let template = clis
-        .get(cli)
-        .and_then(|c| c.resume_args.as_deref())
-        .or_else(|| built_in_resume_args(cli))?;
-    Some(template.replace(SESSION_ID_PLACEHOLDER, id))
+    crate::agent_cli::CliProfile::resolve(cli, clis).resume_args(id)
 }
 
 #[cfg(test)]

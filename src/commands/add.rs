@@ -4,10 +4,11 @@
 
 use std::path::Path;
 
+use crate::agent_cli::CliProfile;
 use crate::agents;
 use crate::broker;
 use crate::command_runner::RealCommandRunner;
-use crate::config::{self, SupervisorConfig};
+use crate::config::SupervisorConfig;
 use crate::detect;
 use crate::error::PawError;
 use crate::git;
@@ -174,11 +175,12 @@ pub fn add(
     // common "fall back to the session's CLI" path.
     let custom_defs = config_to_custom_defs(&config);
     let detected = detect::detect_clis(&custom_defs);
-    let agent_cli_base = agent_cli.split_whitespace().next().unwrap_or(&agent_cli);
+    let agent_profile = CliProfile::resolve(&agent_cli, &config.clis);
+    let agent_cli_base = agent_profile.id();
     let cli_in_session = existing
         .worktrees
         .iter()
-        .any(|w| w.cli.split_whitespace().next() == Some(agent_cli_base));
+        .any(|w| CliProfile::resolve(&w.cli, &config.clis).id() == agent_cli_base);
     if !cli_in_session && !detected.iter().any(|c| c.binary_name == agent_cli_base) {
         let ids: Vec<&str> = detected.iter().map(|c| c.binary_name.as_str()).collect();
         return Err(PawError::ConfigError(format!(
@@ -242,7 +244,6 @@ pub fn add(
     let default_sup = SupervisorConfig::default();
     let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
     let approval = &supervisor_cfg.agent_approval;
-    let agent_flags = config::resolve_approval_flags(&agent_cli, approval, &config.clis);
     let strict_guard = config
         .supervisor
         .as_ref()
@@ -280,7 +281,7 @@ pub fn add(
         project: &project,
         broker_config: &broker_config,
         agent_cli: &agent_cli,
-        agent_flags: &agent_flags,
+        approval,
         coordination_template: coordination_template.as_ref(),
         docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,

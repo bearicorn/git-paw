@@ -170,9 +170,9 @@ Agents are instructed to publish questions and wait for answers rather than gues
 
 ### MCP tool form
 
-The four events above are the `broker.sh` helper form. For a CLI known to
-speak MCP (Model Context Protocol) — the built-in set is `claude`, `codex`,
-`cursor-agent`, and `agy` — the boot block instead expresses each event as an
+The four events above are the `broker.sh` helper form. For a CLI whose
+[provider family](../supported-clis.md#provider-families) speaks MCP (Model
+Context Protocol) — `claude`, `codex`, `cursor-agent`, and `agy` — the boot block instead expresses each event as an
 invocation of the matching [MCP publish tool](mcp.md#publish-tools):
 `publish_status`, `publish_artifact`, `publish_blocked`, `publish_question`.
 The events, their meanings, and their ordering are identical between the two
@@ -186,11 +186,12 @@ strand the agent at the very first step, so git-paw only switches to the MCP
 form when it is confident the target CLI can act on it.
 
 A [`[clis.<name>] mcp = true|false`](../configuration/README.md#custom-clis)
-entry overrides the built-in set, and is consulted first. The lookup is keyed
-on the CLI's **identity** — the `[clis.<name>]` key, or the built-in /
+entry wins over the family default, and is consulted first. The lookup is
+keyed on the CLI's **identity** — the `[clis.<name>]` key, or the built-in /
 pass-through name — never on the `command` that key launches, so a custom
 variant such as `[clis.claude-oss] command = "claude"` keeps the helper form
-until you set `mcp = true` on it.
+until you set `family = "claude"` or `mcp = true` on it; `mcp = false` beats
+a declared family.
 
 The MCP publish surface has no inbox or poll tool, so even the MCP form of
 the boot block reads the agent's inbox with

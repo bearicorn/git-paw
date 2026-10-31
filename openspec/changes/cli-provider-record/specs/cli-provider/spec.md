@@ -12,13 +12,11 @@ can declare its family to inherit that CLI's behaviour.
 
 ### Requirement: Each agent CLI resolves into one record
 
-The system SHALL resolve each agent CLI, once per agent, into a single record carrying: the CLI id
-(the `[clis.<name>]` key or known binary name, as recorded in session state), the display name, the
-launch command (per v0.17.0's *Panes launch the configured command of a CLI*), the launch arguments, the provider family, and the per-CLI facets —
-approval flags per approval level, the session-id, resume and headless templates, MCP capability,
-and the prompt-shape profile. Consumers SHALL read these values from the record. A consumer SHALL
-NOT re-derive a CLI's identity, overrides or facets from a launch-command string or its leading
-token.
+The system SHALL resolve each agent CLI, once per agent, into a single record carrying its id (the
+`[clis.<name>]` key or known binary name), display name, launch command, launch arguments, provider
+family, and per-CLI facets: approval flags, session-id, resume and headless templates, MCP
+capability, and prompt-shape profile. Consumers SHALL read these values from the record and SHALL
+NOT re-derive them from a launch-command string or its leading token.
 
 #### Scenario: A known CLI resolves its record
 
@@ -32,6 +30,15 @@ token.
 - **WHEN** the record for `my-agent` is resolved
 - **THEN** its id SHALL be `my-agent` and its executable `/opt/tools/my-agent`
 
+#### Scenario: An identity with trailing flags keeps its base CLI's facets
+
+- **GIVEN** no `[clis.claude]` entry and the identity `claude --model x` (for example from
+  `--cli "claude --model x"`)
+- **WHEN** a worker using it is launched at `agent_approval = "full-auto"`
+- **THEN** its id SHALL be `claude` and its family `claude`
+- **AND** the pane command SHALL be `claude --model x` followed by
+  `--dangerously-skip-permissions` and the session-id arguments
+
 #### Scenario: Overrides resolve by id when the executable differs
 
 - **GIVEN** `[clis.fast] command = "/opt/tools/agent"`, `submit_delay_ms = 2500`, and a
@@ -43,13 +50,11 @@ token.
 ### Requirement: Provider families are compiled in-tree with a generic fallback
 
 The system SHALL define provider families as a closed, compile-time set with one in-tree
-implementation each, plus a `generic` family that contributes no approval flags, no templates and
-no MCP capability, and whose prompt-shape profile and recognised first-run dialogs are the embedded
-defaults that every CLI received before this change.
-Every CLI SHALL resolve to exactly one family; a CLI with no family of its own SHALL resolve
-`generic` and behave as unrecognised CLIs did before this change. Families SHALL NOT be loadable at
-runtime or definable in configuration. Each family's record SHALL be constructible without a PATH
-lookup or a configuration file, so its behaviour can be exercised directly against recorded inputs.
+implementation each, plus a `generic` family that contributes no approval flags, templates or MCP
+capability and keeps the embedded default prompt-shape profile. Every CLI SHALL resolve to exactly
+one family, `generic` when it has none of its own. Families SHALL NOT be loadable at runtime or
+definable in configuration. Each family's record SHALL be constructible without a PATH lookup or a
+configuration file.
 
 #### Scenario: An unknown CLI resolves the generic family
 
@@ -98,14 +103,11 @@ NOT be inferred from the basename of `command`.
 
 ### Requirement: An ambiguous PATH shim is refused
 
-Panes SHALL launch a CLI as `cli-resolution`'s *Panes launch the configured command of a CLI*
-specifies: a configured entry by its `command`, a built-in CLI with no entry by its name, resolved
-by the pane's shell. This requirement adds only a refusal. When a `[clis.<name>]` key that is not a
-known CLI name also resolves on PATH to a different file than the entry's `command` resolves to
-(compared after resolving symlinks), launching that CLI SHALL fail with an error naming both paths
-and telling the user to point `command` at the one they mean, and no pane SHALL run either
-executable. A key that is a known CLI name SHALL NOT be refused, because pointing it at another
-install is an explicit override.
+When a `[clis.<name>]` key that is not a known CLI name also resolves on PATH to a different file
+than the entry's `command` resolves to (compared after resolving symlinks), launching that CLI SHALL
+fail with an error naming both paths and telling the user to point `command` at the one they mean,
+and no pane SHALL run either executable. A known CLI name SHALL NOT be refused, because pointing it
+at another install is an explicit override. Otherwise panes launch as `cli-resolution` specifies.
 
 #### Scenario: An ambiguous shim is refused
 
@@ -120,6 +122,25 @@ install is an explicit override.
 - **GIVEN** `[clis.claude] command = "/opt/alt/claude"` while `claude` on PATH resolves elsewhere
 - **WHEN** a worker using `claude` is launched
 - **THEN** the pane command SHALL begin with `/opt/alt/claude` and the launch SHALL succeed
+
+### Requirement: The ambiguous shim is reported before a launch
+
+`git paw doctor` SHALL report one row per `[clis.<name>]` entry, failing with the refusal and the
+fix for every entry a launch would refuse as an ambiguous PATH shim. A dry-run plan SHALL apply the
+same check and SHALL show the exact command each worker pane would run.
+
+#### Scenario: Doctor flags an ambiguous shim
+
+- **GIVEN** a `[clis.<name>]` entry a launch would refuse as an ambiguous shim
+- **WHEN** `git paw doctor` runs
+- **THEN** that entry's row SHALL fail, naming both paths and telling the user to rename the key or
+  set `command` to the full path they mean
+
+#### Scenario: A dry run shows the real launch command
+
+- **GIVEN** `[clis.sonnet] command = "claude"`, `family = "claude"`, `args = "--model sonnet"`
+- **WHEN** `git paw start --dry-run` plans a worker using `sonnet`
+- **THEN** the plan SHALL show the pane command beginning `claude --model sonnet`
 
 #### Scenario: A built-in CLI still launches by name
 
@@ -196,12 +217,10 @@ SHALL remain keyed by the CLI id.
 ### Requirement: The boot-block form follows the record's MCP capability
 
 The system SHALL render the MCP form of the boot block for a worker exactly when that worker's CLI
-record is MCP-capable, and the helper-script form otherwise. The record's MCP capability SHALL be
-resolved as `boot-block`'s *Per-CLI MCP capability override* specifies: an explicit `mcp = true` or
-`mcp = false` on the CLI's `[clis.<id>]` entry SHALL win; only when `mcp` is unset SHALL the
-provider family supply the default (the `claude`, `codex`, `agy` and `cursor-agent` families are
-MCP-capable, `generic` and `qwen` are not). It SHALL never come from matching the CLI id against a
-list of names.
+record is MCP-capable, and the helper-script form otherwise. An explicit `mcp` on the CLI's
+`[clis.<id>]` entry SHALL win; only when `mcp` is unset SHALL the family supply the default (the
+`claude`, `codex`, `agy` and `cursor-agent` families are MCP-capable, `generic` and `qwen` are
+not). It SHALL never come from matching the CLI id against a list of names.
 
 #### Scenario: A declared Claude variant receives the MCP form
 

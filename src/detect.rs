@@ -26,27 +26,17 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-/// Known AI CLI binary names to scan for on PATH.
-const KNOWN_CLIS: &[&str] = &[
-    "claude",
-    "codex",
-    "agy",
-    "aider",
-    "vibe",
-    "qwen",
-    "amp",
-    "opencode",
-    "cline",
-    "droid",
-    "pi",
-    "junie",
-    "cursor-agent",
-    "copilot",
-    "cn",
-    "kilo",
-    "kimi",
-];
+/// Known AI CLI binary names to scan for on PATH, derived from the provider
+/// records' detection roster ([`crate::agent_cli::ROSTER`]) — the one place a
+/// known CLI is declared.
+static KNOWN_CLIS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    crate::agent_cli::ROSTER
+        .iter()
+        .map(|entry| entry.name)
+        .collect()
+});
 
 /// The known AI CLI binary names this crate auto-detects on PATH.
 ///
@@ -54,7 +44,7 @@ const KNOWN_CLIS: &[&str] = &[
 /// the Supported AI CLIs tables without duplicating the list.
 #[must_use]
 pub fn known_cli_names() -> &'static [&'static str] {
-    KNOWN_CLIS
+    &KNOWN_CLIS
 }
 
 /// Returns whether `name` is a CLI identity from the built-in roster.
@@ -123,14 +113,12 @@ fn derive_display_name(binary_name: &str) -> String {
 }
 
 /// Display name for a **known** CLI. Most capitalise the binary name; a few
-/// have a canonical product name that differs from their command (e.g. the
-/// Antigravity CLI's command is `agy`).
+/// have a canonical product name in their roster entry that differs from
+/// their command (e.g. the Antigravity CLI's command is `agy`).
 fn known_display_name(binary_name: &str) -> String {
-    match binary_name {
-        "agy" => "Antigravity".to_string(),
-        "cursor-agent" => "Cursor Agent".to_string(),
-        other => derive_display_name(other),
-    }
+    crate::agent_cli::roster_entry(binary_name)
+        .and_then(|entry| entry.display_name)
+        .map_or_else(|| derive_display_name(binary_name), str::to_string)
 }
 
 /// Resolves a command string to an absolute path within a given `PATH`.
@@ -184,7 +172,7 @@ pub fn detect_known_clis() -> Vec<CliInfo> {
 }
 
 fn detect_known_clis_in(path: Option<&std::ffi::OsString>) -> Vec<CliInfo> {
-    KNOWN_CLIS
+    known_cli_names()
         .iter()
         .filter_map(|&name| {
             resolve_command_in(name, path).map(|path| CliInfo {
@@ -460,6 +448,43 @@ mod tests {
         assert!(names.contains(&"cursor-agent"));
         assert!(!names.contains(&"cursor"));
         assert!(names.contains(&"claude"));
+    }
+
+    /// `cli-provider` scenario "Every roster name maps to a family": the
+    /// roster derived from the provider records is exactly the 17 names of
+    /// `cli-resolution`'s known-CLI requirement, each with one family.
+    #[test]
+    fn roster_from_provider_records_equals_the_known_cli_set() {
+        let expected: std::collections::BTreeSet<&str> = [
+            "claude",
+            "codex",
+            "agy",
+            "aider",
+            "vibe",
+            "qwen",
+            "amp",
+            "opencode",
+            "cline",
+            "droid",
+            "pi",
+            "junie",
+            "cursor-agent",
+            "copilot",
+            "cn",
+            "kilo",
+            "kimi",
+        ]
+        .into_iter()
+        .collect();
+        let roster: std::collections::BTreeSet<&str> = known_cli_names().iter().copied().collect();
+        assert_eq!(roster, expected);
+        assert_eq!(known_cli_names().len(), 17, "no duplicate roster names");
+        for name in known_cli_names() {
+            assert!(
+                crate::agent_cli::CliFamily::of_known(name).is_some(),
+                "{name} maps to a family"
+            );
+        }
     }
 
     #[test]

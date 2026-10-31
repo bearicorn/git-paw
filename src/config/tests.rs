@@ -528,6 +528,8 @@ fn config_survives_save_and_load() {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         )]),
         presets: HashMap::from([(
@@ -637,6 +639,8 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         resume_args: None,
         mcp: None,
         headless_args: None,
+        family: None,
+        args: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -792,6 +796,12 @@ fn generated_default_config_contains_commented_examples() {
     assert!(output.contains("[specs]"), "should contain [specs]");
     assert!(output.contains("[logging]"), "should contain [logging]");
     assert!(output.contains("[broker]"), "should contain [broker]");
+    // `cli-provider-record` task 2.4: the new [clis] fields are documented,
+    // commented out.
+    assert!(output.contains("\n# family = \"claude\""), "{output}");
+    assert!(output.contains("\n# args = \"--model sonnet\""), "{output}");
+    assert!(!output.lines().any(|l| l.starts_with("family")));
+    assert!(!output.lines().any(|l| l.starts_with("args")));
 }
 
 #[test]
@@ -1973,6 +1983,8 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
         resume_args: None,
         mcp: None,
         headless_args: None,
+        family: None,
+        args: None,
     }
 }
 
@@ -2046,6 +2058,8 @@ fn cli_with_session_templates(
         resume_args: resume_args.map(String::from),
         mcp: None,
         headless_args: None,
+        family: None,
+        args: None,
     }
 }
 
@@ -3758,6 +3772,8 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             resume_args: None,
             mcp: None,
             headless_args: None,
+            family: None,
+            args: None,
         },
     );
     clis
@@ -3828,6 +3844,8 @@ fn clis_with_command(name: &str, command: &str) -> HashMap<String, CustomCli> {
             resume_args: None,
             mcp: None,
             headless_args: None,
+            family: None,
+            args: None,
         },
     );
     clis
@@ -3977,6 +3995,63 @@ fn a_config_without_mcp_loads_unchanged() {
 
     assert_eq!(parsed.get("claude-oss").and_then(|c| c.mcp), None);
     assert_eq!(launch_command("claude-oss", &parsed), "claude");
+}
+
+// ---------------------------------------------------------------------------
+// cli-provider-record: [clis.<name>] family + args
+// ---------------------------------------------------------------------------
+
+/// Task 2.1: a config without `family` / `args` serializes byte-identically,
+/// and set values round-trip.
+#[test]
+fn custom_cli_family_and_args_round_trip_and_are_skipped_when_unset() {
+    let src = "[clis.claude-oss]\ncommand = \"claude\"\nmcp = true\n";
+    let parsed: PawConfig = toml::from_str(src).unwrap();
+    let text = toml::to_string(&parsed).unwrap();
+    assert!(!text.contains("family"), "{text}");
+    assert!(!text.contains("args"), "{text}");
+    let unset = parsed.clis.get("claude-oss").unwrap().clone();
+    assert_eq!(
+        toml::to_string(&unset).unwrap(),
+        "command = \"claude\"\nmcp = true\n",
+        "an entry without the new fields serializes as before"
+    );
+
+    let mut set = unset;
+    set.family = Some("claude".to_string());
+    set.args = Some("--model sonnet".to_string());
+    let text = toml::to_string(&set).unwrap();
+    assert!(text.contains("family = \"claude\""), "{text}");
+    assert!(text.contains("args = \"--model sonnet\""), "{text}");
+    let back: CustomCli = toml::from_str(&text).unwrap();
+    assert_eq!(back, set);
+}
+
+/// Scenario "An unknown family is rejected".
+#[test]
+fn an_unknown_cli_family_is_rejected_naming_the_key_and_accepted_values() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[clis.foo]\ncommand = \"foo\"\nfamily = \"gpt\"\n");
+    let err = load_config_file(&path).unwrap_err().to_string();
+    assert!(err.contains("family"), "{err}");
+    for name in ["claude", "codex", "agy", "qwen", "cursor-agent", "generic"] {
+        assert!(err.contains(name), "should list {name}: {err}");
+    }
+}
+
+#[test]
+fn a_known_cli_family_loads() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.claude-oss]\ncommand = \"claude\"\nfamily = \"claude\"\nargs = \"--model opus\"\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    let entry = &config.clis["claude-oss"];
+    assert_eq!(entry.family.as_deref(), Some("claude"));
+    assert_eq!(entry.args.as_deref(), Some("--model opus"));
 }
 
 // ---------------------------------------------------------------------------

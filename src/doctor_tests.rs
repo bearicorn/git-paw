@@ -49,6 +49,10 @@ fn every_non_ok_check_carries_a_remedy() {
             available: true,
         },
         clis: Vec::new(),
+        cli_identities: vec![CliIdentityProbe {
+            id: "fast".into(),
+            ambiguity: Some("[clis.fast] is ambiguous".into()),
+        }],
         cli_setup: crate::cli_setup::doctor::SetupProbe::default(),
         broad_grants: crate::cli_setup::doctor::BroadGrantProbe::default(),
         grant_residue: crate::cli_setup::doctor::ResidueProbe {
@@ -253,6 +257,29 @@ fn no_resolving_cli_warns_and_names_the_launch_failure() {
         remedy.contains("add-cli") || remedy.contains("[clis."),
         "the remedy should point at installing or registering a CLI; got: {remedy}"
     );
+}
+
+/// Spec scenario "Doctor flags an ambiguous shim" (`cli-provider`): one
+/// row per entry, ✗ with the refusal and the fix when a launch would refuse.
+#[test]
+fn an_ambiguous_cli_entry_fails_and_an_unambiguous_one_passes() {
+    let checks = check_cli_identities(&[
+        CliIdentityProbe {
+            id: "fast".into(),
+            ambiguity: Some("[clis.fast] is ambiguous: /a vs /b".into()),
+        },
+        CliIdentityProbe {
+            id: "sonnet".into(),
+            ambiguity: None,
+        },
+    ]);
+    let fast = named(&checks, "[clis.fast]");
+    assert_eq!(fast.status, CheckStatus::Fail);
+    assert!(fast.detail.contains("/a vs /b"), "{}", fast.detail);
+    let remedy = fast.remedy.as_deref().unwrap_or_default();
+    assert!(remedy.contains("rename the [clis.fast] key"), "{remedy}");
+    assert!(remedy.contains("full path"), "{remedy}");
+    assert_eq!(named(&checks, "[clis.sonnet]").status, CheckStatus::Ok);
 }
 
 #[test]

@@ -12,7 +12,7 @@ use super::prompt_profile::CliPromptProfileOverride;
 use super::{global_config_path, load_config_file, save_config_to};
 
 /// A custom CLI definition from config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomCli {
     /// Command or path to the CLI binary.
     pub command: String,
@@ -84,13 +84,14 @@ pub struct CustomCli {
     /// is rejected at config load, naming the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_args: Option<String>,
-    /// Whether this CLI speaks git-paw's MCP protocol, overriding the
-    /// built-in MCP-capable table consulted by [`crate::skills::cli_speaks_mcp`].
+    /// Whether this CLI speaks git-paw's MCP protocol, overriding its
+    /// provider family's default ([`crate::agent_cli::CliProfile::mcp_capable`]).
     ///
-    /// Unset (the default, and omitted on serialization) means "ask the
-    /// built-in table", which knows only `claude`, `codex`, `cursor-agent`,
-    /// and `agy`; a custom variant therefore gets the helper-script boot
-    /// form unless it opts in here.
+    /// Unset (the default, and omitted on serialization) means "use the
+    /// family default": the `claude`, `codex`, `agy` and `cursor-agent`
+    /// families are MCP-capable. A custom entry with no `family` is
+    /// `generic`, so it gets the helper-script boot form unless it opts in
+    /// here or declares a family.
     ///
     /// Setting `mcp = true` for a CLI that does NOT have git-paw's MCP server
     /// registered **strands the agent at boot**: its boot block names MCP
@@ -110,27 +111,30 @@ pub struct CustomCli {
     /// config load, naming the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headless_args: Option<String>,
-}
-
-/// Built-in `headless_args` for `cli`, or `None` when the CLI has no known
-/// one-shot, stdin-reading mode.
-///
-/// Verified against upstream documentation 2026-10-29: Claude Code's
-/// `-p`/`--print` runs one non-interactive turn and reads the prompt from
-/// stdin when none is given on argv; Codex's `exec` subcommand does the same
-/// (a missing prompt argument, or `-`, reads stdin).
-#[must_use]
-fn built_in_headless_args(cli: &str) -> Option<&'static str> {
-    match cli {
-        "claude" => Some("-p"),
-        "codex" => Some("exec"),
-        _ => None,
-    }
+    /// The provider family this CLI is a variant of (`cli-provider`):
+    /// `claude`, `codex`, `agy`, `qwen`, `cursor-agent` or `generic`.
+    ///
+    /// Supplies the family's built-in approval flags, session-id / resume /
+    /// headless templates and MCP default wherever this entry sets no
+    /// override. Unset, a known CLI name keeps its own family and any other
+    /// name resolves `generic`; the family is never inferred from `command`.
+    /// An unknown value is rejected at config load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// Arguments appended verbatim after the executable on every launch of
+    /// this CLI, before the approval flags (`cli-provider`).
+    ///
+    /// Per-worker variation (model, effort) is one `[clis.*]` entry per worker
+    /// profile, each with its own `args`. Put permission flags in
+    /// [`Self::approval_args`], not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
 }
 
 /// Resolves the headless (one-shot, stdin-reading) arguments for `cli`,
 /// consulting (in order): the `[clis.<name>].headless_args` override, the
-/// built-in table, then `None` — the CLI has no headless form.
+/// built-in row of the CLI's provider family (Claude Code's `-p`, Codex's
+/// `exec`), then `None` — the CLI has no headless form.
 ///
 /// # Examples
 ///
@@ -148,9 +152,7 @@ pub fn resolve_headless_args<S: std::hash::BuildHasher>(
     cli: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> Option<String> {
-    clis.get(cli)
-        .and_then(|c| c.headless_args.clone())
-        .or_else(|| built_in_headless_args(cli).map(str::to_string))
+    crate::agent_cli::CliProfile::resolve(cli, clis).headless_args()
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -206,6 +208,8 @@ pub fn add_custom_cli_to(
             resume_args: None,
             mcp: None,
             headless_args: None,
+            family: None,
+            args: None,
         },
     );
 
@@ -288,11 +292,12 @@ pub fn launch_command<S: std::hash::BuildHasher>(
     }
 }
 
-/// Resolve the per-CLI settle delay (ms) for `cli` from `clis`, falling back
-/// to [`crate::DEFAULT_SUBMIT_DELAY_MS`].
+/// Resolve the per-CLI settle delay (ms) for the CLI identity `cli` from
+/// `clis`, falling back to [`crate::DEFAULT_SUBMIT_DELAY_MS`].
 ///
-/// `cli` may carry flags (e.g. `"mycli --foo"`); the lookup keys on the
-/// leading binary token. The delay is config-driven, never a hardcoded
+/// Delegates to the CLI's resolved record
+/// ([`crate::agent_cli::CliProfile::submit_delay_ms`]), keyed by its id, so a
+/// variant whose `command` differs from its key keeps its own delay. The delay is config-driven, never a hardcoded
 /// CLI-name table, so callers stay CLI-agnostic — a CLI whose large-paste
 /// handling needs more time sets `[clis.<name>].submit_delay_ms` rather than
 /// requiring a code change (W15-1, 2026-05-31 dogfood).
@@ -308,8 +313,5 @@ pub fn resolve_submit_delay_ms<S: std::hash::BuildHasher>(
     cli: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> u64 {
-    let base = cli.split_whitespace().next().unwrap_or(cli);
-    clis.get(base)
-        .and_then(|c| c.submit_delay_ms)
-        .unwrap_or(crate::DEFAULT_SUBMIT_DELAY_MS)
+    crate::agent_cli::CliProfile::resolve(cli, clis).submit_delay_ms()
 }

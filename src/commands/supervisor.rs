@@ -32,8 +32,8 @@ use super::helpers::{
     session_has_live_agents, start_broker_host, to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::launch::{
-    AttachContext, LaunchOutcome, attach_agent, gate_pane_or_fail_on_dialog, submit_prompt_to_pane,
-    write_repo_discovery_file,
+    AttachContext, LaunchOutcome, attach_agent, dry_run_launch_line, gate_pane_or_fail_on_dialog,
+    submit_prompt_to_pane, write_repo_discovery_file,
 };
 use super::purge::invalidate_if_stale;
 use super::recover::recover_session_detached;
@@ -602,6 +602,11 @@ pub fn supervisor(
                 format!("{cli} {flags}")
             };
             out.line(&format!("  {branch} \u{2192} {cmd} ({wt})"));
+            out.line(&dry_run_launch_line(
+                &effective_agent_cli(branch),
+                *agent_approval,
+                &config.clis,
+            )?);
         }
         return Ok(LaunchOutcome::Done);
     }
@@ -612,7 +617,11 @@ pub fn supervisor(
     // row, broker or not, so the grid always has one.
     crate::surface::supervisor_layout(branches.len(), true)?;
 
-    // Real launch.
+    // Resolve every branch's CLI first, so an ambiguous PATH shim refuses the
+    // launch before any worktree exists.
+    for branch in &branches {
+        crate::agent_cli::resolve_for_launch(&effective_agent_cli(branch), &config.clis)?;
+    }
     git::prune_worktrees(repo_root)?;
 
     // Collect the distinct spec backends for this session so the
@@ -696,20 +705,15 @@ pub fn supervisor(
     let worktree_runtime = config.worktree_runtime();
 
     for branch in &branches {
-        // Resolve this branch's own CLI (its spec-driven override, or the
-        // session-wide fallback) and its approval flags, then build a fresh
-        // context — a spec-driven session can launch a distinct CLI per
-        // branch (GP-10), so the context can no longer be shared verbatim
-        // across the loop.
+        // A spec can set a different CLI per branch, so each branch needs
+        // its own context.
         let branch_cli = effective_agent_cli(branch);
-        let branch_flags =
-            config::resolve_approval_flags(&branch_cli, agent_approval, &config.clis);
         let attach_ctx = AttachContext {
             repo_root,
             project: &project,
             broker_config: &broker_config,
             agent_cli: &branch_cli,
-            agent_flags: &branch_flags,
+            approval: agent_approval,
             coordination_template: coordination_template.as_ref(),
             docs_fetch_template: docs_fetch_template.as_ref(),
             gate_commands: &gate_commands,

@@ -3760,6 +3760,8 @@ mod tests {
                         resume_args: None,
                         mcp: None,
                         headless_args: None,
+                        family: None,
+                        args: None,
                     },
                 )
             })
@@ -7933,6 +7935,8 @@ mod tests {
                 resume_args: None,
                 mcp: None,
                 headless_args: None,
+                family: None,
+                args: None,
             },
         );
         let merge_check = FakeMergeCheck::default();
@@ -10006,6 +10010,7 @@ mod tests {
             invocation: super::super::escalation::HeadlessInvocation {
                 cli: "claude".to_string(),
                 program: "claude".to_string(),
+                launch_args: Vec::new(),
                 approval_flags: Vec::new(),
                 headless_args: vec!["-p".to_string()],
             },

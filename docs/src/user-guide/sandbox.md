@@ -22,23 +22,30 @@ git-paw already gives a wrapper everything it needs at launch: the pane's workin
 directory *is* the worktree, and `GIT_PAW_BROKER_URL` is in the environment. So a
 wrapper derives its scope from `$PWD` with **zero git-paw changes**.
 
-**The wrapper must be a PATH-resolvable executable.** git-paw launches a custom
-CLI *by its name* on `PATH` — not by an arbitrary script path. Put your wrapper on
-`PATH` (e.g. symlink it next to the real CLI) and set `command` to that name:
+**Point `command` at the wrapper.** git-paw launches the executable `command`
+resolves to, so `command` may be the wrapper's path, and the wrapper need not be
+on `PATH` under the entry's name. Declare the family so the sandboxed CLI keeps
+the real CLI's native flags and boot form:
 
 ```toml
 [clis.claude-sandboxed]
-command = "claude-sandboxed"   # a wrapper on PATH, NOT a path to a script
+command = "/home/me/bin/claude-sandboxed"   # the wrapper script itself
+family = "claude"
 ```
 
-If you instead point `command` at a script path that isn't resolvable by name,
-the pane drops to a raw shell and the boot prompt is typed into it.
+If you also keep a wrapper on `PATH` under the entry's name
+(`claude-sandboxed`), it must be the same file `command` resolves to. When the
+two differ, git-paw **refuses to launch** that CLI and names both paths, rather
+than guess which one you meant — so a sandbox wrapper is never silently
+bypassed. Rename the entry's key, or set `command` to the full path of the
+executable you mean, and start again.
 
-`git paw doctor` reports whether `sandbox-exec`/`bwrap` is installed.
+`git paw doctor` reports whether `sandbox-exec`/`bwrap` is installed, and
+flags an ambiguous `[clis.*]` entry before a launch would refuse it.
 
 ## macOS (`sandbox-exec`)
 
-A wrapper (`claude-sandboxed` on your `PATH`):
+A wrapper (the script `command` points at):
 
 ```sh
 #!/bin/sh

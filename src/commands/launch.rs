@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::agent_cli::{CliProfile, LaunchSession};
 use crate::config;
 use crate::error::PawError;
 use crate::git;
@@ -156,8 +157,8 @@ pub(crate) struct AttachContext<'a> {
     pub(crate) broker_config: &'a crate::config::BrokerConfig,
     /// Coding-agent CLI id (no flags).
     pub(crate) agent_cli: &'a str,
-    /// Resolved approval flags appended to `agent_cli` for the pane command.
-    pub(crate) agent_flags: &'a str,
+    /// Effective approval level the pane command's flags are resolved for.
+    pub(crate) approval: &'a config::ApprovalLevel,
     /// Pre-resolved coordination skill template (`None` when broker disabled).
     pub(crate) coordination_template: Option<&'a crate::skills::SkillTemplate>,
     /// Pre-resolved docs-fetch skill template (`None` unless `docs_base_url` is
@@ -184,9 +185,7 @@ pub(crate) struct AttachContext<'a> {
     /// Resolved `[worktree]` runtime-provisioning config (env-file copies and
     /// port allocation). Inert when neither sub-table is configured.
     pub(crate) worktree_runtime: &'a crate::config::WorktreeConfig,
-    /// The full `[clis.<name>]` table, consulted by
-    /// [`config::resolve_session_id_args`] to decide whether `agent_cli`
-    /// gets a fresh session id at launch (`worker-session-id-capture`).
+    /// The full `[clis.<name>]` table `agent_cli` resolves its record from.
     pub(crate) clis: &'a std::collections::HashMap<String, config::CustomCli>,
 }
 
@@ -216,28 +215,10 @@ pub(crate) struct AttachedAgent {
 /// new branch) share one implementation — guaranteeing an added agent is
 /// byte-identical to a start-time agent and that future boot-prompt fixes only
 /// have to land here.
-/// Assembles an agent pane's CLI invocation: the launch command, then its
-/// approval flags, then the resolved `session_id_args` — each appended only
-/// when non-empty, so a CLI with neither is invoked bare.
 ///
-/// `command` is the pane's *launch command* ([`config::launch_command`]),
-/// not the CLI identity: flags and session-id args are resolved by identity
-/// but appended after the command the pane actually runs.
-pub(crate) fn agent_cli_command(
-    command: &str,
-    flags: &str,
-    session_id_args: Option<&str>,
-) -> String {
-    let mut command = command.to_string();
-    for part in [flags, session_id_args.unwrap_or_default()] {
-        if !part.is_empty() {
-            command.push(' ');
-            command.push_str(part);
-        }
-    }
-    command
-}
-
+/// # Errors
+///
+/// Refuses an ambiguous PATH shim before the worktree is created.
 pub(crate) fn attach_agent(
     ctx: &AttachContext,
     branch: &str,
@@ -245,6 +226,7 @@ pub(crate) fn attach_agent(
     runtime_slot: u16,
     out: &mut dyn Output,
 ) -> Result<AttachedAgent, PawError> {
+    let profile = crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis)?;
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
 
     // Provision the worktree's runtime state — the declared env-file copies,
@@ -328,28 +310,16 @@ pub(crate) fn attach_agent(
 
     // Assign a fresh session id when this CLI resolves a `session_id_args`
     // template — generated (and thus persisted) before the CLI ever starts,
-    // so recovery can resume it even if the pane dies moments later
-    // (worker-session-id-capture design D1). Appended after the approval
-    // flags, mirroring how those are appended after the bare CLI command.
-    let has_session_id_template =
-        config::resolve_session_id_args(ctx.agent_cli, "probe", ctx.clis).is_some();
-    let cli_session_id = if has_session_id_template {
+    // so recovery can resume it even if the pane dies moments later.
+    let cli_session_id = if profile.session_id_args("").is_some() {
         Some(crate::random::generate_uuid_v4()?)
     } else {
         None
     };
-    let session_id_args = cli_session_id
+    let session = cli_session_id
         .as_deref()
-        .and_then(|id| config::resolve_session_id_args(ctx.agent_cli, id, ctx.clis));
-
-    // The pane launches the identity's configured `[clis.<name>].command`
-    // (falling back to the identity itself when unconfigured); every resolver
-    // above and the `cli` recorded below stay keyed by `ctx.agent_cli`.
-    let cli_command = agent_cli_command(
-        &config::launch_command(ctx.agent_cli, ctx.clis),
-        ctx.agent_flags,
-        session_id_args.as_deref(),
-    );
+        .map_or(LaunchSession::None, LaunchSession::Assign);
+    let cli_command = profile.launch_command(ctx.approval, session);
 
     let (prompt, entry_point) = compose_agent_launch(ctx, branch, spec_entry, &wt.path);
 
@@ -376,6 +346,21 @@ pub(crate) fn attach_agent(
     })
 }
 
+/// The dry-run plan line naming the exact command a worker pane would run.
+///
+/// # Errors
+///
+/// Refuses an ambiguous PATH shim, exactly as the real launch would.
+pub(crate) fn dry_run_launch_line(
+    cli: &str,
+    approval: config::ApprovalLevel,
+    clis: &std::collections::HashMap<String, config::CustomCli>,
+) -> Result<String, PawError> {
+    let command = crate::agent_cli::resolve_for_launch(cli, clis)?
+        .launch_command(&approval, LaunchSession::None);
+    Ok(format!("      runs: {command}"))
+}
+
 /// Builds one agent's first message and, when its spec format declares one,
 /// the workflow entry point to submit after it.
 ///
@@ -391,7 +376,7 @@ pub(crate) fn compose_agent_launch(
     let boot_block = crate::skills::build_boot_block(
         branch,
         &ctx.broker_config.url(),
-        crate::skills::cli_speaks_mcp(ctx.agent_cli, ctx.clis),
+        CliProfile::resolve(ctx.agent_cli, ctx.clis).mcp_capable(),
     );
     let task_prompt = build_task_prompt(spec_entry);
     (
@@ -536,35 +521,6 @@ pub(crate) fn write_repo_discovery_file_with_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `agent_cli_command` appends only the parts that carry text, so a CLI
-    /// with no flags and no session-id args is invoked bare, and a resolved
-    /// but empty `session_id_args` template adds no trailing space.
-    #[test]
-    fn agent_cli_command_appends_only_non_empty_parts() {
-        assert_eq!(agent_cli_command("claude", "", None), "claude");
-        assert_eq!(
-            agent_cli_command("claude", "--dangerous", None),
-            "claude --dangerous"
-        );
-        assert_eq!(
-            agent_cli_command("claude", "", Some("--session-id abc")),
-            "claude --session-id abc",
-            "session-id args attach even when the CLI has no approval flags"
-        );
-        assert_eq!(
-            agent_cli_command("claude", "--dangerous", Some("--session-id abc")),
-            "claude --dangerous --session-id abc",
-            "flags precede the session-id args"
-        );
-        // A `session_id_args` template that resolves to the empty string
-        // (`session_id_args = ""`) must not leave a dangling separator.
-        assert_eq!(agent_cli_command("claude", "", Some("")), "claude");
-        assert_eq!(
-            agent_cli_command("claude", "--dangerous", Some("")),
-            "claude --dangerous"
-        );
-    }
 
     // Byte-identical safety net (D1 / task 1.3): each per-backend boot-prompt
     // framing sentence, relocated from a compiled match arm into its own
@@ -1184,7 +1140,9 @@ mod permission_seeding_removed_tests {
 
     use tempfile::TempDir;
 
-    use crate::config::{BrokerConfig, CustomCli, WorktreeConfig, WorktreePlacement};
+    use crate::config::{
+        ApprovalLevel, BrokerConfig, CustomCli, WorktreeConfig, WorktreePlacement,
+    };
     use crate::skills::GateCommands;
 
     use super::{AttachContext, attach_agent};
@@ -1224,7 +1182,7 @@ mod permission_seeding_removed_tests {
             project: "test",
             broker_config,
             agent_cli: "claude",
-            agent_flags: "",
+            approval: &ApprovalLevel::Manual,
             coordination_template: None,
             docs_fetch_template: None,
             gate_commands,
@@ -1465,7 +1423,7 @@ mod permission_seeding_removed_tests {
             project: "test",
             broker_config: &broker_config,
             agent_cli: "codex",
-            agent_flags: "",
+            approval: &ApprovalLevel::Manual,
             coordination_template: None,
             docs_fetch_template: None,
             gate_commands: &gate_commands,
@@ -1507,7 +1465,7 @@ mod permission_seeding_removed_tests {
             project: "test",
             broker_config: &broker_config,
             agent_cli: "claude",
-            agent_flags: "--dangerously-skip-permissions",
+            approval: &ApprovalLevel::FullAuto,
             coordination_template: None,
             docs_fetch_template: None,
             gate_commands: &gate_commands,
@@ -1543,6 +1501,113 @@ mod permission_seeding_removed_tests {
             flags_pos < session_pos,
             "--dangerously-skip-permissions must precede --session-id, got: {}",
             attached.pane.launch_command
+        );
+    }
+
+    /// Spec scenarios "Start and add build identical commands" and
+    /// "Arguments are appended" (`cli-provider`): the pane command
+    /// `attach_agent` builds for `add` and supervised start is the bare
+    /// start command for the same CLI plus its session id, `args` included.
+    #[test]
+    fn attach_agent_builds_the_start_command_plus_its_session_id() {
+        use crate::agent_cli::{CliProfile, LaunchSession};
+
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::from([(
+            "claude".to_string(),
+            CustomCli {
+                command: "claude".to_string(),
+                args: Some("--model sonnet".to_string()),
+                ..CustomCli::default()
+            },
+        )]);
+        let mut ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
+        ctx.approval = &ApprovalLevel::Auto;
+
+        let attached = attach_agent(
+            &ctx,
+            "feat-args",
+            None,
+            0,
+            &mut crate::commands::CaptureOutput::default(),
+        )
+        .expect("attach_agent succeeds");
+        let id = attached.entry.cli_session_id.expect("claude gets an id");
+        let start_command = CliProfile::resolve("claude", &clis)
+            .launch_command(&ApprovalLevel::Auto, LaunchSession::None);
+
+        assert_eq!(
+            start_command,
+            "claude --model sonnet --permission-mode acceptEdits"
+        );
+        assert_eq!(
+            attached.pane.launch_command,
+            format!("{start_command} --session-id {id}")
+        );
+    }
+
+    /// Spec scenario "An ambiguous shim is refused" (`cli-provider`). `git`
+    /// is always on PATH, so a `[clis.git]` entry pointing elsewhere is
+    /// ambiguous.
+    #[test]
+    fn attach_agent_refuses_an_ambiguous_shim_before_creating_the_worktree() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+        let other = sandbox.path().join("other-agent");
+        std::fs::write(&other, "#!/bin/sh\n").unwrap();
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::from([(
+            "git".to_string(),
+            CustomCli {
+                command: other.to_string_lossy().into_owned(),
+                ..CustomCli::default()
+            },
+        )]);
+        let mut ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
+        ctx.agent_cli = "git";
+
+        let Err(err) = attach_agent(
+            &ctx,
+            "feat-shim",
+            None,
+            0,
+            &mut crate::commands::CaptureOutput::default(),
+        ) else {
+            panic!("an ambiguous shim must be refused");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&*other.to_string_lossy()), "{msg}");
+        assert!(msg.contains("[clis.git] command"), "{msg}");
+        let branches = StdCommand::new("git")
+            .current_dir(&repo)
+            .args(["branch", "--list", "feat-shim"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "no worktree branch may be created for a refused launch"
         );
     }
 }

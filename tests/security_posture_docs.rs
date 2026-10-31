@@ -156,8 +156,30 @@ fn no_classifier_is_presented_as_a_control() {
     );
 }
 
-// Scenario: both OSes documented; PATH-resolvable wrapper; the writable allow-list;
-// the git persistence gap; per-OS credential refresh; confidentiality tiers.
+/// `core-security-posture` scenario "The wrapper is pointed at by `command`":
+/// the docs say `command` may be the wrapper's path, and that a different
+/// wrapper on PATH under the entry's name is refused rather than guessed.
+#[test]
+fn sandbox_chapter_points_command_at_the_wrapper_and_explains_the_refusal() {
+    let sb = read("docs/src/user-guide/sandbox.md");
+    let low = sb.to_lowercase();
+    assert!(
+        sb.contains("Point `command` at the wrapper"),
+        "sandbox.md must tell the reader to point `command` at the wrapper"
+    );
+    assert!(
+        low.contains("need not be") && low.contains("on `path`"),
+        "sandbox.md must say the wrapper need not be on PATH"
+    );
+    assert!(
+        low.contains("same file") && low.contains("refuses to launch"),
+        "sandbox.md must explain the ambiguous-shim refusal"
+    );
+}
+
+// Scenario: both OSes documented; the wrapper is pointed at by `command`; the
+// writable allow-list; the git persistence gap; per-OS credential refresh;
+// confidentiality tiers.
 #[test]
 fn sandbox_chapter_covers_the_required_setup() {
     let sb = read("docs/src/user-guide/sandbox.md");
@@ -166,7 +188,6 @@ fn sandbox_chapter_covers_the_required_setup() {
         &[
             "sandbox-exec", // macOS backend
             "bwrap",        // Linux/WSL backend
-            "PATH",         // launch-by-name requirement
             ".git/hooks",   // persistence gap
             ".git/config",
             "Keychain",     // macOS credential refresh

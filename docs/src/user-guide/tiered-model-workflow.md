@@ -27,6 +27,31 @@ gate failure into an automatic re-engagement rather than a human hop. Both ship 
 v0.14.0. What *you* bring is the two pre-steps this chapter is about: a plan, and a
 definition of "verified."
 
+### Choosing each worker's model
+
+The model is a launch argument of the worker's CLI, so give each worker profile
+its own `[clis.*]` entry with `args`. Several entries may launch the same
+executable; declaring `family` keeps the CLI's native approval flags, session
+resume and MCP boot form:
+
+```toml
+[clis.sonnet]
+command = "claude"
+family = "claude"
+args = "--model sonnet"
+
+[clis.opus]
+command = "claude"
+family = "claude"
+args = "--model opus"
+```
+
+Then name the profile as the worker CLI (`default_spec_cli = "sonnet"`, or
+`--cli sonnet`). The arguments are appended on every launch path — start,
+`git paw add`, and session recovery alike — so a recovered worker keeps its
+model. No wrapper script on `PATH` is needed; see
+[Provider families](../supported-clis.md#provider-families).
+
 ## Step 1 — Plan first; planning is not a git-paw command
 
 git-paw does not author your change set — it *executes* one. Author the plan

@@ -22,8 +22,9 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::agent_cli::CliProfile;
 use crate::command_runner::{ChildState, CommandRunner, SpawnSpec, SpawnedChild};
-use crate::config::{CustomCli, SupervisorConfig, resolve_approval_flags, resolve_headless_args};
+use crate::config::{CustomCli, SupervisorConfig};
 use crate::supervisor::drive::{
     CORRECTION_EXHAUSTED_VERDICT, Escalation, merge_handoff_text, question_handoff_text,
 };
@@ -187,6 +188,9 @@ pub struct HeadlessInvocation {
     pub cli: String,
     /// The program to run: `[clis.<name>].command`, else the CLI name.
     pub program: String,
+    /// The entry's `args`, split on whitespace: no shell runs here, so
+    /// quoting is not supported.
+    pub launch_args: Vec<String>,
     /// The approval flags resolved for the orchestrator's approval level.
     pub approval_flags: Vec<String>,
     /// The resolved headless arguments.
@@ -194,11 +198,13 @@ pub struct HeadlessInvocation {
 }
 
 impl HeadlessInvocation {
-    /// The argv after the program: approval flags, then headless arguments.
+    /// The argv after the program: `args`, approval flags, then headless
+    /// arguments.
     #[must_use]
     pub fn args(&self) -> Vec<String> {
-        self.approval_flags
+        self.launch_args
             .iter()
+            .chain(&self.approval_flags)
             .chain(&self.headless_args)
             .cloned()
             .collect()
@@ -261,13 +267,14 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
             "no orchestrator CLI is configured (set [supervisor] cli or default_cli)".to_string(),
         );
     };
-    let Some(headless) = resolve_headless_args(cli, clis) else {
+    let profile = CliProfile::resolve(cli, clis);
+    let Some(headless) = profile.headless_args() else {
         return unavailable(format!(
             "`{cli}` has no headless form (set [clis.{cli}].headless_args)"
         ));
     };
     let level = supervisor.orchestrator_approval();
-    let flags = resolve_approval_flags(cli, &level, clis);
+    let flags = profile.approval_flags(&level);
     let warning = (level == crate::config::ApprovalLevel::FullAuto && flags.trim().is_empty())
         .then(|| {
             format!(
@@ -276,13 +283,16 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
                  invocations run without approval flags."
             )
         });
-    let program = clis
-        .get(cli)
-        .map_or_else(|| cli.to_string(), |c| c.command.clone());
     HandoffResolution {
         invocation: Ok(HeadlessInvocation {
             cli: cli.to_string(),
-            program,
+            program: profile.command().to_string(),
+            launch_args: profile
+                .args()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
             approval_flags: flags.split_whitespace().map(str::to_string).collect(),
             headless_args: headless.split_whitespace().map(str::to_string).collect(),
         }),
@@ -1104,6 +1114,24 @@ mod tests {
         assert_eq!(r.notice(), "headless hand-off: stub --once");
     }
 
+    #[test]
+    fn the_entry_args_precede_the_approval_flags_and_headless_form() {
+        let r = resolve(&config(
+            "[supervisor]\ncli = \"opus\"\napproval = \"full-auto\"\n\
+             [clis.opus]\ncommand = \"claude\"\nfamily = \"claude\"\nargs = \"--model opus\"\n",
+        ));
+        assert_eq!(
+            argv(&r),
+            [
+                "claude",
+                "--model",
+                "opus",
+                "--dangerously-skip-permissions",
+                "-p"
+            ]
+        );
+    }
+
     // --- spawn spec -------------------------------------------------------
 
     fn setup() -> HandoffSetup {
@@ -1111,6 +1139,7 @@ mod tests {
             invocation: HeadlessInvocation {
                 cli: "claude".to_string(),
                 program: "claude".to_string(),
+                launch_args: Vec::new(),
                 approval_flags: vec!["--permission-mode".to_string(), "acceptEdits".to_string()],
                 headless_args: vec!["-p".to_string()],
             },

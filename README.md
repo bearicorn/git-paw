@@ -54,6 +54,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Per-branch CLI assignment** — use Claude on one branch and Codex on another in the same session
 - **Presets** — save branch + CLI combos in config for one-command launches
 - **Custom CLI support** — register any AI CLI with `git paw add-cli`
+- **Custom CLI variants** — a `[clis.<name>]` entry can declare `family = "claude"` (or `codex`, `agy`, `qwen`, `cursor-agent`) to inherit that CLI's native approval flags, session resume and MCP boot form, and `args` to pin a per-worker model or other launch flags. See [Provider families](docs/src/supported-clis.md#provider-families)
 - **Session persistence** — state saved to disk, survives tmux crashes and system reboots
 - **Dry run** — preview the session plan before executing with `--dry-run`
 - **Mouse-friendly tmux** — click to switch panes, drag borders to resize, scroll with mouse wheel
