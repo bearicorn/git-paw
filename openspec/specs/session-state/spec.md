@@ -211,6 +211,8 @@ After a tmux crash, the persisted session SHALL contain all data needed to recon
 
 ### Requirement: Session persistence SHALL work through the public API
 
+Session state SHALL be saved and loaded through the crate's public session API.
+
 #### Scenario: Save and load round-trip
 - **GIVEN** a session with 2 worktrees
 - **WHEN** `save_session_in()` and `load_session_from()` are called
