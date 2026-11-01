@@ -19,7 +19,7 @@
 //! permission hook: the escalation signal reuses the existing `agent.question`
 //! and `agent.status` variants.
 
-use crate::config::claude_prompt_profile;
+use crate::config::CompiledPromptProfile;
 use crate::supervisor::permission_prompt::{
     extract_command_slice, is_live_prompt, live_prompt_markers_at_tail,
 };
@@ -32,24 +32,25 @@ use crate::supervisor::permission_prompt::{
 /// cancel`, anchored over a window wide enough to span a full multi-option
 /// prompt block and searched upward over a bounded trailing region so a CLI
 /// that renders chrome under its input area doesn't hide a live modal),
-/// extended with the embedded Claude Code profile's approval markers so the
-/// re-confirm also recognises other agent CLIs' prompt wordings (`requires
-/// approval`, `(y/n)`, …) that `permission-detection` accepts. A marker found
+/// extended with `profile`'s approval markers so the re-confirm also
+/// recognises the pane CLI's other prompt wordings (`requires approval`,
+/// `(y/n)`, …) that `permission-detection` accepts. A marker found
 /// only in scrollback above the tail — or found only as a bare substring
 /// mention with no accompanying option list once the anchor has shifted past
 /// the capture's true end — is treated as *not live*: the first is a prompt
 /// already answered and scrolled away, the second is narration or tool
 /// output that merely mentions the footer text rather than the modal itself.
 #[must_use]
-pub fn live_prompt_in_tail(capture: &str) -> bool {
-    is_live_prompt(capture)
+pub fn live_prompt_in_tail(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    is_live_prompt(capture, profile)
         || live_prompt_markers_at_tail(
             capture,
-            &claude_prompt_profile()
+            &profile
                 .approval_markers
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
+            profile,
         )
 }
 
@@ -71,8 +72,12 @@ pub fn live_prompt_in_tail(capture: &str) -> bool {
 /// answered its footer disappears and the next distinct prompt re-confirms
 /// fresh.
 #[must_use]
-pub fn approval_dedup_key(agent_id: &str, capture: &str) -> String {
-    let command = extract_command_slice(capture).unwrap_or_default();
+pub fn approval_dedup_key(
+    agent_id: &str,
+    capture: &str,
+    profile: &CompiledPromptProfile,
+) -> String {
+    let command = extract_command_slice(capture, profile).unwrap_or_default();
     // The unit separator keeps the two identity components unambiguous even
     // when a command contains arbitrary punctuation.
     format!("{agent_id}\u{1f}{command}")
@@ -80,7 +85,17 @@ pub fn approval_dedup_key(agent_id: &str, capture: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    fn live_prompt_in_tail(capture: &str) -> bool {
+        super::live_prompt_in_tail(capture, crate::config::default_compiled_prompt_profile())
+    }
+
+    fn approval_dedup_key(agent_id: &str, capture: &str) -> String {
+        super::approval_dedup_key(
+            agent_id,
+            capture,
+            crate::config::default_compiled_prompt_profile(),
+        )
+    }
 
     // --- Task 5.1: tail check -------------------------------------------
 

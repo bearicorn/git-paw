@@ -2,15 +2,11 @@
 
 ### Requirement: Detectors receive the profile of the surface they inspect
 
-Every production prompt-shape decision SHALL use the profile resolved for the CLI running on the
-surface it inspects: launch readiness, approval-marker detection, the live-prompt gate and the
-`sweep.sh approve` re-confirm, command-slice extraction for escalation text, dedup and learnings,
-file-prompt path matching, option-line recognition (including the `sweep.sh approve` option-1
-guard), mid-response and input-box detection, CLI-unavailability detection, permission-mode
-inference, and manual-approval boilerplate filtering. The embedded
-default profile SHALL be read only by profile resolution, as the fallback for a CLI with no profile
-of its own; no detector SHALL read it directly. A profile SHALL be resolved once per agent and reused
-for every decision about that agent's surface.
+Every production prompt-shape decision SHALL use the profile resolved for the CLI on the surface it
+inspects. This covers launch readiness, approval-marker and live-prompt detection (including the
+`sweep.sh approve` re-confirm), escalation command slices, dedup and learnings, file-prompt paths,
+option lines (including the `sweep.sh approve` option-1 guard), mid-response, input-box and
+CLI-unavailability detection, mode inference and manual-approval boilerplate filtering.
 
 #### Scenario: An override reaches the drive loop for that pane
 
@@ -26,6 +22,12 @@ for every decision about that agent's surface.
 - **WHEN** both panes are swept
 - **THEN** the `claude` pane SHALL be evaluated with the embedded default
 - **AND** the `mycli` pane SHALL be evaluated with its override
+
+### Requirement: The embedded default profile is read only by profile resolution
+
+The embedded default profile SHALL be read only by profile resolution, as the fallback for a CLI with
+no profile of its own; no detector SHALL read it directly. A profile SHALL be resolved once per agent
+and reused for every decision about that agent's surface.
 
 #### Scenario: No overrides reproduces current decisions
 
@@ -99,6 +101,12 @@ without naming a CLI, as before this change.
 
 - **GIVEN** a session with a `mycli` worker whose override sets `approval_markers`
 - **WHEN** the helper evaluates that worker's pane
+- **THEN** it SHALL match the override's markers, as the compiled loop does for the same pane
+
+#### Scenario: The helper re-confirm reads a pane's own live-prompt markers
+
+- **GIVEN** a session with a `mycli` worker whose override sets `live_prompt_markers`
+- **WHEN** the helper's live-prompt re-confirm evaluates that worker's pane
 - **THEN** it SHALL match the override's markers, as the compiled loop does for the same pane
 
 #### Scenario: The approve guard reads the pane's own broad-grant marker

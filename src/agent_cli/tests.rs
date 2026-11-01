@@ -571,3 +571,113 @@ fn a_key_not_on_path_is_not_ambiguous() {
         .ensure_unambiguous_in(Some(bin.as_os_str()))
         .expect("no foo on PATH");
 }
+
+/// An entry whose prompt profile overrides `live_prompt_markers`.
+fn with_live_marker(command: &str, marker: &str) -> CustomCli {
+    CustomCli {
+        prompt_profile: Some(crate::config::CliPromptProfileOverride {
+            live_prompt_markers: Some(vec![marker.to_string()]),
+            ..Default::default()
+        }),
+        submit_delay_ms: Some(7),
+        ..entry(command)
+    }
+}
+
+/// Spec scenario "An unrecorded CLI falls back to generic": an agent never
+/// recorded, or recorded with no CLI, resolves the `generic` family's profile
+/// and settle delay.
+#[test]
+fn an_agent_without_a_recorded_cli_resolves_generic() {
+    let mut profiles = AgentProfiles::new(clis(&[("mycli", with_live_marker("mycli", "go?"))]));
+    profiles.record("feat-blank", "  ");
+    let generic = CliProfile::for_family(CliFamily::Generic);
+    for agent in ["feat-unseen", "feat-blank"] {
+        let resolved = profiles.get(agent);
+        assert_eq!(*resolved.prompt, generic.prompt_profile(), "{agent}");
+        assert_eq!(
+            resolved.submit_delay_ms,
+            generic.submit_delay_ms(),
+            "{agent}"
+        );
+    }
+}
+
+/// Each agent resolves the CLI its launch record names.
+#[test]
+fn an_agent_resolves_its_recorded_cli() {
+    let map = clis(&[("mycli", with_live_marker("mycli", "go?"))]);
+    let mut profiles = AgentProfiles::new(map);
+    profiles.record("feat-a", "mycli");
+    profiles.record("feat-b", "claude");
+    profiles.record("feat-a", "mycli");
+    assert_eq!(
+        profiles.get("feat-a").prompt.live_prompt_markers,
+        vec!["go?"]
+    );
+    assert_eq!(profiles.get("feat-a").submit_delay_ms, 7);
+    assert_eq!(*profiles.get("feat-b").prompt, *claude_prompt_profile());
+}
+
+/// A kept worktree re-added with another CLI (`remove --keep-worktree`, then
+/// `add --cli`) keeps its agent id; the running loop must read it with the
+/// new CLI's profile, and a record that drops the CLI falls back to generic.
+#[test]
+fn an_agent_re_recorded_with_another_cli_is_re_resolved() {
+    let map = clis(&[("mycli", with_live_marker("mycli", "go?"))]);
+    let mut profiles = AgentProfiles::new(map);
+    profiles.record("feat-a", "claude");
+    profiles.record("feat-a", "mycli");
+    assert_eq!(
+        profiles.get("feat-a").prompt.live_prompt_markers,
+        vec!["go?"]
+    );
+    profiles.record("feat-a", "claude");
+    assert_eq!(*profiles.get("feat-a").prompt, *claude_prompt_profile());
+    profiles.record("feat-a", "");
+    let generic = CliProfile::for_family(CliFamily::Generic);
+    assert_eq!(*profiles.get("feat-a").prompt, generic.prompt_profile());
+}
+
+/// Spec scenario "Claude's dialogs are recognised for a Claude-family pane"
+/// and "A generic CLI keeps today's dialog handling": every family answers
+/// the embedded default dialogs, and a configured entry cannot change them.
+#[test]
+fn every_family_answers_the_default_dialogs() {
+    for family in CliFamily::ALL {
+        assert_eq!(
+            CliProfile::for_family(family).dialog_markers(),
+            DEFAULT_DIALOG_MARKERS,
+            "{family}"
+        );
+    }
+    let map = clis(&[(
+        "mycli",
+        with_live_marker("mycli", "Bypass Permissions mode"),
+    )]);
+    assert_eq!(
+        CliProfile::resolve("mycli", &map).dialog_markers(),
+        DEFAULT_DIALOG_MARKERS
+    );
+}
+
+/// An override pattern that does not compile is reported naming its field —
+/// never a panic — when a table that bypassed config load is resolved.
+#[test]
+fn an_uncompilable_override_pattern_is_an_error_naming_the_field() {
+    let bad = CustomCli {
+        prompt_profile: Some(crate::config::CliPromptProfileOverride {
+            paste_buffer_pattern: Some("(".to_string()),
+            ..Default::default()
+        }),
+        ..entry("mycli")
+    };
+    let err = CliProfile::resolve("mycli", &clis(&[("mycli", bad)]))
+        .compiled_prompt_profile()
+        .expect_err("an unclosed group does not compile");
+    assert!(
+        err.to_string()
+            .contains("[clis.mycli].prompt_profile.paste_buffer_pattern"),
+        "{err}"
+    );
+}

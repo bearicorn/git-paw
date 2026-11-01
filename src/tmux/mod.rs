@@ -20,7 +20,7 @@ pub use command::{
 pub use layout::{agent_row_widths, rebalance_agent_rows};
 pub use readiness::{
     PaneReadiness, ReadinessBudget, ReadinessOutcome, classify_pane_readiness,
-    classify_pane_readiness_with_profile, gate_pane_for_injection,
+    gate_pane_for_injection,
 };
 pub use session::{
     SessionLiveness, agents_without_live_pane, attach, detach_client, ensure_tmux_installed,

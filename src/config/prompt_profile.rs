@@ -23,9 +23,11 @@
 
 use std::collections::HashMap;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::CustomCli;
+use crate::static_regex::static_regex;
 
 /// A fully resolved per-CLI prompt-shape profile.
 ///
@@ -214,8 +216,8 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "❯".to_string(),
         ],
         command_header_markers: vec!["Bash command".to_string(), "Bash(".to_string()],
-        file_prompt_pattern: r"(?i)(?:allow this write to|allow this edit to|make this edit to|write to|create file|edit file|write file)\s+(?:the file\s+)?(.+?)\s*\??\s*$".to_string(),
-        option_line_pattern: r"^[0-9][.)]".to_string(),
+        file_prompt_pattern: DEFAULT_FILE_PROMPT_PATTERN.to_string(),
+        option_line_pattern: DEFAULT_OPTION_LINE_PATTERN.to_string(),
         broad_grant_marker: "don't ask again".to_string(),
         input_sigils: vec![">".to_string(), "❯".to_string()],
         mode_accept_edits_markers: vec![
@@ -247,8 +249,8 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "API Error".to_string(),
             "Connection closed mid-response".to_string(),
         ],
-        context_bloat_pattern: r"/?(clear|compact) to save ([0-9]+)k tokens".to_string(),
-        paste_buffer_pattern: r"Pasted text #[0-9]".to_string(),
+        context_bloat_pattern: DEFAULT_CONTEXT_BLOAT_PATTERN.to_string(),
+        paste_buffer_pattern: DEFAULT_PASTE_BUFFER_PATTERN.to_string(),
         cli_unavailable_markers: vec![
             "You've hit your session limit".to_string(),
             "usage limit reached".to_string(),
@@ -257,6 +259,219 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "org's monthly spend limit".to_string(),
         ],
     })
+}
+
+const DEFAULT_FILE_PROMPT_PATTERN: &str = r"(?i)(?:allow this write to|allow this edit to|make this edit to|write to|create file|edit file|write file)\s+(?:the file\s+)?(.+?)\s*\??\s*$";
+const DEFAULT_OPTION_LINE_PATTERN: &str = r"^[0-9][.)]";
+const DEFAULT_CONTEXT_BLOAT_PATTERN: &str = r"/?(clear|compact) to save ([0-9]+)k tokens";
+const DEFAULT_PASTE_BUFFER_PATTERN: &str = r"Pasted text #[0-9]";
+
+/// A pattern field that did not compile.
+#[derive(Debug, Clone)]
+pub struct InvalidPattern {
+    /// The field's config key, e.g. `option_line_pattern`.
+    pub field: &'static str,
+    /// Why it did not compile.
+    pub error: regex::Error,
+}
+
+/// A resolved [`CliPromptProfile`] with its pattern fields compiled once; a
+/// pattern equal to the default's reuses the default's compiled regex. Every
+/// detector takes the one for the CLI on the surface it inspects.
+#[derive(Debug, Clone)]
+pub struct CompiledPromptProfile {
+    shape: CliPromptProfile,
+    file_prompt: Regex,
+    option_line: Regex,
+    paste_buffer: Regex,
+}
+
+impl CompiledPromptProfile {
+    /// Compiles `shape`'s pattern fields.
+    ///
+    /// # Errors
+    ///
+    /// The first pattern field that is not a valid regular expression.
+    pub fn compile(shape: CliPromptProfile) -> Result<Self, InvalidPattern> {
+        let default = default_compiled_prompt_profile();
+        let compile = |field: &'static str, source: &str, fallback: &Regex| {
+            if source == fallback.as_str() {
+                Ok(fallback.clone())
+            } else {
+                Regex::new(source).map_err(|error| InvalidPattern { field, error })
+            }
+        };
+        let file_prompt = compile(
+            "file_prompt_pattern",
+            &shape.file_prompt_pattern,
+            &default.file_prompt,
+        )?;
+        let option_line = compile(
+            "option_line_pattern",
+            &shape.option_line_pattern,
+            &default.option_line,
+        )?;
+        let paste_buffer = compile(
+            "paste_buffer_pattern",
+            &shape.paste_buffer_pattern,
+            &default.paste_buffer,
+        )?;
+        if shape.context_bloat_pattern != DEFAULT_CONTEXT_BLOAT_PATTERN {
+            Regex::new(&shape.context_bloat_pattern).map_err(|error| InvalidPattern {
+                field: "context_bloat_pattern",
+                error,
+            })?;
+        }
+        Ok(Self {
+            shape,
+            file_prompt,
+            option_line,
+            paste_buffer,
+        })
+    }
+
+    /// The compiled `file_prompt_pattern`.
+    #[must_use]
+    pub fn file_prompt_regex(&self) -> &Regex {
+        &self.file_prompt
+    }
+
+    /// The compiled `option_line_pattern`.
+    #[must_use]
+    pub fn option_line_regex(&self) -> &Regex {
+        &self.option_line
+    }
+
+    /// The compiled `paste_buffer_pattern`.
+    #[must_use]
+    pub fn paste_buffer_regex(&self) -> &Regex {
+        &self.paste_buffer
+    }
+}
+
+/// Two compiled profiles are equal when their sources are: every compiled
+/// pattern is a function of its source string.
+impl PartialEq for CompiledPromptProfile {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape
+    }
+}
+
+impl Eq for CompiledPromptProfile {}
+
+impl std::ops::Deref for CompiledPromptProfile {
+    type Target = CliPromptProfile;
+
+    fn deref(&self) -> &CliPromptProfile {
+        &self.shape
+    }
+}
+
+/// The embedded default. Read only by profile resolution, never by a detector.
+pub(crate) fn default_compiled_prompt_profile() -> &'static CompiledPromptProfile {
+    static PROFILE: std::sync::OnceLock<CompiledPromptProfile> = std::sync::OnceLock::new();
+    PROFILE.get_or_init(|| CompiledPromptProfile {
+        shape: claude_prompt_profile().clone(),
+        file_prompt: static_regex(DEFAULT_FILE_PROMPT_PATTERN),
+        option_line: static_regex(DEFAULT_OPTION_LINE_PATTERN),
+        paste_buffer: static_regex(DEFAULT_PASTE_BUFFER_PATTERN),
+    })
+}
+
+/// Rust-regex constructs `grep -E` (POSIX ERE) cannot run. A pattern the
+/// bundled `sweep.sh` also matches must stay within the subset both accept.
+const NON_ERE_CONSTRUCTS: &[&str] = &[
+    "(?", "\\d", "\\D", "\\s", "\\S", "\\w", "\\W", "\\p", "\\P", "\\A", "\\z", "*?", "+?", "??",
+    "}?",
+];
+
+/// Validates every field `override_` sets, naming the first bad one as
+/// `[clis.<cli>].prompt_profile.<field>`:
+///
+/// - every pattern compiles as a Rust regex;
+/// - a pattern `sweep.sh` also matches with `grep -E` (`option_line_pattern`,
+///   `context_bloat_pattern`, `paste_buffer_pattern`) uses none of
+///   [`NON_ERE_CONSTRUCTS`];
+/// - no marker is empty or whitespace-only — under `grep -E` an empty
+///   alternative matches every line.
+///
+/// # Errors
+///
+/// The message for the first invalid field.
+pub(crate) fn validate_override_patterns(
+    cli: &str,
+    override_: &CliPromptProfileOverride,
+) -> Result<(), String> {
+    let fail =
+        |field: &str, why: String| Err(format!("[clis.{cli}].prompt_profile.{field}: {why}"));
+    for (field, set, shell) in [
+        ("file_prompt_pattern", &override_.file_prompt_pattern, false),
+        ("option_line_pattern", &override_.option_line_pattern, true),
+        (
+            "context_bloat_pattern",
+            &override_.context_bloat_pattern,
+            true,
+        ),
+        (
+            "paste_buffer_pattern",
+            &override_.paste_buffer_pattern,
+            true,
+        ),
+    ] {
+        let Some(source) = set else { continue };
+        if let Err(error) = Regex::new(source) {
+            return fail(field, error.to_string());
+        }
+        if shell && let Some(c) = NON_ERE_CONSTRUCTS.iter().find(|c| source.contains(**c)) {
+            return fail(
+                field,
+                format!("`{c}` is not supported by grep -E, which sweep.sh matches it with"),
+            );
+        }
+    }
+    for (field, set) in [
+        ("readiness_markers", &override_.readiness_markers),
+        ("approval_markers", &override_.approval_markers),
+        ("live_prompt_markers", &override_.live_prompt_markers),
+        ("mid_response_markers", &override_.mid_response_markers),
+        (
+            "prompt_boilerplate_markers",
+            &override_.prompt_boilerplate_markers,
+        ),
+        ("command_header_markers", &override_.command_header_markers),
+        ("input_sigils", &override_.input_sigils),
+        (
+            "mode_accept_edits_markers",
+            &override_.mode_accept_edits_markers,
+        ),
+        (
+            "mode_interactive_markers",
+            &override_.mode_interactive_markers,
+        ),
+        ("stream_error_markers", &override_.stream_error_markers),
+        (
+            "cli_unavailable_markers",
+            &override_.cli_unavailable_markers,
+        ),
+    ] {
+        if set.iter().flatten().any(|m| m.trim().is_empty()) {
+            return fail(
+                field,
+                "a marker is empty, and would match every line".to_string(),
+            );
+        }
+    }
+    if override_
+        .broad_grant_marker
+        .as_ref()
+        .is_some_and(|m| m.trim().is_empty())
+    {
+        return fail(
+            "broad_grant_marker",
+            "the marker is empty, and would match every line".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Resolves the effective [`CliPromptProfile`] for the CLI identity `cli`:

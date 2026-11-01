@@ -57,20 +57,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
-use regex::Regex;
 use serde::Deserialize;
 
+use crate::agent_cli::AgentProfiles;
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
-use crate::config::{
-    CorrectionConfig, CustomCli, OnExhausted, claude_prompt_profile, resolve_prompt_profile,
-    resolve_submit_delay_ms,
-};
+use crate::config::{CompiledPromptProfile, CorrectionConfig, CustomCli, OnExhausted};
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
-use crate::static_regex::static_regex;
 use crate::surface::{SessionLayout, SurfaceRole};
 use crate::terminal::TerminalBackend;
 
@@ -135,6 +130,11 @@ pub struct AgentPane {
     /// The agent's git branch name, used at exit to ask git whether the
     /// branch is merged into the default branch (`drive-loop-exit-summary-truth`).
     pub branch: String,
+    /// The CLI identity git-paw launched the agent with (the session state's
+    /// recorded CLI), which selects the prompt-shape profile its surface is
+    /// read with. Never taken from anything the agent publishes; empty when
+    /// the record carries none, which resolves the `generic` family.
+    pub cli: String,
 }
 
 /// Reads the session's coding-agent roster as the persisted state currently
@@ -178,6 +178,7 @@ impl RosterReader for SessionFileRoster {
                     agent_id: crate::broker::messages::slugify_branch(&w.branch),
                     worktree_path: w.worktree_path.clone(),
                     branch: w.branch.clone(),
+                    cli: w.cli.clone(),
                 })
                 .collect(),
         )
@@ -235,12 +236,15 @@ const PERMISSION_PROMPT_VERDICT: &str = "permission-prompt";
 /// present the file-operation target path is used as a stable fallback; when
 /// neither is present the shape is empty (a wait-for-clear token — the next
 /// distinct prompt re-confirms fresh once this one clears).
+///
+/// Both are cut with `profile`, the prompt-shape profile of the CLI on the
+/// surface `captured` came from.
 #[must_use]
-pub fn dedup_shape(captured: &str) -> String {
-    if let Some(cmd) = extract_command_slice(captured) {
+pub fn dedup_shape(captured: &str, profile: &CompiledPromptProfile) -> String {
+    if let Some(cmd) = extract_command_slice(captured, profile) {
         return cmd;
     }
-    extract_path_from_file_prompt(captured).unwrap_or_default()
+    extract_path_from_file_prompt(captured, profile).unwrap_or_default()
 }
 
 /// Tracks `(agent_id, shape)` alert keys within a rolling window so a repeated
@@ -980,8 +984,9 @@ pub trait ManualDecisionSink {
     ///
     /// Called once per emitted escalation: after the dedup window has
     /// admitted it, so a prompt re-seen inside the window is not recorded
-    /// twice.
-    fn record_forwarded(&mut self, agent_id: &str, captured: &str);
+    /// twice. `profile` is the prompt-shape profile of the agent's
+    /// launch-recorded CLI, which the command pattern is cut with.
+    fn record_forwarded(&mut self, agent_id: &str, captured: &str, profile: &CompiledPromptProfile);
 }
 
 /// Performs the git-level actions of `supervisor-branch-refresh`: the two
@@ -1338,6 +1343,13 @@ pub fn drive_loop_logged(
     // read rather than the one the wave started with.
     let mut agents: Vec<AgentPane> = agents.to_vec();
     let mut coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
+    // Each agent's CLI, resolved once from the launch record (never from the
+    // broker's agent-published `cli`); an agent the roster adds later is
+    // resolved on first sight below.
+    let mut profiles = AgentProfiles::new(config.clis.clone());
+    for agent in &agents {
+        profiles.record(&agent.agent_id, &agent.cli);
+    }
     let mut dedup = DedupWindow::new(config.dedup_window);
     let mut correction = CorrectionState::new();
     // Highest-progressed `WorkerPhase` ever observed per agent (GP-05), so a
@@ -1355,12 +1367,9 @@ pub fn drive_loop_logged(
     // Whether the heartbeat's fresh look already deferred the exit for a
     // completion with no progress since; it may do so only once.
     let mut heartbeat_deferred = false;
-    // The most recent `/status` snapshot, used to resolve a coding pane's
-    // nudge settle delay during the sweep — which runs BEFORE this tick's own
-    // fetch below (GP-16's sweep/fetch ordering stays as-is). Empty on the
-    // first tick, which resolves every agent to the config-driven agnostic
-    // default via `resolve_submit_delay_ms`'s empty-CLI fallback, same as the
-    // correction pass's pre-first-status handling.
+    // The most recent `/status` snapshot, the sweep's view of the broker —
+    // the sweep runs BEFORE this tick's own fetch below (GP-16's sweep/fetch
+    // ordering stays as-is). Empty on the first tick.
     let mut status_for_sweep: Vec<AgentStatusRow> = Vec::new();
     let ctx = SweepContext { session, repo_root };
     // Applies every effect the loop decides on, accumulating the published
@@ -1385,6 +1394,9 @@ pub fn drive_loop_logged(
             && let Some(fresh) = reader.read_roster()
         {
             coding_ids = fresh.iter().map(|a| a.agent_id.clone()).collect();
+            for agent in &fresh {
+                profiles.record(&agent.agent_id, &agent.cli);
+            }
             agents = fresh;
         }
 
@@ -1404,8 +1416,9 @@ pub fn drive_loop_logged(
                 agents: &agents,
                 panes: &pane_by_agent,
                 status: &status_for_sweep,
+                profiles: &profiles,
             };
-            sweep_surface(&mut shell, deps, &view, config, &mut dedup, &pane, &role);
+            sweep_surface(&mut shell, deps, &view, &mut dedup, &pane, &role);
         }
 
         // --- Fetch status once this tick, BEFORE dispatching any nudge -------
@@ -1452,6 +1465,7 @@ pub fn drive_loop_logged(
             agents: &agents,
             panes: &pane_by_agent,
             status: &latest_status,
+            profiles: &profiles,
         };
         let mut refreshed_branches = Vec::new();
         for effect in message_effects {
@@ -1586,6 +1600,7 @@ pub fn drive_loop_logged(
         agents: &agents,
         panes: &no_panes,
         status: &latest_status,
+        profiles: &profiles,
     };
     for effect in effects {
         shell.apply(deps, &view, effect);
@@ -1653,12 +1668,16 @@ const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 /// moved itself from the wave progressing.
 fn refresh_branches_after_merge(
     ctx: SweepContext<'_>,
-    agents: &[AgentPane],
-    pane_by_agent: &HashMap<String, usize>,
-    latest_status: &[AgentStatusRow],
+    view: &TickView<'_>,
     base: &str,
     deps: &mut DriveDeps<'_>,
 ) -> Vec<String> {
+    let TickView {
+        agents,
+        panes: pane_by_agent,
+        status: latest_status,
+        profiles,
+    } = *view;
     let mut rebased = Vec::new();
     for agent in agents {
         // No live pane this sweep (booted but not yet resolved, or the pane
@@ -1674,7 +1693,7 @@ fn refresh_branches_after_merge(
         let verified_awaiting_merge = status_row.is_some_and(|r| r.status == "verified");
 
         let capture = deps.capturer.capture(ctx.session, pane_index);
-        let mid_response = pane_is_mid_response(&capture);
+        let mid_response = pane_is_mid_response(&capture, &profiles.get(&agent.agent_id).prompt);
 
         // Holding the claim through the rebase call (it is dropped at the end
         // of this iteration) narrows the window between the cleanliness
@@ -1732,6 +1751,7 @@ fn nudge_effect_outcome(result: Result<NudgeOutcome, PawError>) -> EffectOutcome
 /// What the shell observed this tick that applying an effect may need: the
 /// roster as last read, the coding surfaces resolved so far and the latest
 /// `/status` snapshot.
+#[derive(Clone, Copy)]
 struct TickView<'t> {
     /// The coding-agent roster as last read.
     agents: &'t [AgentPane],
@@ -1739,6 +1759,9 @@ struct TickView<'t> {
     panes: &'t HashMap<String, usize>,
     /// The `/status` snapshot the tick acts on.
     status: &'t [AgentStatusRow],
+    /// Each agent's launch-recorded CLI: the profile every decision about its
+    /// surface reads, and its settle delay.
+    profiles: &'t AgentProfiles,
 }
 
 /// The drive loop's imperative shell: applies each [`DriveEffect`] a decision
@@ -1780,7 +1803,11 @@ impl<'r> Shell<'r> {
     ) -> EffectOutcome {
         let outcome = match &effect {
             DriveEffect::RecordManualDecision { agent_id, captured } => {
-                deps.manual_decisions.record_forwarded(agent_id, captured);
+                deps.manual_decisions.record_forwarded(
+                    agent_id,
+                    captured,
+                    &view.profiles.get(agent_id).prompt,
+                );
                 EffectOutcome::Recorded
             }
             DriveEffect::PublishEscalation(escalation) => {
@@ -1807,6 +1834,7 @@ impl<'r> Shell<'r> {
                 *pane_index,
                 agent_id,
                 *settle_delay,
+                &view.profiles.get(agent_id).prompt,
             )),
             DriveEffect::Reengage {
                 agent_id,
@@ -1821,16 +1849,10 @@ impl<'r> Shell<'r> {
                 agent_id,
                 text,
                 *settle_delay,
+                &view.profiles.get(agent_id).prompt,
             )),
             DriveEffect::RefreshBranches { base } => {
-                EffectOutcome::Refreshed(refresh_branches_after_merge(
-                    self.ctx,
-                    view.agents,
-                    view.panes,
-                    view.status,
-                    base,
-                    deps,
-                ))
+                EffectOutcome::Refreshed(refresh_branches_after_merge(self.ctx, view, base, deps))
             }
             DriveEffect::RecordExhausted(branch) => {
                 self.exhausted.push(branch.clone());
@@ -1934,13 +1956,15 @@ fn sweep_pane(
 ) -> Option<Escalation> {
     let mut shell = Shell::new(ctx);
     let no_panes = HashMap::new();
+    let profiles = AgentProfiles::new(config.clis.clone());
     let view = TickView {
         agents: &[],
         panes: &no_panes,
         status,
+        profiles: &profiles,
     };
     let role = SurfaceRole::Coding(agent_id.to_string());
-    sweep_surface(&mut shell, deps, &view, config, dedup, pane, &role);
+    sweep_surface(&mut shell, deps, &view, dedup, pane, &role);
     shell.escalations.into_iter().next()
 }
 
@@ -1951,7 +1975,6 @@ fn sweep_surface(
     shell: &mut Shell<'_>,
     deps: &mut DriveDeps<'_>,
     view: &TickView<'_>,
-    config: &DriveConfig,
     dedup: &mut DedupWindow,
     pane: &PaneInfo,
     role: &SurfaceRole,
@@ -1961,22 +1984,16 @@ fn sweep_surface(
     };
     let capture = deps.capturer.capture(shell.ctx.session, pane.pane_index);
 
-    // The pane's own broker-reported CLI resolves both its per-CLI
-    // `cli_unavailable_markers` override and its nudge settle delay — an
-    // agent with no status row yet falls back to the
-    // config-driven/embedded-default behaviour via an empty CLI name.
-    let cli = view
-        .status
-        .iter()
-        .find(|r| r.agent_id == agent_id)
-        .map_or("", |r| r.cli.as_str());
-    let profile = resolve_prompt_profile(cli, &config.clis);
+    // The CLI the launch record names for this agent resolves its prompt
+    // profile and its nudge settle delay; the broker's agent-published `cli`
+    // is never consulted. An agent with no recorded CLI resolves `generic`.
+    let agent_cli = view.profiles.get(agent_id);
     let observation = decide::SurfaceObservation {
         role,
         pane_index: pane.pane_index,
         capture: &capture,
-        profile: &profile,
-        settle_delay: Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis)),
+        profile: &agent_cli.prompt,
+        settle_delay: Duration::from_millis(agent_cli.submit_delay_ms),
     };
     let (next, effects) = decide::decide_prompt(dedup, &observation, deps.clock.now());
     *dedup = next;
@@ -2011,7 +2028,7 @@ fn run_correction_pass(
         &decide::NudgePolicy {
             correction: &config.correction,
             learnings_enabled: config.learnings_enabled,
-            clis: &config.clis,
+            profiles: view.profiles,
             handoff_enabled: deps.handoff.is_some(),
         },
     );
@@ -2098,6 +2115,7 @@ enum NudgeOutcome {
 /// box — so nothing is sent and the correction stays pending for the next
 /// sweep. See [`send_nudge`] for the settle-delay, verify, and recovery
 /// behaviour.
+#[allow(clippy::too_many_arguments)]
 fn send_reengagement(
     deps: &mut DriveDeps<'_>,
     repo_root: &Path,
@@ -2106,17 +2124,36 @@ fn send_reengagement(
     agent_id: &str,
     text: &str,
     settle_delay: Duration,
+    profile: &CompiledPromptProfile,
 ) -> Result<NudgeOutcome, PawError> {
     send_nudge(
         deps,
-        repo_root,
-        session,
-        pane_index,
-        agent_id,
+        &NudgeTarget {
+            repo_root,
+            session,
+            pane_index,
+            agent_id,
+            profile,
+        },
         text,
         settle_delay,
-        |capture| !live_prompt_in_tail(capture),
+        |capture| !live_prompt_in_tail(capture, profile),
     )
+}
+
+/// The surface a nudge goes to, and the profile its captures are read with.
+#[derive(Clone, Copy)]
+struct NudgeTarget<'a> {
+    /// Repository root, for the surface's claim.
+    repo_root: &'a Path,
+    /// tmux session name.
+    session: &'a str,
+    /// The surface's position.
+    pane_index: usize,
+    /// The coding agent that owns the surface.
+    agent_id: &'a str,
+    /// The prompt-shape profile of the agent's launch-recorded CLI.
+    profile: &'a CompiledPromptProfile,
 }
 
 /// Types `text` into `pane_index`, verifies it submitted, and recovers a
@@ -2154,17 +2191,20 @@ fn send_reengagement(
 /// 4. A pane still showing the text after every attempt is
 ///    [`NudgeOutcome::Wedged`] — escalated to the broker
 ///    ([`AlertSink::escalate`]) rather than retried further.
-#[allow(clippy::too_many_arguments)]
 fn send_nudge(
     deps: &mut DriveDeps<'_>,
-    repo_root: &Path,
-    session: &str,
-    pane_index: usize,
-    agent_id: &str,
+    target: &NudgeTarget<'_>,
     text: &str,
     settle_delay: Duration,
     ready: impl Fn(&str) -> bool,
 ) -> Result<NudgeOutcome, PawError> {
+    let NudgeTarget {
+        repo_root,
+        session,
+        pane_index,
+        profile,
+        ..
+    } = *target;
     let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
         return Ok(NudgeOutcome::Skipped); // another approver owns this pane — skip, never wait
     };
@@ -2184,10 +2224,10 @@ fn send_nudge(
     deps.clock.sleep(settle_delay);
 
     let verify = deps.capturer.capture(session, pane_index);
-    if decide::decide_recovery_step(&verify, text, 0) == decide::RecoveryStep::Delivered {
+    if decide::decide_recovery_step(&verify, text, 0, profile) == decide::RecoveryStep::Delivered {
         return Ok(NudgeOutcome::Delivered);
     }
-    recover_stale_input(deps, session, pane_index, agent_id, text, settle_delay)
+    recover_stale_input(deps, target, text, settle_delay)
 }
 
 /// Whether a post-`Enter` capture shows `text` already submitted, judging by
@@ -2200,18 +2240,18 @@ fn send_nudge(
 /// wrapped rendering's sigil row shows only the start of a longer send, so
 /// the FULL text still starts with it) or the box shows a paste-buffer
 /// placeholder matching the profile's `paste_buffer_pattern`.
-fn nudge_submitted(verify: &str, text: &str) -> bool {
-    if pane_is_mid_response(verify) {
+fn nudge_submitted(verify: &str, text: &str, profile: &CompiledPromptProfile) -> bool {
+    if pane_is_mid_response(verify, profile) {
         return true;
     }
-    let Some(rows) = input_box_rows(verify) else {
+    let Some(rows) = input_box_rows(verify, profile) else {
         return true; // no recognised box (or a numbered option) — unknown CLI, treat as submitted
     };
     let sigil_row = rows.first().map_or("", String::as_str);
     if sigil_row.is_empty() {
         return true; // empty box
     }
-    !(text.starts_with(sigil_row) || input_box_shows_placeholder(verify))
+    !(text.starts_with(sigil_row) || input_box_shows_placeholder(verify, profile))
 }
 
 /// Runs the bounded clear (`C-u`) + re-type + `Enter` recovery loop against
@@ -2225,12 +2265,17 @@ fn nudge_submitted(verify: &str, text: &str) -> bool {
 /// recovery itself behaves (design D4).
 fn recover_stale_input(
     deps: &mut DriveDeps<'_>,
-    session: &str,
-    pane_index: usize,
-    agent_id: &str,
+    target: &NudgeTarget<'_>,
     text: &str,
     settle_delay: Duration,
 ) -> Result<NudgeOutcome, PawError> {
+    let NudgeTarget {
+        session,
+        pane_index,
+        agent_id,
+        profile,
+        ..
+    } = *target;
     let mut attempts: u8 = 0;
     loop {
         // Clear the stale line a prior step (this function's own earlier
@@ -2251,7 +2296,7 @@ fn recover_stale_input(
         attempts += 1;
 
         let verify = deps.capturer.capture(session, pane_index);
-        match decide::decide_recovery_step(&verify, text, attempts) {
+        match decide::decide_recovery_step(&verify, text, attempts, profile) {
             decide::RecoveryStep::Delivered => return Ok(NudgeOutcome::Delivered),
             decide::RecoveryStep::Retry => {}
             decide::RecoveryStep::Wedged => break,
@@ -2279,9 +2324,8 @@ fn recover_stale_input(
 /// every plain line up to the closing rule line for the borderless style
 /// (never crossing into the mode strip below it).
 ///
-/// The sigil set comes from the embedded profile's `input_sigils`
-/// (`cli-prompt-profiles` capability) rather than a compiled constant.
-fn input_box_rows(capture: &str) -> Option<Vec<String>> {
+/// The sigil set comes from `profile`'s `input_sigils`.
+fn input_box_rows(capture: &str, profile: &CompiledPromptProfile) -> Option<Vec<String>> {
     let lines: Vec<&str> = capture.lines().collect();
     let preceding_non_blank = |idx: usize| -> Option<&str> {
         lines[..idx]
@@ -2292,8 +2336,10 @@ fn input_box_rows(capture: &str) -> Option<Vec<String>> {
     };
     let sigil_idx = (0..lines.len())
         .rev()
-        .find(|&idx| is_idle_input_box_line(lines[idx], preceding_non_blank(idx)))?;
-    let sigil_text = strip_input_sigil(lines[sigil_idx])?.trim().to_string();
+        .find(|&idx| is_idle_input_box_line(lines[idx], preceding_non_blank(idx), profile))?;
+    let sigil_text = strip_input_sigil(lines[sigil_idx], profile)?
+        .trim()
+        .to_string();
     if sigil_text.is_empty() {
         return None;
     }
@@ -2319,22 +2365,16 @@ fn input_box_rows(capture: &str) -> Option<Vec<String>> {
 /// Extracts the text sitting in a pane's input box as a single
 /// whitespace-joined string — the sigil row plus any continuation rows, in
 /// display order — or `None` when [`input_box_rows`] finds no box.
-fn input_box_text(capture: &str) -> Option<String> {
-    Some(input_box_rows(capture)?.join(" "))
-}
-
-/// Compiled regex for the embedded profile's `paste_buffer_pattern`
-/// (`cli-prompt-profiles` capability).
-fn paste_buffer_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| static_regex(claude_prompt_profile().paste_buffer_pattern.as_str()))
+fn input_box_text(capture: &str, profile: &CompiledPromptProfile) -> Option<String> {
+    Some(input_box_rows(capture, profile)?.join(" "))
 }
 
 /// Whether `capture`'s input box shows a paste-buffer placeholder — e.g.
-/// `Pasted text #1` — matching the resolved profile's `paste_buffer_pattern`,
-/// rather than text that can be re-typed verbatim.
-fn input_box_shows_placeholder(capture: &str) -> bool {
-    input_box_text(capture).is_some_and(|text| paste_buffer_regex().is_match(&text))
+/// `Pasted text #1` — matching `profile`'s `paste_buffer_pattern`, rather
+/// than text that can be re-typed verbatim.
+fn input_box_shows_placeholder(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    input_box_text(capture, profile)
+        .is_some_and(|text| profile.paste_buffer_regex().is_match(&text))
 }
 
 /// Whether `capture` shows an IDLE pane holding unsubmitted text in its input
@@ -2347,8 +2387,8 @@ fn input_box_shows_placeholder(capture: &str) -> bool {
 /// pane is invisible to the approval sweep (there is no prompt to classify) and
 /// to the long stuck detector (it never reports itself stalled), so nothing else
 /// in the loop would surface it.
-fn pane_has_buffered_input(capture: &str) -> bool {
-    pane_is_responsive(capture) && input_box_text(capture).is_some()
+fn pane_has_buffered_input(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    pane_is_responsive(capture, profile) && input_box_text(capture, profile).is_some()
 }
 
 /// Whether `capture` shows a pane that can accept a keystroke at all: no live
@@ -2362,9 +2402,11 @@ fn pane_has_buffered_input(capture: &str) -> bool {
 /// then wants the box *empty* ([`pane_is_idle_and_empty`] — safe to type a
 /// workflow entry point into). Keeping the responsiveness half in one place
 /// means a marker set that improves for one improves for both.
+///
+/// `profile` is the prompt-shape profile of the CLI on the pane.
 #[must_use]
-pub fn pane_is_responsive(capture: &str) -> bool {
-    !live_prompt_in_tail(capture) && !pane_is_mid_response(capture)
+pub fn pane_is_responsive(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    !live_prompt_in_tail(capture, profile) && !pane_is_mid_response(capture, profile)
 }
 
 /// Whether `capture` shows an IDLE pane whose composer is free — responsive
@@ -2381,8 +2423,8 @@ pub fn pane_is_responsive(capture: &str) -> bool {
 /// recognise in the box is never typed over: that is someone else's content,
 /// and appending to it would submit a line neither party wrote.
 #[must_use]
-pub fn pane_is_idle_and_empty(capture: &str) -> bool {
-    pane_is_responsive(capture) && input_box_text(capture).is_none()
+pub fn pane_is_idle_and_empty(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    pane_is_responsive(capture, profile) && input_box_text(capture, profile).is_none()
 }
 
 /// Submits a directive stranded in an idle pane's input box: a follow-up
@@ -2406,6 +2448,7 @@ pub fn pane_is_idle_and_empty(capture: &str) -> bool {
 /// holding it defers recovery to the next sweep, with the `Enter` above still
 /// having gone out. A paste-buffer placeholder is never cleared: the loop
 /// escalates it as wedged instead of `C-u`ing content it cannot restore.
+#[allow(clippy::too_many_arguments)]
 fn submit_buffered_input(
     deps: &mut DriveDeps<'_>,
     repo_root: &Path,
@@ -2413,8 +2456,9 @@ fn submit_buffered_input(
     pane_index: usize,
     agent_id: &str,
     settle_delay: Duration,
+    profile: &CompiledPromptProfile,
 ) -> Result<NudgeOutcome, PawError> {
-    if !pane_has_buffered_input(&deps.capturer.capture(session, pane_index)) {
+    if !pane_has_buffered_input(&deps.capturer.capture(session, pane_index), profile) {
         return Ok(NudgeOutcome::Skipped);
     }
     deps.dispatcher
@@ -2423,38 +2467,46 @@ fn submit_buffered_input(
     deps.clock.sleep(settle_delay);
 
     let verify = deps.capturer.capture(session, pane_index);
-    if !pane_has_buffered_input(&verify) {
+    if !pane_has_buffered_input(&verify, profile) {
         return Ok(NudgeOutcome::Delivered); // the Enter alone submitted it
     }
 
     let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
         return Ok(NudgeOutcome::Deferred); // another approver owns this pane — retry next sweep
     };
-    if input_box_shows_placeholder(&verify) {
-        let escalation =
-            decide::wedged_escalation(agent_id, &input_box_text(&verify).unwrap_or_default());
+    if input_box_shows_placeholder(&verify, profile) {
+        let escalation = decide::wedged_escalation(
+            agent_id,
+            &input_box_text(&verify, profile).unwrap_or_default(),
+        );
         if deps.record_wedged(escalation.clone()) {
             deps.alerts.escalate(&escalation);
         }
         return Ok(NudgeOutcome::Wedged);
     }
-    let Some(text) = input_box_text(&verify) else {
+    let Some(text) = input_box_text(&verify, profile) else {
         return Ok(NudgeOutcome::Delivered); // cleared between the check above and the claim
     };
-    recover_stale_input(deps, session, pane_index, agent_id, &text, settle_delay)
+    let target = NudgeTarget {
+        repo_root,
+        session,
+        pane_index,
+        agent_id,
+        profile,
+    };
+    recover_stale_input(deps, &target, &text, settle_delay)
 }
 
 /// Whether `capture` shows a pane mid-response — the CLI is mid-turn with its
 /// interrupt footer showing, rather than sitting at its input box.
 ///
-/// Sources its markers from the embedded Claude Code profile's
-/// `mid_response_markers` (`cli-prompt-profiles` capability) rather than a
-/// compiled constant. The set is deliberately conservative: an unrecognised
-/// CLI matches nothing and is treated as idle, which at worst reproduces the
-/// injection behaviour of a pane whose state the loop cannot read.
-fn pane_is_mid_response(capture: &str) -> bool {
+/// Reads `profile`'s `mid_response_markers`. The set is deliberately
+/// conservative: an unrecognised CLI matches nothing and is treated as idle,
+/// which at worst reproduces the injection behaviour of a pane whose state
+/// the loop cannot read.
+fn pane_is_mid_response(capture: &str, profile: &CompiledPromptProfile) -> bool {
     let lowered = capture.to_ascii_lowercase();
-    claude_prompt_profile()
+    profile
         .mid_response_markers
         .iter()
         .any(|marker| lowered.contains(marker.as_str()))
@@ -2778,8 +2830,13 @@ impl RecorderManualDecisionSink {
 }
 
 impl ManualDecisionSink for RecorderManualDecisionSink {
-    fn record_forwarded(&mut self, agent_id: &str, captured: &str) {
-        let Some(learning) = self.recorder.record_forwarded(agent_id, captured) else {
+    fn record_forwarded(
+        &mut self,
+        agent_id: &str,
+        captured: &str,
+        profile: &CompiledPromptProfile,
+    ) {
+        let Some(learning) = self.recorder.record_forwarded(agent_id, captured, profile) else {
             return;
         };
         let Some(url) = &self.broker_url else {
@@ -3195,11 +3252,35 @@ mod tests {
         SessionLayout::planned(crate::session::SessionMode::Supervisor, true)
     }
 
+    /// The embedded default, as profile resolution hands it to an agent with
+    /// no override.
+    fn embedded() -> &'static CompiledPromptProfile {
+        crate::config::default_compiled_prompt_profile()
+    }
+
+    // The detectors read with the embedded default — the profile every agent
+    // in these fixtures resolves.
+    fn input_box_rows(capture: &str) -> Option<Vec<String>> {
+        super::input_box_rows(capture, embedded())
+    }
+    fn input_box_text(capture: &str) -> Option<String> {
+        super::input_box_text(capture, embedded())
+    }
+    fn input_box_shows_placeholder(capture: &str) -> bool {
+        super::input_box_shows_placeholder(capture, embedded())
+    }
+    fn pane_has_buffered_input(capture: &str) -> bool {
+        super::pane_has_buffered_input(capture, embedded())
+    }
+    fn approval_dedup_key(agent_id: &str, capture: &str) -> String {
+        super::approval_dedup_key(agent_id, capture, embedded())
+    }
+
     /// `core-project-conventions`' "Every static pattern compiles under test":
-    /// forces every static regex in this module to compile.
+    /// the embedded paste-buffer pattern compiles and matches its shape.
     #[test]
     fn static_regexes_compile() {
-        assert!(paste_buffer_regex().is_match("Pasted text #1"));
+        assert!(embedded().paste_buffer_regex().is_match("Pasted text #1"));
     }
 
     /// Serves `bodies` in order, one per connection, recording each request
@@ -3555,7 +3636,12 @@ mod tests {
         calls: Vec<(String, String)>,
     }
     impl ManualDecisionSink for RecordingManualDecisions {
-        fn record_forwarded(&mut self, agent_id: &str, captured: &str) {
+        fn record_forwarded(
+            &mut self,
+            agent_id: &str,
+            captured: &str,
+            _profile: &CompiledPromptProfile,
+        ) {
             self.calls
                 .push((agent_id.to_string(), captured.to_string()));
         }
@@ -3565,7 +3651,13 @@ mod tests {
     #[derive(Default)]
     struct NoopManualDecisions;
     impl ManualDecisionSink for NoopManualDecisions {
-        fn record_forwarded(&mut self, _agent_id: &str, _captured: &str) {}
+        fn record_forwarded(
+            &mut self,
+            _agent_id: &str,
+            _captured: &str,
+            _profile: &CompiledPromptProfile,
+        ) {
+        }
     }
 
     /// Scripted, call-recording [`BranchRefresher`] fake.
@@ -3805,11 +3897,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         // Pane index 4 holds feat/b's worktree; index 2 holds feat/a's.
@@ -3831,6 +3925,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let dashboard = resolve_pane_agent(supervised_layout(), 0, "/repo", &agents);
         assert_eq!(dashboard, SurfaceRole::Dashboard);
@@ -4322,7 +4417,7 @@ mod tests {
         );
         assert!(
             recorder
-                .record_forwarded("feat-a", &live_safe_capture("ls -la"))
+                .record_forwarded("feat-a", &live_safe_capture("ls -la"), embedded())
                 .is_none(),
             "the opt-out returns no learning to publish"
         );
@@ -4503,6 +4598,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4770,6 +4866,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4826,11 +4923,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         let enumerator = FakeEnumerator { panes: vec![] };
@@ -4911,6 +5010,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4995,6 +5095,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -5086,6 +5187,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[]);
@@ -5160,6 +5262,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             worktree_path: PathBuf::from(worktree),
             branch: agent_id.replacen('-', "/", 1),
+            cli: String::new(),
         }
     }
 
@@ -5466,11 +5569,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -5548,6 +5653,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![
@@ -5631,11 +5737,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -5733,11 +5841,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -5825,6 +5935,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -6306,6 +6417,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -6403,6 +6515,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -6459,6 +6572,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -6614,11 +6728,14 @@ mod tests {
 
     /// Builds a single-coding-agent drive-loop fixture whose pane is idle (no
     /// live prompt), so the correction pass is the only thing that can type.
+    /// `feat-a`, launched with `claude` — which the correction fixtures pin to
+    /// a zero settle delay ([`zero_settle_delay_clis`]).
     fn correction_agents() -> Vec<AgentPane> {
         vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: "claude".to_string(),
         }]
     }
 
@@ -6766,7 +6883,7 @@ mod tests {
     /// not just the one fixture this change happened to use.
     #[test]
     fn cli_unavailable_handoff_text_never_quotes_the_matched_banner() {
-        for marker in &claude_prompt_profile().cli_unavailable_markers {
+        for marker in &embedded().cli_unavailable_markers {
             let escalation = Escalation {
                 agent_id: "feat-a".to_string(),
                 verdict: "cli-unavailable".to_string(),
@@ -6777,7 +6894,7 @@ mod tests {
                 text.contains("feat-a") && text.contains("cli-unavailable"),
                 "still identifies the agent and verdict: {text}"
             );
-            for m in &claude_prompt_profile().cli_unavailable_markers {
+            for m in &embedded().cli_unavailable_markers {
                 assert!(
                     !text.to_ascii_lowercase().contains(&m.to_ascii_lowercase()),
                     "hand-off for marker {marker:?} must not quote any cli_unavailable \
@@ -6827,6 +6944,7 @@ mod tests {
             "feat-a",
             "C-c",
             Duration::ZERO,
+            embedded(),
         )
         .expect("dispatch succeeds");
         assert_eq!(outcome, NudgeOutcome::Delivered);
@@ -6887,6 +7005,7 @@ mod tests {
                 "feat-a",
                 text,
                 settle_delay,
+                embedded(),
             )
             .expect("dispatch succeeds")
         };
@@ -7510,11 +7629,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ]
     }
@@ -7705,6 +7826,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let merge_check =
             FakeMergeCheck::default().with_error("feat/a", "fatal: not a valid object name");
@@ -7841,6 +7963,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let merge_check = FakeMergeCheck::default();
         let filler: String = (1..=14)
@@ -7878,6 +8001,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let merge_check = FakeMergeCheck::default();
         let banner_above_chrome = "You've hit your session limit\n\
@@ -7910,13 +8034,15 @@ mod tests {
     /// CLI whose `[clis.<name>].prompt_profile` overrides
     /// `cli_unavailable_markers` with `out of tokens` is detected when that
     /// CLI's pane tail shows the override text — not the embedded Claude
-    /// default, which does not contain it.
+    /// default, which does not contain it. The CLI comes from the launch
+    /// record (`cli-profile-threading`).
     #[test]
     fn per_cli_marker_override_is_honoured_by_the_loop() {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: "mycli".to_string(),
         }];
         let mut clis: HashMap<String, CustomCli> = HashMap::new();
         clis.insert(
@@ -7973,6 +8099,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         // Distinct leading content each sweep, same trailing banner — a
         // same-marker dedup key must still collapse these to one escalation.
@@ -8042,6 +8169,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let capturer =
             SequencedCapturer::new(&["You've hit your session limit", "Invalid API key"]);
@@ -8108,6 +8236,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let merge_check = FakeMergeCheck::default();
         let (summary, dispatcher) = run_loop_with_merge_check(
@@ -8143,7 +8272,7 @@ mod tests {
     #[test]
     fn spend_limit_banner_matches_cli_unavailable_not_stream_error() {
         let spend_limit_banner = "You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit";
-        let profile = claude_prompt_profile();
+        let profile = embedded();
         assert!(
             profile
                 .cli_unavailable_markers
@@ -8167,6 +8296,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let merge_check = FakeMergeCheck::default();
         let (summary, _dispatcher) = run_loop_with_merge_check(
@@ -8521,6 +8651,7 @@ mod tests {
             agent_id: SUPERVISOR_AGENT_ID.to_string(),
             worktree_path: PathBuf::from("/repo-supervisor"),
             branch: "feat/supervisor".to_string(),
+            cli: String::new(),
         }];
         let trace = trace_one_sweep(
             supervised_layout(),
@@ -8666,6 +8797,7 @@ mod tests {
             agent_id: id.to_string(),
             worktree_path: PathBuf::from(worktree),
             branch: branch.to_string(),
+            cli: String::new(),
         }
     }
 
@@ -8907,6 +9039,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let (dispatcher, _) = run_loop(
             &agents,
@@ -9022,6 +9155,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from(worktree),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }]
     }
 
@@ -9334,6 +9468,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: worktree_path.clone(),
             branch: "feat/example".to_string(),
+            cli: String::new(),
         }];
         let mut pane_by_agent = HashMap::new();
         pane_by_agent.insert("feat-a".to_string(), 2usize);
@@ -9373,14 +9508,14 @@ mod tests {
             handoff: None,
         };
 
-        refresh_branches_after_merge(
-            ctx,
-            &agents,
-            &pane_by_agent,
-            &latest_status,
-            "main",
-            &mut deps,
-        );
+        let profiles = AgentProfiles::new(HashMap::new());
+        let view = TickView {
+            agents: &agents,
+            panes: &pane_by_agent,
+            status: &latest_status,
+            profiles: &profiles,
+        };
+        refresh_branches_after_merge(ctx, &view, "main", &mut deps);
 
         let main_head = capture_real_git(&repo_root, &["rev-parse", "main"]);
         let feat_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
@@ -9494,6 +9629,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: worktree_path.clone(),
             branch: "feat/example".to_string(),
+            cli: String::new(),
         }];
         let mut pane_by_agent = HashMap::new();
         pane_by_agent.insert("feat-a".to_string(), 2usize);
@@ -9537,14 +9673,14 @@ mod tests {
         };
 
         let pre_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
-        refresh_branches_after_merge(
-            ctx,
-            &agents,
-            &pane_by_agent,
-            &latest_status,
-            "main",
-            &mut deps,
-        );
+        let profiles = AgentProfiles::new(HashMap::new());
+        let view = TickView {
+            agents: &agents,
+            panes: &pane_by_agent,
+            status: &latest_status,
+            profiles: &profiles,
+        };
+        refresh_branches_after_merge(ctx, &view, "main", &mut deps);
         let post_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
 
         assert_eq!(
@@ -9757,7 +9893,12 @@ mod tests {
     #[derive(Clone, Default)]
     struct PortJournal(std::rc::Rc<RefCell<Vec<&'static str>>>);
     impl ManualDecisionSink for PortJournal {
-        fn record_forwarded(&mut self, _agent_id: &str, _captured: &str) {
+        fn record_forwarded(
+            &mut self,
+            _agent_id: &str,
+            _captured: &str,
+            _profile: &CompiledPromptProfile,
+        ) {
             self.0.borrow_mut().push("manual-decision");
         }
     }
@@ -9783,6 +9924,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -9894,6 +10036,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -10037,11 +10180,13 @@ mod tests {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
                 branch: "feat/a".to_string(),
+                cli: String::new(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
                 branch: "feat/b".to_string(),
+                cli: String::new(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -10247,6 +10392,7 @@ mod tests {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
+            cli: String::new(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -10310,5 +10456,189 @@ mod tests {
                 "the session was torn down".to_string()
             )
         );
+    }
+
+    // --- cli-profile-threading: each surface read with its own profile ------
+
+    /// A `mycli` prompt the embedded default does not recognise.
+    const MYCLI_PROMPT: &str = "mycli wants to run: make deploy\napprove this?";
+
+    /// `[clis.mycli]` whose override sets `live_prompt_markers = ["approve this?"]`.
+    fn mycli_clis() -> HashMap<String, CustomCli> {
+        HashMap::from([(
+            "mycli".to_string(),
+            CustomCli {
+                command: "mycli".to_string(),
+                display_name: None,
+                submit_delay_ms: Some(0),
+                settings_path: None,
+                approval_args: HashMap::new(),
+                prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                    live_prompt_markers: Some(vec!["approve this?".to_string()]),
+                    ..Default::default()
+                }),
+                session_id_args: None,
+                resume_args: None,
+                mcp: None,
+                headless_args: None,
+                family: None,
+                args: None,
+            },
+        )])
+    }
+
+    fn launched(agent_id: &str, cli: &str) -> AgentPane {
+        AgentPane {
+            agent_id: agent_id.to_string(),
+            worktree_path: PathBuf::from(format!("/repo-{agent_id}")),
+            branch: agent_id.replacen('-', "/", 1),
+            cli: cli.to_string(),
+        }
+    }
+
+    /// Runs one sweep over `agents` (agent `i` on pane `i + 1`, showing
+    /// `screens[i]`) whose status rows are `rows`, then completes.
+    fn sweep_once(
+        agents: &[AgentPane],
+        screens: &[&str],
+        rows: Vec<AgentStatusRow>,
+    ) -> (DriveSummary, RecordingDispatcher) {
+        let panes: Vec<PaneInfo> = agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| pane(i + 1, &a.worktree_path.display().to_string()))
+            .collect();
+        let text: Vec<(usize, &str)> = screens
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i + 1, *s))
+            .collect();
+        run_loop_with_merge_check(
+            agents,
+            panes,
+            &text,
+            vec![rows],
+            &FakeMergeCheck::default(),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                clis: mycli_clis(),
+                ..DriveConfig::default()
+            },
+        )
+    }
+
+    fn prompt_escalations(summary: &DriveSummary) -> Vec<&str> {
+        summary
+            .escalations
+            .iter()
+            .filter(|e| e.verdict == PERMISSION_PROMPT_VERDICT)
+            .map(|e| e.agent_id.as_str())
+            .collect()
+    }
+
+    /// Spec scenario "An override reaches the drive loop for that pane"
+    /// (`cli-prompt-profiles`) and "Detection uses the pane's CLI profile"
+    /// (`approval-command-safety`), on the per-pane path.
+    #[test]
+    fn an_override_reaches_the_live_prompt_gate_for_its_pane() {
+        let (summary, dispatcher) = sweep_once(
+            &[launched("feat-a", "mycli")],
+            &[MYCLI_PROMPT],
+            vec![row("feat-a", "done")],
+        );
+        assert_eq!(prompt_escalations(&summary), vec!["feat-a"]);
+        assert!(
+            dispatcher.events.is_empty(),
+            "an escalated prompt gets no keystroke: {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec scenario "A mixed session uses each pane's own profile": the same
+    /// `mycli`-shaped prompt is live on the `mycli` pane and not on the
+    /// `claude` pane, while a Claude-shaped prompt is live on the `claude` pane.
+    #[test]
+    fn a_mixed_session_reads_each_pane_with_its_own_profile() {
+        let claude_prompt = live_safe_capture("cargo test");
+        let (summary, _) = sweep_once(
+            &[
+                launched("feat-a", "claude"),
+                launched("feat-b", "mycli"),
+                launched("feat-c", "claude"),
+            ],
+            &[MYCLI_PROMPT, MYCLI_PROMPT, &claude_prompt],
+            vec![
+                row("feat-a", "done"),
+                row("feat-b", "done"),
+                row("feat-c", "done"),
+            ],
+        );
+        let mut escalated = prompt_escalations(&summary);
+        escalated.sort_unstable();
+        assert_eq!(escalated, vec!["feat-b", "feat-c"]);
+    }
+
+    /// Spec scenario "A published status cannot change the profile".
+    #[test]
+    fn a_published_cli_cannot_change_the_launch_profile() {
+        let (summary, _) = sweep_once(
+            &[launched("feat-a", "claude")],
+            &[MYCLI_PROMPT],
+            vec![row_with_cli("feat-a", "done", "mycli")],
+        );
+        assert!(
+            prompt_escalations(&summary).is_empty(),
+            "the pane is read with claude's profile, which does not match: {:?}",
+            summary.escalations
+        );
+    }
+
+    /// Spec scenario "An unrecorded CLI falls back to generic": detection
+    /// stays operative with the generic family's (embedded) profile.
+    #[test]
+    fn an_unrecorded_cli_is_read_with_the_generic_profile() {
+        let (summary, _) = sweep_once(
+            &[launched("feat-a", "")],
+            &[&live_safe_capture("cargo test")],
+            vec![row("feat-a", "done")],
+        );
+        assert_eq!(prompt_escalations(&summary), vec!["feat-a"]);
+    }
+
+    /// Spec scenario "A recorded capture replays to the live decision": the
+    /// pure detectors, given only the recording and the CLI's profile, return
+    /// the live-prompt result and command slice the drive loop escalated.
+    #[test]
+    fn a_recorded_capture_replays_to_the_drive_loop_decision() {
+        let profile = crate::agent_cli::CliProfile::resolve("mycli", &mycli_clis())
+            .compiled_prompt_profile()
+            .expect("compiles");
+        for (cli, recording) in [
+            ("claude", live_safe_capture("git push origin main")),
+            (
+                "mycli",
+                "Bash(make deploy)\nmycli wants to run it\napprove this?".to_string(),
+            ),
+        ] {
+            let replay_profile = if cli == "mycli" { &profile } else { embedded() };
+            let (summary, _) = sweep_once(
+                &[launched("feat-a", cli)],
+                &[&recording],
+                vec![row("feat-a", "done")],
+            );
+            let live = is_live_prompt(&recording, replay_profile);
+            let escalation = summary
+                .escalations
+                .iter()
+                .find(|e| e.verdict == PERMISSION_PROMPT_VERDICT);
+            assert_eq!(live, escalation.is_some(), "{cli}: liveness agrees");
+            assert_eq!(
+                escalation.map(|e| e.command.as_str()),
+                extract_command_slice(&recording, replay_profile).as_deref(),
+                "{cli}: the escalated command is the replayed slice"
+            );
+        }
     }
 }

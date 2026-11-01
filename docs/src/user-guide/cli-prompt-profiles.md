@@ -8,8 +8,12 @@ terminal *looks like*. It never describes what that CLI is *allowed to do* —
 see [What a profile is not](#what-a-profile-is-not) below.
 
 git-paw ships one profile, embedded in the binary: **Claude Code**. Every
-detector falls back to it, field by field, so an installation with no
-profile configuration behaves exactly as it always has.
+CLI's profile falls back to it, field by field, so an installation with no
+profile configuration behaves exactly as it always has. That includes the
+other compiled families (`codex`, `agy`, `qwen`, `cursor-agent`): until their
+real terminal shapes are audited (planned for v0.23), they are read with
+Claude Code's shapes too. Per-CLI shapes today come only from a
+`[clis.<name>].prompt_profile` override.
 
 ## Why this exists
 
@@ -35,6 +39,46 @@ every other field (readiness markers, mode markers, and so on). A partial
 profile can never silently disable detection for the fields it omits, and a
 CLI with no `prompt_profile` table at all — including one git-paw has never
 heard of — resolves the full embedded default rather than an empty profile.
+
+### Overrides apply per pane
+
+Each pane is read with the profile of **the CLI running in it**, not the
+session's default CLI. In a session that mixes `claude` and `my-agent`
+workers, the `claude` panes are read with the embedded default and the
+`my-agent` panes with `[clis.my-agent].prompt_profile` — in the launch gate,
+the drive loop's live-prompt gate and escalation text, stranded-input
+recovery, mode inference and the `sweep.sh` helper alike.
+
+Which CLI a pane runs comes from git-paw's own launch record (the session
+state written when the agent was launched), never from the `cli` an agent
+publishes in its `agent.status`: an agent cannot pick the profile its own
+pane is read with. An agent whose record names no CLI is read with the
+`generic` family's profile, which is the embedded default.
+
+### Patterns are validated when the configuration loads
+
+Every field you set is checked when the configuration loads, and a bad one
+fails the load with an error naming the field:
+
+```text
+.git-paw/config.toml: [clis.my-agent].prompt_profile.option_line_pattern: regex parse error: …
+```
+
+- Every pattern field (`file_prompt_pattern`, `option_line_pattern`,
+  `context_bloat_pattern`, `paste_buffer_pattern`) must compile as a Rust
+  `regex`.
+- `option_line_pattern`, `context_bloat_pattern` and `paste_buffer_pattern`
+  are also matched by `sweep.sh` with `grep -E`, so they must stay within
+  the syntax both engines run: POSIX ERE — literals, `.`, bracket classes
+  such as `[0-9]` and `[[:space:]]`, anchors `^` `$`, groups, `|`, and the
+  greedy quantifiers `*` `+` `?` `{n,m}`. Inline flags such as `(?i)`,
+  Perl classes (`\d`, `\s`, `\w`), `\p{…}`, `\A` / `\z` and lazy quantifiers
+  (`*?`, `+?`) are rejected. `file_prompt_pattern` is read only by git-paw
+  itself and may use the full Rust syntax.
+- No marker may be empty or whitespace-only: under `grep -E` an empty
+  alternative matches every line.
+
+A detector therefore never meets an invalid pattern at run time.
 
 ## Fields
 
@@ -123,3 +167,10 @@ live-prompt regexes via the internal `git paw __prompt-profile` command
 rather than carrying its own copies of the markers — the same profile every
 Rust detector reads. This means an authored profile applies to both the
 in-process supervisor and the shell helper without being declared twice.
+
+The helper resolves per pane too. Before it inspects a pane, it looks up the
+CLI the session roster records for that pane and resolves each field with
+`git paw __prompt-profile --cli <name>` — once per distinct CLI per run. That
+covers `sweep.sh approve`'s live-prompt re-confirm and its option-1 guard, so
+the guard checks the target pane's own `broad_grant_marker`. A pane whose
+roster entry records no CLI uses the session CLI's profile, as before.

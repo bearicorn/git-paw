@@ -5,9 +5,7 @@
 The launch gate SHALL recognise first-run acceptance and folder-trust dialogs, and the affirmative
 option to select in each, from the provider record of the CLI being launched. A provider that
 declares no dialogs of its own SHALL inherit the embedded default set — the dialogs every pane was
-checked for before this change — so launch behaviour is unchanged for every existing CLI. The dialogs
-and their affirmative wording SHALL be compiled and SHALL NOT be readable or overridable from a
-prompt-shape profile or any configuration file, because answering such a dialog grants a permission.
+checked for before this change — so launch behaviour is unchanged for every existing CLI.
 
 #### Scenario: Claude's dialogs are recognised for a Claude-family pane
 
@@ -21,6 +19,12 @@ prompt-shape profile or any configuration file, because answering such a dialog 
   dialog the gate recognised before this change
 - **WHEN** the launch gate polls the pane
 - **THEN** it SHALL answer the dialog exactly as it did before this change
+
+### Requirement: First-run dialogs are compiled and not configurable
+
+The first-run dialogs and their affirmative wording SHALL be compiled and SHALL NOT be readable or
+overridable from a prompt-shape profile or any configuration file, because answering such a dialog
+grants a permission.
 
 #### Scenario: A profile cannot declare a dialog
 

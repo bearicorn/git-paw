@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_cli::DEFAULT_DIALOG_MARKERS;
 use crate::config::claude_prompt_profile;
 use crate::error::PawError;
 use std::path::PathBuf;
@@ -2614,18 +2615,20 @@ fn test_budget() -> ReadinessBudget {
     }
 }
 
+/// Classifies `captured` the way a Claude-family pane is classified.
+fn classify(captured: &str) -> PaneReadiness {
+    classify_pane_readiness(captured, claude_prompt_profile(), DEFAULT_DIALOG_MARKERS)
+}
+
 #[test]
 fn classify_distinguishes_ready_bareshell_indeterminate() {
     assert_eq!(
-        classify_pane_readiness("some banner\n? for shortcuts\n"),
+        classify("some banner\n? for shortcuts\n"),
         PaneReadiness::Ready
     );
+    assert_eq!(classify("user@host ~/repo % "), PaneReadiness::BareShell);
     assert_eq!(
-        classify_pane_readiness("user@host ~/repo % "),
-        PaneReadiness::BareShell
-    );
-    assert_eq!(
-        classify_pane_readiness("\n\n   \n"),
+        classify("\n\n   \n"),
         PaneReadiness::Indeterminate,
         "a blank/clearing screen is not yet a bare shell"
     );
@@ -2662,12 +2665,12 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
 
     // Claude's own readiness marker never matches the overridden profile.
     assert_eq!(
-        classify_pane_readiness_with_profile("? for shortcuts", &profile),
+        classify_pane_readiness("? for shortcuts", &profile, DEFAULT_DIALOG_MARKERS),
         PaneReadiness::Indeterminate
     );
     // The CLI's own configured marker does.
     assert_eq!(
-        classify_pane_readiness_with_profile("mycli-ready> ", &profile),
+        classify_pane_readiness("mycli-ready> ", &profile, DEFAULT_DIALOG_MARKERS),
         PaneReadiness::Ready
     );
 }
@@ -2739,7 +2742,7 @@ fn gate_pane_resolves_profile_by_identity_and_relaunches_command() {
     // same capture under the launch command's profile is NOT ready.
     let wrong_profile = crate::config::resolve_prompt_profile(&cli_command, &clis);
     assert_eq!(
-        classify_pane_readiness_with_profile("oss-ready> ", &wrong_profile),
+        classify_pane_readiness("oss-ready> ", &wrong_profile, DEFAULT_DIALOG_MARKERS),
         PaneReadiness::Indeterminate,
         "resolving by launch command must be the broken behaviour this split prevents"
     );
@@ -2772,6 +2775,7 @@ fn gate_returns_ready_without_relaunch_when_marker_present() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some("welcome\n? for shortcuts".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2787,6 +2791,7 @@ fn gate_relaunches_a_persistent_bare_shell_then_falls_back() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some("user@host:~$ ".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2810,6 +2815,7 @@ fn gate_does_not_relaunch_an_unrecognised_cli() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some("custom-cli interactive session — type a command".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2829,6 +2835,7 @@ fn gate_becomes_ready_after_a_relaunch() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || {
             captures += 1;
             // Bare shell until the relaunch fires (~4 captures for the
@@ -2866,7 +2873,7 @@ fn bypass_permissions_dialog() -> String {
 
 #[test]
 fn classify_recognises_bypass_permissions_dialog_and_selects_by_text() {
-    match classify_pane_readiness(&bypass_permissions_dialog()) {
+    match classify(&bypass_permissions_dialog()) {
         PaneReadiness::Dialog(Some(digit)) => assert_eq!(
             digit, 2,
             "must select 'Yes, I accept' by text, not the defaulted option 1"
@@ -2878,7 +2885,7 @@ fn classify_recognises_bypass_permissions_dialog_and_selects_by_text() {
 #[test]
 fn classify_recognises_trust_folder_dialog() {
     let cap = "Do you trust the files in this folder?\n\u{276f} 1. Yes, proceed\n  2. No, exit";
-    match classify_pane_readiness(cap) {
+    match classify(cap) {
         PaneReadiness::Dialog(Some(digit)) => assert_eq!(digit, 1),
         other => panic!("expected Dialog(Some(1)), got {other:?}"),
     }
@@ -2887,7 +2894,7 @@ fn classify_recognises_trust_folder_dialog() {
 #[test]
 fn classify_returns_dialog_none_when_affirmative_option_is_not_found() {
     let cap = "WARNING: Claude Code running in Bypass Permissions mode\n\u{276f} 1. Maybe";
-    assert_eq!(classify_pane_readiness(cap), PaneReadiness::Dialog(None));
+    assert_eq!(classify(cap), PaneReadiness::Dialog(None));
 }
 
 /// Spec scenario "First-run bypass acceptance dialog is answered, not
@@ -2902,6 +2909,7 @@ fn gate_answers_dialog_and_becomes_ready_without_relaunch() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || {
             polls += 1;
             if polls > 1 {
@@ -2930,6 +2938,7 @@ fn gate_reports_dialog_stuck_when_never_answered_ready() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some(bypass_permissions_dialog()),
         || relaunches += 1,
         |_| {},
@@ -2950,6 +2959,7 @@ fn gate_reports_dialog_stuck_immediately_when_digit_unresolvable() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some(cap.to_string()),
         || relaunches += 1,
         |_| {},
@@ -2958,6 +2968,109 @@ fn gate_reports_dialog_stuck_immediately_when_digit_unresolvable() {
     assert_eq!(outcome, ReadinessOutcome::DialogStuck);
     assert!(answers.is_empty(), "no digit to answer with");
     assert_eq!(relaunches, 0);
+}
+
+/// Runs the launch gate on a pane launched for `cli_id` (running
+/// `cli_command`) that shows `screen`, returning the outcome and the dialog
+/// digits it answered.
+fn gate_cli_on_screen(
+    cli_id: &str,
+    cli_command: &str,
+    clis: &std::collections::HashMap<String, crate::config::CustomCli>,
+    screen: &str,
+) -> (ReadinessOutcome, Vec<u8>) {
+    let mut answers = Vec::new();
+    let outcome = gate_pane_with(
+        test_budget(),
+        &PaneCli {
+            cli_id,
+            cli_command,
+            clis,
+        },
+        || Some(screen.to_string()),
+        |_| {},
+        |_| {},
+        |digit| answers.push(digit),
+    );
+    (outcome, answers)
+}
+
+/// Spec scenario "Claude's dialogs are recognised for a Claude-family pane"
+/// (`tmux-orchestration`): a custom entry declaring `family = "claude"`,
+/// whose key differs from its command, has the trust dialog answered by its
+/// affirmative option's text.
+#[test]
+fn a_claude_family_pane_answers_the_trust_dialog_from_its_provider() {
+    let mut clis = std::collections::HashMap::new();
+    clis.insert(
+        "claude-oss".to_string(),
+        crate::config::CustomCli {
+            command: "claude".to_string(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: std::collections::HashMap::new(),
+            prompt_profile: None,
+            session_id_args: None,
+            resume_args: None,
+            mcp: None,
+            headless_args: None,
+            family: Some("claude".to_string()),
+            args: None,
+        },
+    );
+    let screen = "Do you trust the files in this folder?\n\u{276f} 1. Yes, proceed\n  2. No, exit";
+    let (_, answers) = gate_cli_on_screen("claude-oss", "claude", &clis, screen);
+    assert_eq!(answers, vec![1]);
+}
+
+/// Spec scenario "A generic CLI keeps today's dialog handling": a
+/// `generic`-family CLI inherits the embedded default dialogs, so the
+/// bypass-permissions dialog is answered exactly as before.
+#[test]
+fn a_generic_pane_keeps_the_default_dialog_handling() {
+    let (_, answers) = gate_cli_on_screen(
+        "aider",
+        "aider",
+        &std::collections::HashMap::new(),
+        &bypass_permissions_dialog(),
+    );
+    assert_eq!(answers, vec![2], "selects 'Yes, I accept' by text");
+}
+
+/// Spec scenario "A profile cannot declare a dialog": an override carrying
+/// dialog-shaped text in every marker field it has still yields no dialog —
+/// the profile has no dialog field, and the provider's set is compiled.
+#[test]
+fn a_profile_override_cannot_declare_a_dialog() {
+    let heading = "Accept the custom terms?";
+    let mut clis = std::collections::HashMap::new();
+    clis.insert(
+        "mycli".to_string(),
+        crate::config::CustomCli {
+            command: "mycli".to_string(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: std::collections::HashMap::new(),
+            prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                approval_markers: Some(vec![heading.to_string()]),
+                live_prompt_markers: Some(vec![heading.to_string()]),
+                mode_interactive_markers: Some(vec![heading.to_string()]),
+                ..Default::default()
+            }),
+            session_id_args: None,
+            resume_args: None,
+            mcp: None,
+            headless_args: None,
+            family: None,
+            args: None,
+        },
+    );
+    let screen = format!("{heading}\n\u{276f} 1. Yes, I accept\n  2. No");
+    let (outcome, answers) = gate_cli_on_screen("mycli", "mycli", &clis, &screen);
+    assert!(answers.is_empty(), "no dialog answered: {answers:?}");
+    assert_eq!(outcome, ReadinessOutcome::FellBack);
 }
 
 /// Spec scenario "Unrecognised CLI acceptance dialog falls back to prior
@@ -2970,6 +3083,7 @@ fn gate_falls_back_for_an_unrecognised_dialog() {
     let outcome = gate_pane_generic(
         test_budget(),
         claude_prompt_profile(),
+        DEFAULT_DIALOG_MARKERS,
         || Some("custom-cli: accept the new terms? [y/N]".to_string()),
         || relaunches += 1,
         |_| {},

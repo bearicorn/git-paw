@@ -679,7 +679,10 @@ fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
-    let config = config::load_config(&repo_root, None).unwrap_or_default();
+    // A config that fails to load must not print the defaults as if they
+    // were the configured profile: exit non-zero, and `sweep.sh` falls back
+    // to its own compiled literals.
+    let config = config::load_config(&repo_root, None)?;
     let resolved_cli = cli
         .map(str::to_string)
         .or_else(|| config.supervisor.as_ref().and_then(|s| s.cli.clone()))
@@ -688,8 +691,10 @@ fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
     let profile = config::resolve_prompt_profile(&resolved_cli, &config.clis);
 
     let marker_alternation = |markers: &[String]| {
+        // An empty alternative would match every line under `grep -E`.
         markers
             .iter()
+            .filter(|m| !m.trim().is_empty())
             .map(|m| escape_for_regex_alternation(m))
             .collect::<Vec<_>>()
             .join("|")

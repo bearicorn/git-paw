@@ -1004,6 +1004,7 @@ fn launch_spec_session(
                 agent_id: crate::broker::messages::slugify_branch(branch),
                 entry_point,
                 settle_delay_ms: delay,
+                prompt_profile: profile.compiled_prompt_profile()?,
             });
         }
     }
@@ -1325,8 +1326,10 @@ fn submit_held_boot_prompts(
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
-        let profile = match resolve_for_launch(&wt.cli, &config.clis) {
-            Ok(profile) => profile,
+        let resolved = resolve_for_launch(&wt.cli, &config.clis)
+            .and_then(|profile| Ok((profile.compiled_prompt_profile()?, profile)));
+        let (prompt_profile, profile) = match resolved {
+            Ok(resolved) => resolved,
             Err(e) => {
                 blocked.push(format!("  {} (pane {pane_idx}): {e}", wt.branch));
                 continue;
@@ -1371,6 +1374,7 @@ fn submit_held_boot_prompts(
                                 agent_id: crate::broker::messages::slugify_branch(&wt.branch),
                                 entry_point,
                                 settle_delay_ms: delay,
+                                prompt_profile: prompt_profile.clone(),
                             });
                         }
                     }

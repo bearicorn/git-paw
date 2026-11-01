@@ -151,7 +151,23 @@ format_agent_rows, …}` resolving from the parent module.
 | `src/supervisor/keys.rs` | The `KeyDispatcher` seam, implemented by every terminal backend (`src/terminal/`), used by the drive loop's nudge and input-recovery paths. |
 | `src/supervisor/loop_binding.rs` | The drive-loop binding: a refreshed lease file (`.git-paw/tmp/drive-loop.binding`) that keeps at most one drive loop on a session instance, so a re-attach never runs a second loop beside a live one. |
 | `src/supervisor/manual_approvals.rs` | Records each prompt the drive loop escalates for a human decision to `.git-paw/sessions/<session>.manual-approvals.jsonl`, aggregates the log, and suggests which of the agent CLI's own allowlists could absorb the pattern for `git paw approvals`. |
-| `src/supervisor/permission_prompt.rs` | All permission-prompt detection over a screen read through the terminal port: the approval-marker scan, the live-prompt gate and its anchoring windows, input-box and rule-line parsing, and extraction of the prompted command slice or file-operation target path. Reports what is on screen; decides nothing about the command. |
+| `src/supervisor/permission_prompt.rs` | All permission-prompt detection over a screen read through the terminal port: the approval-marker scan, the live-prompt gate and its anchoring windows, input-box and rule-line parsing, and extraction of the prompted command slice or file-operation target path. Reports what is on screen; decides nothing about the command. Every detector is a pure function of `(captured text, &CompiledPromptProfile)` — e.g. `is_live_prompt(capture, profile)`, `extract_command_slice(capture, profile)` — taking the profile of the CLI on the surface it reads, so a recorded capture replays through it with no terminal or broker. |
+
+### Per-surface prompt-shape profiles
+
+Every prompt-shape decision reads the profile of the CLI on the surface it
+inspects. `CliProfile::compiled_prompt_profile` resolves a CLI's
+`CompiledPromptProfile` (the `[clis.<name>].prompt_profile` override over the
+family's profile, with its pattern fields compiled once; config load rejects
+an invalid pattern first). The drive loop keeps an `AgentProfiles` map —
+agent id → profile and settle delay — built at loop start from each roster
+entry's launch-recorded CLI (`AgentPane::cli`, from the session state) and
+extended when the roster adds an agent; an agent with no recorded CLI
+resolves the `generic` family. The broker's agent-published `cli` is display
+only. The embedded default is read only by this resolution, never by a
+detector (guarded in `tests/source_audit.rs`). The launch gate's first-run
+dialogs come from the CLI's provider (`CliProfile::dialog_markers`), compiled
+and never profile-sourced.
 
 ### `src/specs/` modules
 

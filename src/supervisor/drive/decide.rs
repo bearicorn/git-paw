@@ -17,10 +17,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::agent_cli::AgentProfiles;
 use crate::broker::messages::BrokerMessage;
-use crate::config::{
-    CliPromptProfile, CorrectionConfig, CustomCli, OnExhausted, resolve_submit_delay_ms,
-};
+use crate::config::{CompiledPromptProfile, CorrectionConfig, OnExhausted};
 use crate::error::PawError;
 use crate::supervisor::escalation::{HandOff, HandOffKind};
 use crate::surface::SurfaceRole;
@@ -187,8 +186,9 @@ pub(super) struct SurfaceObservation<'a> {
     pub(super) pane_index: usize,
     /// The surface's captured screen.
     pub(super) capture: &'a str,
-    /// The worker's resolved prompt profile (its CLI-unavailability markers).
-    pub(super) profile: &'a CliPromptProfile,
+    /// The prompt-shape profile of the CLI the launch record names for the
+    /// surface's agent — every prompt decision below reads it.
+    pub(super) profile: &'a CompiledPromptProfile,
     /// The worker's resolved settle delay between keystrokes.
     pub(super) settle_delay: Duration,
 }
@@ -235,8 +235,8 @@ pub(super) fn decide_prompt(
         return (dedup, vec![DriveEffect::PublishEscalation(escalation)]);
     }
 
-    if !is_live_prompt(obs.capture) {
-        let effects = if pane_has_buffered_input(obs.capture) {
+    if !is_live_prompt(obs.capture, obs.profile) {
+        let effects = if pane_has_buffered_input(obs.capture, obs.profile) {
             vec![DriveEffect::SubmitBufferedInput {
                 agent_id: agent_id.to_string(),
                 pane_index: obs.pane_index,
@@ -248,13 +248,13 @@ pub(super) fn decide_prompt(
         return (dedup, effects);
     }
 
-    if !dedup.should_emit(&approval_dedup_key(agent_id, obs.capture), now) {
+    if !dedup.should_emit(&approval_dedup_key(agent_id, obs.capture, obs.profile), now) {
         return (dedup, Vec::new());
     }
     let escalation = Escalation {
         agent_id: agent_id.to_string(),
         verdict: PERMISSION_PROMPT_VERDICT.to_string(),
-        command: dedup_shape(obs.capture),
+        command: dedup_shape(obs.capture, obs.profile),
     };
     // The forwarded decision is recorded BEFORE the escalation goes out, and
     // only on this arm: after the dedup admitted it, so one emitted escalation
@@ -403,8 +403,8 @@ pub(super) struct NudgePolicy<'a> {
     /// Whether `[supervisor] learnings` is enabled — gates the exhaustion
     /// learning (no telemetry without consent).
     pub(super) learnings_enabled: bool,
-    /// `[clis.<name>]`, for the worker's settle delay.
-    pub(super) clis: &'a HashMap<String, CustomCli>,
+    /// Each agent's launch-recorded CLI, for the worker's settle delay.
+    pub(super) profiles: &'a AgentProfiles,
     /// Whether an escalated exhaustion is handed to a headless orchestrator
     /// invocation (resolvable and `[supervisor.escalation] enabled`).
     pub(super) handoff_enabled: bool,
@@ -428,8 +428,8 @@ pub(super) struct NudgePolicy<'a> {
 ///   nudged. The signal is the broker status, never a pane-content diff: a
 ///   finished worker's pane is just as unchanging as a stuck one's.
 /// - Otherwise → a re-engagement carrying the gate feedback, with the
-///   worker's own CLI's settle delay (an agent with no status row yet falls
-///   back to the agnostic default).
+///   settle delay of the CLI the launch record names for the worker (an
+///   agent with no recorded CLI falls back to the `generic` default).
 ///
 /// The cycle is not spent here: whether the re-engagement reached the surface
 /// is only known once the shell applied it, so [`decide_reengaged`] spends it.
@@ -461,13 +461,8 @@ pub(super) fn decide_nudge(
         if is_finished_worker(obs.status, &agent_id) {
             continue;
         }
-        let cli = obs
-            .status
-            .iter()
-            .find(|r| r.agent_id == agent_id)
-            .map_or("", |r| r.cli.as_str());
         effects.push(DriveEffect::Reengage {
-            settle_delay: Duration::from_millis(resolve_submit_delay_ms(cli, policy.clis)),
+            settle_delay: Duration::from_millis(policy.profiles.get(&agent_id).submit_delay_ms),
             agent_id,
             pane_index,
             text: feedback,
@@ -572,8 +567,14 @@ pub(super) enum RecoveryStep {
 /// present. At most [`NUDGE_RECOVERY_ATTEMPTS`] recoveries are made: a bare
 /// second `Enter` is a proven no-op against a stale line, so each recovery
 /// re-establishes the input, and a truly wedged surface fails fast.
-pub(super) fn decide_recovery_step(verify: &str, text: &str, attempts_made: u8) -> RecoveryStep {
-    if nudge_submitted(verify, text) {
+/// `profile` is the surface CLI's prompt-shape profile.
+pub(super) fn decide_recovery_step(
+    verify: &str,
+    text: &str,
+    attempts_made: u8,
+    profile: &CompiledPromptProfile,
+) -> RecoveryStep {
+    if nudge_submitted(verify, text, profile) {
         RecoveryStep::Delivered
     } else if attempts_made < NUDGE_RECOVERY_ATTEMPTS {
         RecoveryStep::Retry
@@ -788,6 +789,7 @@ mod tests {
             agent_id: id.to_string(),
             worktree_path: format!("/repo-{id}").into(),
             branch: format!("feat/{id}"),
+            cli: String::new(),
         }
     }
 
@@ -935,14 +937,13 @@ mod tests {
         capture: &str,
         now: Instant,
     ) -> (DedupWindow, Vec<DriveEffect>) {
-        let profile = crate::config::claude_prompt_profile().clone();
         decide_prompt(
             state,
             &SurfaceObservation {
                 role,
                 pane_index: 1,
                 capture,
-                profile: &profile,
+                profile: crate::config::default_compiled_prompt_profile(),
                 settle_delay: Duration::from_millis(250),
             },
             now,
@@ -1351,7 +1352,7 @@ mod tests {
             &NudgePolicy {
                 correction,
                 learnings_enabled,
-                clis: &HashMap::new(),
+                profiles: &AgentProfiles::new(HashMap::new()),
                 handoff_enabled,
             },
         )
@@ -1660,6 +1661,15 @@ mod tests {
             true,
         );
         assert!(invocations(&effects).is_empty(), "{effects:?}");
+    }
+
+    fn decide_recovery_step(verify: &str, text: &str, attempts_made: u8) -> RecoveryStep {
+        super::decide_recovery_step(
+            verify,
+            text,
+            attempts_made,
+            crate::config::default_compiled_prompt_profile(),
+        )
     }
 
     #[test]

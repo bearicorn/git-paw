@@ -292,20 +292,23 @@ LIVE_PROMPT_FOOTER_LINE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌�
 # it stays here; the digit/punctuation shape itself comes from the resolved
 # profile's option_line_pattern (mirrors strip_decoration + is_option_line in
 # src/supervisor/permission_prompt.rs).
-_option_line_digit=$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]')
-LIVE_PROMPT_OPTION_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_line_digit#^}"
+#
 # The same shape anchored on option ONE specifically. cmd_approve presses `1`,
 # so `1` is the only line whose wording it may act on -- matching any numbered
 # line would let it clear a prompt after inspecting option 2 or 3. Derived by
 # narrowing the profile pattern's digit class; if the override has no `[0-9]`
 # to narrow, fall back to a compiled literal rather than silently reusing the
 # any-digit pattern.
-_option_one_digit=${_option_line_digit//\[0-9\]/1}
-if [[ "${_option_one_digit}" == "${_option_line_digit}" ]]; then
-  _option_one_digit='^1[.)]'
-fi
-LIVE_PROMPT_OPTION_ONE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_one_digit#^}"
-unset _option_line_digit
+derive_option_regexes() {
+  local digit=$1 one
+  LIVE_PROMPT_OPTION_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${digit#^}"
+  one=${digit//\[0-9\]/1}
+  if [[ "${one}" == "${digit}" ]]; then
+    one='^1[.)]'
+  fi
+  LIVE_PROMPT_OPTION_ONE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${one#^}"
+}
+derive_option_regexes "$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]')"
 # The CLI's composer/input-line sigils (e.g. `>`, `❯`), sourced from the
 # resolved profile's input_sigils. A line carrying one of these with no
 # option-line text following it is a CANDIDATE idle input box -- mirrors
@@ -362,6 +365,73 @@ CONTEXT_BLOAT_MARKER_REGEX=$(discover_prompt_profile_field context_bloat_pattern
 # #1`; also sourced from the resolved profile.
 PASTE_BUFFER_MARKER_REGEX=$(discover_prompt_profile_field paste_buffer_pattern \
   'Pasted text #[0-9]')
+
+# --- Per-pane profile (cli-profile-threading) --------------------------------
+# Every field above resolves for the session CLI. A pane whose roster entry
+# records its own CLI is read with the profile of THAT CLI instead, the same
+# resolution the compiled detectors use: use_pane_profile re-resolves the
+# fields through `git paw __prompt-profile --cli`, at most once per distinct
+# CLI per invocation, and a pane with no recorded CLI keeps the session set.
+PROFILE_VARS=(STUCK_MARKERS_REGEX LIVE_PROMPT_MARKERS_REGEX LIVE_PROMPT_OPTION_REGEX
+  LIVE_PROMPT_OPTION_ONE_REGEX BROAD_GRANT_MARKER_REGEX INPUT_SIGILS_REGEX
+  INPUT_BOX_LINE_REGEX STREAM_TIMEOUT_MARKERS_REGEX CONTEXT_BLOAT_MARKER_REGEX
+  PASTE_BUFFER_MARKER_REGEX)
+
+# Saves (save) or restores (load) every PROFILE_VARS value under <key>.
+profile_set() {
+  local action=$1 key=$2 var slot
+  for var in "${PROFILE_VARS[@]}"; do
+    slot="_PAWP_${key}_${var}"
+    if [[ "${action}" == "save" ]]; then
+      printf -v "${slot}" '%s' "${!var}"
+    else
+      printf -v "${var}" '%s' "${!slot}"
+    fi
+  done
+}
+profile_set save session
+
+# Resolves every profile field for <cli>, starting from the session set so a
+# field the binary cannot resolve keeps the session value.
+resolve_cli_profile() {
+  local cli=$1
+  profile_set load session
+  STUCK_MARKERS_REGEX=$(discover_prompt_profile_field approval_markers \
+    "${STUCK_MARKERS_REGEX}" "${cli}")
+  LIVE_PROMPT_MARKERS_REGEX=$(discover_prompt_profile_field live_prompt_markers \
+    "${LIVE_PROMPT_MARKERS_REGEX}" "${cli}")
+  derive_option_regexes "$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]' "${cli}")"
+  BROAD_GRANT_MARKER_REGEX=$(discover_prompt_profile_field broad_grant_marker \
+    "${BROAD_GRANT_MARKER_REGEX}" "${cli}")
+  INPUT_SIGILS_REGEX=$(discover_prompt_profile_field input_sigils "${INPUT_SIGILS_REGEX}" "${cli}")
+  INPUT_BOX_LINE_REGEX="^[[:space:]]*│?[[:space:]]*(${INPUT_SIGILS_REGEX})"
+  STREAM_TIMEOUT_MARKERS_REGEX=$(discover_prompt_profile_field stream_error_markers \
+    "${STREAM_TIMEOUT_MARKERS_REGEX}" "${cli}")
+  CONTEXT_BLOAT_MARKER_REGEX=$(discover_prompt_profile_field context_bloat_pattern \
+    "${CONTEXT_BLOAT_MARKER_REGEX}" "${cli}")
+  PASTE_BUFFER_MARKER_REGEX=$(discover_prompt_profile_field paste_buffer_pattern \
+    "${PASTE_BUFFER_MARKER_REGEX}" "${cli}")
+}
+
+# Loads the profile of the CLI the roster records for pane <pane>.
+use_pane_profile() {
+  local cli key loaded
+  cli=$(roster_cli_for_pane "${1}")
+  if [[ -z "${cli}" ]]; then
+    profile_set load session
+    return 0
+  fi
+  # Hex-encode the CLI name: injective, and always a valid variable name.
+  key="c_$(printf '%s' "${cli}" | od -An -tx1 | tr -d ' \n')"
+  loaded="_PAWP_${key}_LOADED"
+  if [[ -n "${!loaded:-}" ]]; then
+    profile_set load "${key}"
+    return 0
+  fi
+  resolve_cli_profile "${cli}"
+  profile_set save "${key}"
+  printf -v "${loaded}" '%s' 1
+}
 # No-progress heartbeat snapshot: one line per agent,
 # `agent<TAB>checkbox_count<TAB>commit_count<TAB>timestamp`.
 SWEEP_PROGRESS_FILE="${PAW_DIR}/.sweep-progress"
@@ -654,6 +724,9 @@ cmd_approve() {
     echo "pane ${pane} claimed by another approver, no keys sent (${claim})"
     return 0
   fi
+  # The re-confirm and the option-1 guard below read the prompt with the
+  # profile of the CLI this pane runs, not the session CLI.
+  use_pane_profile "${pane}"
   # Re-confirm a live permission prompt on a FRESH capture taken immediately
   # before sending keys (structural markers at the tail). If the prompt cleared
   # between the human deciding and now, send NOTHING -- a stray digit would
@@ -1396,6 +1469,28 @@ PY
 )"
 }
 
+# Print the CLI the per-repo discovery roster records for the coding agent on
+# pane <pane> -- the launch record git-paw wrote, never anything an agent
+# publishes. Prints nothing when no roster entry claims the pane or it records
+# no CLI.
+roster_cli_for_pane() {
+  [[ -z "${SESSION_FILE}" ]] && return
+  SESSION_FILE="${SESSION_FILE}" PANE="${1}" "${PY}" -c "$(cat <<'PY'
+import json, os
+try:
+    d = json.load(open(os.environ["SESSION_FILE"]))
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+pane = os.environ["PANE"]
+for agent in d.get("agents", []):
+    idx = agent.get("pane_index")
+    if isinstance(idx, int) and not isinstance(idx, bool) and str(idx) == pane:
+        print(agent.get("cli") or "")
+        break
+PY
+)"
+}
+
 # Print last_seen_seconds for an agent from a broker /status JSON blob.
 agent_last_seen() {
   local json=$1 agent=$2
@@ -1751,6 +1846,7 @@ cmd_detect_stuck() {
   log_json=$(curl -s "${BROKER}/log?since=0")
   for p in "${PANES[@]}"; do
     local cap path agent ls wt cb ci bage
+    use_pane_profile "${p}"
     cap=$(tmux capture-pane -t "${SESSION}:0.${p}" -p -S -50 2>/dev/null | tail -50)
     path=$(tmux display-message -p -t "${SESSION}:0.${p}" '#{pane_current_path}' 2>/dev/null)
     agent=$(resolve_agent_for_path "${path}")

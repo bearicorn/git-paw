@@ -5,10 +5,10 @@ use std::ffi::OsStr;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
-use super::{CliFamily, roster_entry};
+use super::{CliFamily, DialogMarker, roster_entry};
 use crate::config::{
-    ApprovalLevel, CliPromptProfile, CustomCli, SESSION_ID_PLACEHOLDER, launch_command,
-    merge_prompt_profile,
+    ApprovalLevel, CliPromptProfile, CompiledPromptProfile, CustomCli, SESSION_ID_PLACEHOLDER,
+    default_compiled_prompt_profile, launch_command, merge_prompt_profile,
 };
 use crate::error::PawError;
 
@@ -186,6 +186,30 @@ impl CliProfile {
         )
     }
 
+    /// [`Self::prompt_profile`] with its pattern fields compiled — the form
+    /// every detector takes.
+    ///
+    /// # Errors
+    ///
+    /// [`PawError::ConfigError`] naming `[clis.<id>].prompt_profile.<field>`
+    /// for a pattern that does not compile. Config load rejects such a
+    /// pattern first, so only a table that bypassed the load can reach this.
+    pub fn compiled_prompt_profile(&self) -> Result<CompiledPromptProfile, PawError> {
+        CompiledPromptProfile::compile(self.prompt_profile()).map_err(|e| {
+            PawError::ConfigError(format!(
+                "[clis.{}].prompt_profile.{}: {}",
+                self.id, e.field, e.error
+            ))
+        })
+    }
+
+    /// The first-run dialogs the launch gate answers for this CLI: its
+    /// family's, never anything from configuration.
+    #[must_use]
+    pub fn dialog_markers(&self) -> &'static [DialogMarker] {
+        self.family.provider().dialog_markers()
+    }
+
     /// The boot-prompt settle delay: the override, else
     /// [`crate::DEFAULT_SUBMIT_DELAY_MS`].
     #[must_use]
@@ -289,6 +313,95 @@ pub fn resolve_for_launch<S: BuildHasher>(
     let profile = CliProfile::resolve(identity, clis);
     profile.ensure_unambiguous()?;
     Ok(profile)
+}
+
+/// What the drive loop reads about one agent's CLI: the prompt-shape profile
+/// its surface is inspected with and its nudge settle delay.
+#[derive(Debug, Clone)]
+pub struct AgentCli {
+    /// The compiled prompt-shape profile.
+    pub prompt: CompiledPromptProfile,
+    /// The settle delay between typing a nudge and submitting it, in ms.
+    pub submit_delay_ms: u64,
+}
+
+impl AgentCli {
+    fn of(profile: &CliProfile) -> Result<Self, PawError> {
+        Ok(Self {
+            prompt: profile.compiled_prompt_profile()?,
+            submit_delay_ms: profile.submit_delay_ms(),
+        })
+    }
+}
+
+/// The `agent id → CLI` map of one session (design D2 of
+/// `cli-profile-threading`).
+///
+/// Each agent's CLI comes from git-paw's own launch record — the session
+/// state's recorded CLI — and never from anything an agent publishes to the
+/// broker. It is resolved once per recorded CLI and reused for every decision
+/// about that agent's surface; re-recording the agent with a different CLI
+/// (a kept worktree re-added with another CLI) resolves again. An agent with
+/// no recorded CLI resolves the `generic` family.
+#[derive(Debug, Clone)]
+pub struct AgentProfiles {
+    clis: HashMap<String, CustomCli>,
+    /// Per agent: the recorded CLI identity and what it resolved to.
+    agents: HashMap<String, (String, AgentCli)>,
+    generic: AgentCli,
+}
+
+impl AgentProfiles {
+    /// An empty map resolving against the merged `[clis]` table `clis`.
+    #[must_use]
+    pub fn new(clis: HashMap<String, CustomCli>) -> Self {
+        let generic = CliProfile::for_family(CliFamily::Generic);
+        Self {
+            clis,
+            agents: HashMap::new(),
+            generic: AgentCli {
+                prompt: default_compiled_prompt_profile().clone(),
+                submit_delay_ms: generic.submit_delay_ms(),
+            },
+        }
+    }
+
+    /// Records `agent_id`'s launch CLI `cli`. The same CLI recorded again is
+    /// not re-resolved; a different one replaces the agent's profile.
+    ///
+    /// A blank `cli` clears the record, so the agent resolves `generic`. An
+    /// override pattern that does not compile (only reachable when the table
+    /// bypassed config load) is reported on stderr and the agent resolves
+    /// `generic`.
+    pub fn record(&mut self, agent_id: &str, cli: &str) {
+        if self
+            .agents
+            .get(agent_id)
+            .is_some_and(|(seen, _)| seen == cli)
+        {
+            return;
+        }
+        self.agents.remove(agent_id);
+        if cli.trim().is_empty() {
+            return;
+        }
+        match AgentCli::of(&CliProfile::resolve(cli, &self.clis)) {
+            Ok(resolved) => {
+                self.agents
+                    .insert(agent_id.to_string(), (cli.to_string(), resolved));
+            }
+            Err(e) => eprintln!("warning: agent {agent_id}: {e}; using the generic profile"),
+        }
+    }
+
+    /// The CLI recorded for `agent_id`, or the `generic` family's when the
+    /// agent has none.
+    #[must_use]
+    pub fn get(&self, agent_id: &str) -> &AgentCli {
+        self.agents
+            .get(agent_id)
+            .map_or(&self.generic, |(_, resolved)| resolved)
+    }
 }
 
 /// Locates `command` the way a shell would: a path containing `/` is taken

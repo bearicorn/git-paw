@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::broker::learnings::{CATEGORY_PERMISSION_PATTERN, LearningRecord};
 use crate::broker::messages::BrokerMessage;
-use crate::config::claude_prompt_profile;
+use crate::config::CompiledPromptProfile;
 
 /// One manual-approval log entry — the in-memory shape of a single JSONL line.
 ///
@@ -323,11 +323,9 @@ pub fn aggregate(jsonl_path: &Path) -> std::io::Result<Vec<AggregatedApproval>> 
 /// Whether `lower` (a lower-cased line) reads as prompt boilerplate (the
 /// question / choices) rather than the command awaiting a decision.
 ///
-/// Sources its markers from the embedded Claude Code profile's
-/// `prompt_boilerplate_markers` (`cli-prompt-profiles` capability) rather
-/// than a compiled constant.
-fn is_prompt_boilerplate(lower: &str) -> bool {
-    claude_prompt_profile()
+/// Reads `profile`'s `prompt_boilerplate_markers`.
+fn is_prompt_boilerplate(lower: &str, profile: &CompiledPromptProfile) -> bool {
+    profile
         .prompt_boilerplate_markers
         .iter()
         .any(|n| lower.contains(n.as_str()))
@@ -343,9 +341,9 @@ fn is_prompt_boilerplate(lower: &str) -> bool {
 /// actually leaks into a capture: prompt boilerplate, and a diff or output line
 /// whose first token is punctuation (`+`, `⎿`, `123:`). A token made only of
 /// command-name characters, carrying at least one alphanumeric, is accepted.
-fn parses_as_command(text: &str) -> bool {
+fn parses_as_command(text: &str, profile: &CompiledPromptProfile) -> bool {
     let text = text.trim();
-    if text.is_empty() || is_prompt_boilerplate(&text.to_ascii_lowercase()) {
+    if text.is_empty() || is_prompt_boilerplate(&text.to_ascii_lowercase(), profile) {
         return false;
     }
     let head = text
@@ -384,11 +382,14 @@ fn is_env_name_char(c: char) -> bool {
 /// `None` when neither source yields text that [`parses_as_command`], so no
 /// spurious pattern is recorded.
 #[must_use]
-pub fn extract_forwarded_pattern(captured: &str) -> Option<String> {
-    super::permission_prompt::extract_command_slice(captured)
-        .or_else(|| super::permission_prompt::extract_path_from_file_prompt(captured))
+pub fn extract_forwarded_pattern(
+    captured: &str,
+    profile: &CompiledPromptProfile,
+) -> Option<String> {
+    super::permission_prompt::extract_command_slice(captured, profile)
+        .or_else(|| super::permission_prompt::extract_path_from_file_prompt(captured, profile))
         .map(|pattern| pattern.trim().to_string())
-        .filter(|pattern| parses_as_command(pattern))
+        .filter(|pattern| parses_as_command(pattern, profile))
 }
 
 // ---------------------------------------------------------------------------
@@ -447,12 +448,18 @@ impl ManualDecisionRecorder {
     /// Returns `Some(learning)` to publish when this is the first sighting of
     /// the pattern this session AND learnings are enabled; otherwise `None`.
     /// A no-op (returns `None`) when recording is disabled or no command can be
-    /// extracted from `captured`.
-    pub fn record_forwarded(&mut self, agent_id: &str, captured: &str) -> Option<BrokerMessage> {
+    /// extracted from `captured`. `profile` is the prompt-shape profile of the
+    /// CLI on the surface `captured` came from.
+    pub fn record_forwarded(
+        &mut self,
+        agent_id: &str,
+        captured: &str,
+        profile: &CompiledPromptProfile,
+    ) -> Option<BrokerMessage> {
         if !self.enabled {
             return None;
         }
-        let pattern = extract_forwarded_pattern(captured)?;
+        let pattern = extract_forwarded_pattern(captured, profile)?;
         let first_seen = self.seen.observe(&pattern);
         let approval = ManualApproval::now(agent_id, &pattern, first_seen);
         record(&approval, &self.log_path);
@@ -773,6 +780,14 @@ mod tests {
 
     // --- pattern extraction ---
 
+    fn embedded() -> &'static CompiledPromptProfile {
+        crate::config::default_compiled_prompt_profile()
+    }
+
+    fn extract_forwarded_pattern(captured: &str) -> Option<String> {
+        super::extract_forwarded_pattern(captured, embedded())
+    }
+
     #[test]
     fn extract_shell_command_from_prompt() {
         let captured = "Bash command:\nmake integration-test\nrequires approval [y/N]";
@@ -849,7 +864,7 @@ mod tests {
     fn recorder_disabled_writes_nothing_and_emits_no_learning() {
         let tmp = TempDir::new().unwrap();
         let mut rec = recorder(&tmp, false, true);
-        let learning = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]");
+        let learning = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]", embedded());
         assert!(learning.is_none(), "disabled recorder must not emit");
         assert!(
             !log_path(tmp.path(), "paw-x").exists(),
@@ -861,8 +876,8 @@ mod tests {
     fn recorder_first_sighting_emits_one_learning_repeat_emits_none() {
         let tmp = TempDir::new().unwrap();
         let mut rec = recorder(&tmp, true, true);
-        let first = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]");
-        let second = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]");
+        let first = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]", embedded());
+        let second = rec.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]", embedded());
         assert!(first.is_some(), "first sighting must emit a learning");
         assert!(second.is_none(), "repeat sighting must not emit");
         // Both forwards are logged (per-forward recording, first_seen toggles).
@@ -875,7 +890,7 @@ mod tests {
     fn recorder_logs_but_omits_learning_when_learnings_disabled() {
         let tmp = TempDir::new().unwrap();
         let mut rec = recorder(&tmp, true, false);
-        let learning = rec.record_forwarded("feat/a", "Bash command:\n./run.sh\n[y/N]");
+        let learning = rec.record_forwarded("feat/a", "Bash command:\n./run.sh\n[y/N]", embedded());
         assert!(
             learning.is_none(),
             "learnings disabled → no broker emission"

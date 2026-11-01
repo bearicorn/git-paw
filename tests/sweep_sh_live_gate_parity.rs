@@ -18,6 +18,7 @@
 //! subprocess reads the same embedded profile the in-process Rust gate
 //! does". `one_source_is_read_by_both_consumers` pins that directly.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -376,8 +377,11 @@ fn rust_gate_and_sweep_helper_agree_on_shared_fixtures() {
     init_git_repo(repo.path());
     let sweep = install_sweep(repo.path());
 
+    let profile = git_paw::agent_cli::CliProfile::resolve("claude", &HashMap::new())
+        .compiled_prompt_profile()
+        .expect("the embedded profile compiles");
     for (name, capture, expected_live) in fixtures() {
-        let rust_live = is_live_prompt(&capture);
+        let rust_live = is_live_prompt(&capture, &profile);
         let sweep_live = sweep_sees_live(repo.path(), &sweep, &capture);
         assert_eq!(
             rust_live, expected_live,

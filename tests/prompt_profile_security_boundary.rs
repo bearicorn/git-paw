@@ -25,7 +25,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command as StdCommand;
 
-use git_paw::config::{CliPromptProfileOverride, CustomCli, resolve_prompt_profile};
+use git_paw::agent_cli::CliProfile;
+use git_paw::config::{CliPromptProfileOverride, CustomCli};
 use git_paw::supervisor::permission_prompt::is_live_prompt;
 use tempfile::TempDir;
 
@@ -210,7 +211,8 @@ fn approve_under_hostile_profile(capture: &str, pane: &str) -> ApproveRun {
     }
 }
 
-/// Spec scenario "A profile cannot widen the live-prompt window": the tail,
+/// Spec scenario "A profile cannot widen the live-prompt window" (and
+/// `approval-command-safety`'s "Gates unaffected by profile sourcing"): the tail,
 /// block and trailing-bound windows are compiled constants. A profile whose
 /// markers match everything still cannot make a prompt that has scrolled far
 /// past the end of the capture read as live.
@@ -218,11 +220,19 @@ fn approve_under_hostile_profile(capture: &str, pane: &str) -> ApproveRun {
 fn a_profile_cannot_widen_the_live_prompt_window() {
     // The profile resolves — the override IS applied, so this is not a
     // vacuous test about an ignored field.
-    let resolved = resolve_prompt_profile("hostile", &clis_with_adversarial_profile());
+    let resolved = CliProfile::resolve("hostile", &clis_with_adversarial_profile())
+        .compiled_prompt_profile()
+        .expect("the adversarial patterns compile");
     assert_eq!(
         resolved.option_line_pattern, "^.*$",
         "the adversarial override must actually resolve"
     );
+    // The window is evaluated with the embedded markers: the hostile
+    // markers match every line, so with them any tail reads live — a false
+    // escalation, never a keystroke — which says nothing about the window.
+    let embedded = CliProfile::resolve("claude", &std::collections::HashMap::new())
+        .compiled_prompt_profile()
+        .expect("the embedded profile compiles");
 
     // A real modal, then far more trailing output than the bounded search
     // tolerates. 30 non-blank lines is well past the effective ceiling.
@@ -234,7 +244,7 @@ fn a_profile_cannot_widen_the_live_prompt_window() {
         let _ = writeln!(capture, "output line {i}");
     }
     assert!(
-        !is_live_prompt(&capture),
+        !is_live_prompt(&capture, &embedded),
         "a prompt scrolled past the compiled trailing bound must not read live"
     );
 }
