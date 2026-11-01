@@ -12,7 +12,9 @@ existing custom-CLI seam that confines an agent's writes to its worktree.
 git-paw neither invokes nor ships a sandbox profile — the sandbox is the user's
 own local config — but `git paw doctor` reports backend availability and points
 at this posture.
+
 ## Requirements
+
 ### Requirement: Consolidated security disclaimer and trust-model posture
 
 git-paw SHALL present a single consolidated security disclaimer, reachable from
@@ -66,7 +68,8 @@ the reader adapts to their CLI, OS, and stack.
 
 #### Scenario: PATH-resolvable wrapper requirement is documented
 - **WHEN** the docs explain how to point a CLI at the wrapper
-- **THEN** they state that git-paw launches a custom CLI by its PATH name, so the wrapper must be a PATH-resolvable executable, not only a path assigned to `command`
+- **THEN** they state that git-paw launches the executable `command` resolves to, so `command` may be the wrapper's path and the wrapper need not be on PATH under the entry's name
+- **AND** they state that a wrapper kept on PATH under the entry's name must be the same file `command` resolves to, or git-paw refuses to launch that CLI rather than guess which one was meant
 
 #### Scenario: The writable allow-list is documented
 - **WHEN** the docs describe the sandbox profile
@@ -163,4 +166,3 @@ Test: `tests/security_posture_docs.rs::posture_chapter_documents_hook_bypass_and
 - **AND** SHALL state that the credential is stored outside the repository
 - **AND** SHALL state that an unsandboxed worker with home-directory read access is out of the rule's threat model and is addressed by the sandbox
 - **AND** SHALL state that `agent.status` — including one claiming the `supervisor` identity — is not gated
-

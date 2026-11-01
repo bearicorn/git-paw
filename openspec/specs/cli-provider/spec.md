@@ -1,5 +1,6 @@
-## Purpose
+# cli-provider Specification
 
+## Purpose
 Defines how git-paw knows what each agent CLI is and how to drive it. Every agent CLI — a detected
 binary or a `[clis.<name>]` entry — resolves once into a record carrying its identity, the
 executable and arguments to launch, its provider family, and the per-CLI facets the rest of git-paw
@@ -8,7 +9,7 @@ shape). Provider families are compiled in-tree as a Strategy with a generic Null
 an unrecognised CLI degrades to launch-and-observe rather than failing, and a variant of a known CLI
 can declare its family to inherit that CLI's behaviour.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Each agent CLI resolves into one record
 
