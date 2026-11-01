@@ -432,6 +432,7 @@ pub fn add(
                     agent_id: broker::messages::slugify_branch(&branch),
                     entry_point,
                     settle_delay_ms: delay,
+                    prompt_profile: agent_profile.compiled_prompt_profile()?,
                 }],
                 out,
             );

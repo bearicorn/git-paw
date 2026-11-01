@@ -16,12 +16,7 @@
 //! prompt is asking for is decided by the agent CLI's own permission system or
 //! by a human — never here.
 
-use std::sync::OnceLock;
-
-use regex::Regex;
-
-use crate::config::{CliPromptProfile, claude_prompt_profile};
-use crate::static_regex::static_regex;
+use crate::config::CompiledPromptProfile;
 
 /// Returns whether `captured` carries one of `profile`'s approval markers —
 /// that is, whether the pane is showing a permission prompt at all.
@@ -37,40 +32,28 @@ use crate::static_regex::static_regex;
 /// Pure function — exposed separately from any capture so unit tests can
 /// drive it without touching tmux.
 #[must_use]
-pub fn has_approval_marker(captured: &str, profile: &CliPromptProfile) -> bool {
+pub fn has_approval_marker(captured: &str, profile: &CompiledPromptProfile) -> bool {
     profile
         .approval_markers
         .iter()
         .any(|m| captured.contains(m.as_str()))
 }
 
-/// Compiled regex matching the lead-in of a Claude filesystem-operation
-/// permission prompt and capturing the target path.
+/// Extracts the target path from a filesystem-operation permission prompt,
+/// or `None` when the prompt is not a recognised file-op prompt.
 ///
-/// Covers the documented write / edit / create prompt shapes, e.g.
-/// `"Do you want to allow this write to <path>?"` and
-/// `"Do you want to make this edit to <path>?"`. The capture group runs to
-/// the end of the line (minus a trailing `?`), so the path may contain
-/// spaces. Matching is case-insensitive.
-///
-/// Sourced from the embedded Claude Code profile's `file_prompt_pattern`
-/// (`cli-prompt-profiles` capability) rather than a compiled literal.
-fn file_prompt_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| static_regex(claude_prompt_profile().file_prompt_pattern.as_str()))
-}
-
-/// Extracts the target path from a Claude filesystem-operation permission
-/// prompt, or `None` when the prompt is not a recognised file-op prompt.
-///
-/// The prompt text is scanned line by line; the first line whose lead-in
-/// matches a documented write / edit / create shape yields its captured
+/// The prompt text is scanned line by line; the first line matching
+/// `profile`'s `file_prompt_pattern` (for Claude Code, e.g.
+/// `"Do you want to allow this write to <path>?"`) yields its captured
 /// path. Surrounding quotes and backticks are stripped. The returned string
 /// is the raw path as it appeared in the prompt — resolving it against a
 /// worktree root is the caller's job.
 #[must_use]
-pub fn extract_path_from_file_prompt(prompt: &str) -> Option<String> {
-    let re = file_prompt_regex();
+pub fn extract_path_from_file_prompt(
+    prompt: &str,
+    profile: &CompiledPromptProfile,
+) -> Option<String> {
+    let re = profile.file_prompt_regex();
     for line in prompt.lines() {
         if let Some(caps) = re.captures(line) {
             let raw = caps.get(1)?.as_str().trim();
@@ -118,28 +101,20 @@ fn strip_decoration(line: &str) -> &str {
     .trim_end()
 }
 
-/// Compiled regex for the embedded profile's `option_line_pattern`
-/// (`cli-prompt-profiles` capability), matching a numbered option line
-/// (`1. …`, `2) …`) once leading whitespace is trimmed.
-fn option_line_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| static_regex(claude_prompt_profile().option_line_pattern.as_str()))
-}
-
-/// Returns `true` when a cleaned line is a numbered option (`1. …`, `2) …`).
-fn is_option_line(line: &str) -> bool {
-    option_line_regex().is_match(line.trim_start())
+/// Returns `true` when a cleaned line is a numbered option (`1. …`, `2) …`)
+/// by `profile`'s `option_line_pattern`, once leading whitespace is trimmed.
+#[must_use]
+pub fn is_option_line(line: &str, profile: &CompiledPromptProfile) -> bool {
+    profile.option_line_regex().is_match(line.trim_start())
 }
 
 /// Returns `true` when a cleaned line marks the end of the command block —
 /// the confirmation question, an approval marker, or the option list.
 ///
-/// The confirmation-question and approval-marker checks source their
-/// literals from the embedded Claude Code profile's `live_prompt_markers`
-/// and `approval_markers` (`cli-prompt-profiles` capability).
-fn is_confirmation_boundary(line: &str) -> bool {
+/// The confirmation-question and approval-marker checks read `profile`'s
+/// `live_prompt_markers` and `approval_markers`.
+fn is_confirmation_boundary(line: &str, profile: &CompiledPromptProfile) -> bool {
     let lower = line.to_ascii_lowercase();
-    let profile = claude_prompt_profile();
     profile
         .live_prompt_markers
         .iter()
@@ -148,18 +123,17 @@ fn is_confirmation_boundary(line: &str) -> bool {
             .approval_markers
             .iter()
             .any(|m| lower.contains(&m.to_ascii_lowercase()))
-        || is_option_line(line)
+        || is_option_line(line, profile)
 }
 
 /// Returns `true` when a cleaned line is a `Bash command` prompt header.
 ///
-/// Sources its literal from the embedded profile's `command_header_markers`
-/// (`cli-prompt-profiles` capability) — a header-style marker is one that
-/// does NOT end in `(` (an inline-embedding marker like `Bash(`, handled
+/// Reads `profile`'s `command_header_markers` — a header-style marker is one
+/// that does NOT end in `(` (an inline-embedding marker like `Bash(`, handled
 /// separately by [`extract_command_slice`]'s inline form).
-fn is_bash_command_header(line: &str) -> bool {
+fn is_bash_command_header(line: &str, profile: &CompiledPromptProfile) -> bool {
     let lower = line.to_ascii_lowercase();
-    claude_prompt_profile()
+    profile
         .command_header_markers
         .iter()
         .filter(|m| !m.ends_with('('))
@@ -177,8 +151,8 @@ fn is_bash_command_header(line: &str) -> bool {
 /// (the command itself), stopping before any description line or the
 /// confirmation question. Returns `None` when no recognised header is present.
 #[must_use]
-pub fn extract_command_slice(capture: &str) -> Option<String> {
-    let inline_markers: Vec<&str> = claude_prompt_profile()
+pub fn extract_command_slice(capture: &str, profile: &CompiledPromptProfile) -> Option<String> {
+    let inline_markers: Vec<&str> = profile
         .command_header_markers
         .iter()
         .filter(|m| m.ends_with('('))
@@ -204,13 +178,13 @@ pub fn extract_command_slice(capture: &str) -> Option<String> {
 
         // `Bash command` header form: the command is the first non-empty
         // cleaned line that follows, up to the confirmation question.
-        if is_bash_command_header(line) {
+        if is_bash_command_header(line, profile) {
             for next in &lines[idx + 1..] {
                 let cleaned = strip_decoration(next);
                 if cleaned.is_empty() {
                     continue;
                 }
-                if is_confirmation_boundary(cleaned) {
+                if is_confirmation_boundary(cleaned, profile) {
                     break;
                 }
                 return Some(cleaned.to_string());
@@ -302,18 +276,21 @@ pub(crate) fn is_rule_line(line: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().all(|c| matches!(c, '─' | '━' | '═' | '-'))
 }
 
-/// Returns the text after `line`'s composer sigil (one of the embedded
-/// profile's `input_sigils`), once optional `│` box-border characters are
+/// Returns the text after `line`'s composer sigil (one of `profile`'s
+/// `input_sigils`), once optional `│` box-border characters are
 /// trimmed from both ends — or `None` if `line` does not start with a sigil
 /// either way (bordered or borderless). `pub(crate)` so `input_box_text` in
 /// `src/supervisor/drive.rs` can extract the typed text once
 /// [`is_idle_input_box_line`] has confirmed the shape.
-pub(crate) fn strip_input_sigil(line: &str) -> Option<&str> {
+pub(crate) fn strip_input_sigil<'a>(
+    line: &'a str,
+    profile: &CompiledPromptProfile,
+) -> Option<&'a str> {
     let trimmed = line.trim();
     let inner = trimmed
         .strip_prefix('│')
         .map_or(trimmed, |s| s.trim_end_matches('│').trim());
-    claude_prompt_profile()
+    profile
         .input_sigils
         .iter()
         .find_map(|sigil| inner.strip_prefix(sigil.as_str()))
@@ -340,11 +317,15 @@ pub(crate) fn strip_input_sigil(line: &str) -> Option<&str> {
 /// rather than duplicated), so idle-pane buffered-input detection and the
 /// live-prompt gate's input-box rejection cannot drift apart on what counts
 /// as "the input box".
-pub(crate) fn is_idle_input_box_line(line: &str, preceding_non_blank_line: Option<&str>) -> bool {
-    let Some(after_sigil) = strip_input_sigil(line) else {
+pub(crate) fn is_idle_input_box_line(
+    line: &str,
+    preceding_non_blank_line: Option<&str>,
+    profile: &CompiledPromptProfile,
+) -> bool {
+    let Some(after_sigil) = strip_input_sigil(line, profile) else {
         return false;
     };
-    if is_option_line(after_sigil.trim_start()) {
+    if is_option_line(after_sigil.trim_start(), profile) {
         return false;
     }
     let bordered = line.trim().starts_with('│');
@@ -403,7 +384,11 @@ pub(crate) fn anchor_on_trailing_region<'a>(
 /// ([`crate::supervisor::approval_gate::live_prompt_in_tail`]), so detection
 /// and send-time re-confirm agree on what "live" means.
 #[must_use]
-pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> bool {
+pub fn live_prompt_markers_at_tail(
+    capture: &str,
+    textual_markers: &[&str],
+    profile: &CompiledPromptProfile,
+) -> bool {
     let nonblank: Vec<&str> = capture.lines().filter(|l| !l.trim().is_empty()).collect();
     let has_textual = |lines: &[&str], markers: &[&str]| {
         lines.iter().any(|line| {
@@ -420,7 +405,9 @@ pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> b
                 return true;
             }
             let block = &lines[lines.len().saturating_sub(LIVE_PROMPT_BLOCK)..];
-            return tail.iter().any(|l| is_option_line(strip_decoration(l)))
+            return tail
+                .iter()
+                .any(|l| is_option_line(strip_decoration(l), profile))
                 && has_textual(block, textual_markers);
         }
         // Beyond the true end: a bare substring match would also fire on
@@ -435,9 +422,11 @@ pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> b
         let tail_start = lines.len() - tail.len();
         tail.iter().enumerate().any(|(i, l)| {
             is_footer_line(l)
-                && block.iter().any(|l2| is_option_line(strip_decoration(l2)))
+                && block
+                    .iter()
+                    .any(|l2| is_option_line(strip_decoration(l2), profile))
                 && !(tail_start + i + 1..nonblank.len())
-                    .any(|k| is_idle_input_box_line(nonblank[k], Some(nonblank[k - 1])))
+                    .any(|k| is_idle_input_box_line(nonblank[k], Some(nonblank[k - 1]), profile))
         })
     })
 }
@@ -453,16 +442,16 @@ pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> b
 /// not have the markers in the live window and so cannot trip a phantom
 /// approval.
 ///
-/// Sources its markers from the embedded Claude Code profile's
-/// `live_prompt_markers` (`cli-prompt-profiles` capability).
+/// Reads `profile`'s `live_prompt_markers` — the profile of the CLI on the
+/// surface `capture` came from.
 #[must_use]
-pub fn is_live_prompt(capture: &str) -> bool {
-    let markers: Vec<&str> = claude_prompt_profile()
+pub fn is_live_prompt(capture: &str, profile: &CompiledPromptProfile) -> bool {
+    let markers: Vec<&str> = profile
         .live_prompt_markers
         .iter()
         .map(String::as_str)
         .collect();
-    live_prompt_markers_at_tail(capture, &markers)
+    live_prompt_markers_at_tail(capture, &markers, profile)
 }
 
 #[cfg(test)]
@@ -470,12 +459,22 @@ mod tests {
     use super::*;
     use std::fmt::Write as _;
 
+    /// The embedded default, as profile resolution hands it to a pane with no
+    /// override.
+    fn embedded() -> &'static CompiledPromptProfile {
+        crate::config::default_compiled_prompt_profile()
+    }
+
     /// `core-project-conventions`' "Every static pattern compiles under test":
-    /// forces every static regex in this module to compile.
+    /// the embedded default's patterns compile and match their shapes.
     #[test]
     fn static_regexes_compile() {
-        assert!(file_prompt_regex().is_match("Do you want to allow this write to src/lib.rs?"));
-        assert!(option_line_regex().is_match("1. Yes"));
+        assert!(
+            embedded()
+                .file_prompt_regex()
+                .is_match("Do you want to allow this write to src/lib.rs?")
+        );
+        assert!(is_option_line("1. Yes", embedded()));
     }
 
     /// Spec scenario "Approval prompt detected in working agent"
@@ -484,7 +483,7 @@ mod tests {
     /// profile's markers is detected; one carrying none is not.
     #[test]
     fn approval_marker_presence_is_reported() {
-        let profile = claude_prompt_profile();
+        let profile = embedded();
         for (captured, expected) in [
             ("lorem ipsum dolor sit amet\n$ ls\n", false),
             (
@@ -518,7 +517,7 @@ mod tests {
     /// make.
     #[test]
     fn detection_carries_no_command_class() {
-        let profile = claude_prompt_profile();
+        let profile = embedded();
         let curl = "Bash command:\ncurl http://127.0.0.1:9119/publish\nrequires approval [y/N]";
         let destructive = "Bash command:\nrm -rf /\nrequires approval [y/N]";
         let secret_read = "Bash command:\ncat ~/.ssh/id_rsa\nrequires approval [y/N]";
@@ -538,7 +537,10 @@ mod tests {
     #[test]
     fn extracts_path_from_write_prompt() {
         assert_eq!(
-            extract_path_from_file_prompt("Do you want to allow this write to Containerfile?"),
+            extract_path_from_file_prompt(
+                "Do you want to allow this write to Containerfile?",
+                embedded()
+            ),
             Some("Containerfile".to_string())
         );
     }
@@ -546,7 +548,10 @@ mod tests {
     #[test]
     fn extracts_path_from_edit_prompt() {
         assert_eq!(
-            extract_path_from_file_prompt("Do you want to make this edit to src/main.rs?"),
+            extract_path_from_file_prompt(
+                "Do you want to make this edit to src/main.rs?",
+                embedded()
+            ),
             Some("src/main.rs".to_string())
         );
     }
@@ -554,7 +559,10 @@ mod tests {
     #[test]
     fn extracts_absolute_path_from_prompt() {
         assert_eq!(
-            extract_path_from_file_prompt("Do you want to allow this write to /etc/hosts?"),
+            extract_path_from_file_prompt(
+                "Do you want to allow this write to /etc/hosts?",
+                embedded()
+            ),
             Some("/etc/hosts".to_string())
         );
     }
@@ -563,7 +571,10 @@ mod tests {
     fn shell_prompt_yields_no_file_path() {
         // A shell-command prompt must not be mistaken for a file op.
         assert_eq!(
-            extract_path_from_file_prompt("Do you want to proceed?\ncargo build --release"),
+            extract_path_from_file_prompt(
+                "Do you want to proceed?\ncargo build --release",
+                embedded()
+            ),
             None
         );
     }
@@ -586,7 +597,7 @@ Let me run the tests instead.
   Do you want to proceed?
   ❯ 1. Yes
     2. No";
-        let slice = extract_command_slice(capture).expect("a command slice");
+        let slice = extract_command_slice(capture, embedded()).expect("a command slice");
         assert_eq!(slice, "cargo test --workspace");
     }
 
@@ -594,14 +605,17 @@ Let me run the tests instead.
     fn command_slice_reads_bash_paren_form() {
         let capture = "Bash(git push origin main)\n  Push the branch\nDo you want to proceed?";
         assert_eq!(
-            extract_command_slice(capture),
+            extract_command_slice(capture, embedded()),
             Some("git push origin main".to_string())
         );
     }
 
     #[test]
     fn command_slice_none_without_header() {
-        assert_eq!(extract_command_slice("just some prose\n$ ls\n"), None);
+        assert_eq!(
+            extract_command_slice("just some prose\n$ ls\n", embedded()),
+            None
+        );
     }
 
     #[test]
@@ -614,7 +628,7 @@ Bash command
   git push origin main
 Do you want to proceed?";
         assert_eq!(
-            extract_command_slice(capture),
+            extract_command_slice(capture, embedded()),
             Some("git push origin main".to_string())
         );
     }
@@ -631,7 +645,7 @@ Do you want to proceed?
 ❯ 1. Yes
   2. No
   (esc to cancel)";
-        assert!(is_live_prompt(capture));
+        assert!(is_live_prompt(capture, embedded()));
     }
 
     /// Spec scenario "Footer absent does not fire".
@@ -642,7 +656,7 @@ I might run cargo test soon.
 Here is some narration about the plan.
 $ ls -la
 done.";
-        assert!(!is_live_prompt(capture));
+        assert!(!is_live_prompt(capture, embedded()));
     }
 
     /// Spec scenario "Scrolled-away prompt still fails the gate" (original
@@ -663,7 +677,7 @@ output line 3
 output line 4
 output line 5";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "a footer with no option list anywhere is not a live modal"
         );
     }
@@ -689,7 +703,7 @@ Tasks
 main* ⇡2
 Sonnet 5.1 · 42% context used";
         assert!(
-            live_prompt_markers_at_tail(capture, &markers),
+            live_prompt_markers_at_tail(capture, &markers, embedded()),
             "a trailing task-list region within the bound must not hide a live modal"
         );
     }
@@ -707,7 +721,7 @@ Do you want to proceed?
 ❯ 1. Yes
   2. No
   Esc to cancel";
-        assert!(live_prompt_markers_at_tail(capture, &markers));
+        assert!(live_prompt_markers_at_tail(capture, &markers, embedded()));
     }
 
     /// Builds a live multi-option prompt (with a footer AND an option list,
@@ -731,7 +745,7 @@ Do you want to proceed?
         let markers = ["do you want to", "esc to cancel"];
         let capture = multi_option_prompt_with_trailing_lines(13);
         assert!(
-            live_prompt_markers_at_tail(&capture, &markers),
+            live_prompt_markers_at_tail(&capture, &markers, embedded()),
             "exactly 13 trailing lines is within the effective tolerance"
         );
     }
@@ -746,7 +760,7 @@ Do you want to proceed?
         let markers = ["do you want to", "esc to cancel"];
         let capture = multi_option_prompt_with_trailing_lines(14);
         assert!(
-            !live_prompt_markers_at_tail(&capture, &markers),
+            !live_prompt_markers_at_tail(&capture, &markers, embedded()),
             "14 trailing lines is one past the effective tolerance and must stay scrolled-away"
         );
     }
@@ -766,7 +780,7 @@ line c
 line d
 $ ";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "a bare answered question followed by ordinary output must not read as live"
         );
     }
@@ -786,7 +800,7 @@ Still idle.
 Still nothing.
 $ ";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "narration that merely mentions the footer text is not a live modal"
         );
     }
@@ -805,7 +819,7 @@ no further prompts found
 agent waiting for next instruction
 $ ";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "grep output echoing the footer text is not a live modal"
         );
     }
@@ -832,7 +846,7 @@ Done.
 │ >                                              │
 ╰──────────────────────────────────────────────╯";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "a quoted modal above the supervisor's own idle input box is not a live prompt"
         );
     }
@@ -859,7 +873,7 @@ Done.
 ────────────────────────────────────────────────
   ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "a quoted modal above the real borderless idle input box is not a live prompt"
         );
     }
@@ -881,7 +895,7 @@ Done.
 │   3. No, and tell Claude what to do differently (esc)        │
 ╰──────────────────────────────────────────────────────────────╯";
         assert!(
-            is_live_prompt(capture),
+            is_live_prompt(capture, embedded()),
             "a multi-option prompt block must be detected as live"
         );
     }
@@ -897,7 +911,7 @@ Do you want to proceed?
   2. Yes, and don't ask again for: git status
   3. No
   Esc to cancel";
-        assert!(is_live_prompt(capture));
+        assert!(is_live_prompt(capture, embedded()));
     }
 
     /// A numbered list at the tail of plain narration (no proceed question or
@@ -911,7 +925,7 @@ Here is my plan:
 2. commit the work
 3. stand by for verification";
         assert!(
-            !is_live_prompt(capture),
+            !is_live_prompt(capture, embedded()),
             "a prose numbered list must not be detected as live"
         );
     }

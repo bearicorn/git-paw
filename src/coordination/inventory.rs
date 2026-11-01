@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::config::claude_prompt_profile;
+use crate::agent_cli::AgentProfiles;
+use crate::config::CliPromptProfile;
 use crate::error::PawError;
 use crate::surface::SUPERVISOR_AGENT_ID;
 use crate::terminal::TerminalBackend;
@@ -280,13 +281,11 @@ pub fn join_inventory<S: std::hash::BuildHasher>(
 /// is illustrative, not exhaustive — when in doubt the result is `Unknown`
 /// and consumers fall back to the safe delivery mode.
 ///
-/// Sources its markers from the embedded Claude Code profile's
-/// `mode_accept_edits_markers` / `mode_interactive_markers`
-/// (`cli-prompt-profiles` capability) rather than compiled literals.
+/// Reads `profile`'s `mode_accept_edits_markers` /
+/// `mode_interactive_markers` — the profile of the CLI on the pane.
 #[must_use]
-pub fn detect_mode(pane_title: &str, capture: &str) -> Mode {
+pub fn detect_mode(pane_title: &str, capture: &str, profile: &CliPromptProfile) -> Mode {
     let hay = format!("{pane_title}\n{capture}").to_lowercase();
-    let profile = claude_prompt_profile();
     if profile
         .mode_accept_edits_markers
         .iter()
@@ -456,13 +455,21 @@ impl InventoryCache {
 /// status, or emits unparseable `/status` JSON. tmux failures degrade
 /// gracefully: a pane listing that fails yields an empty mapping (all
 /// `pane_index` become `None`) rather than aborting the inventory.
-pub fn build_inventory(broker_url: &str, tmux_session: &str) -> Result<AgentInventory, PawError> {
-    build_inventory_with(&TmuxBackend::new(), broker_url, tmux_session)
+///
+/// Each pane's mode is read with the prompt-shape profile `profiles` holds
+/// for the agent that owns it — git-paw's launch record, never the broker's
+/// agent-published `cli`.
+pub fn build_inventory(
+    broker_url: &str,
+    tmux_session: &str,
+    profiles: &AgentProfiles,
+) -> Result<AgentInventory, PawError> {
+    build_inventory_with(&TmuxBackend::new(), broker_url, tmux_session, profiles)
 }
 
 /// [`build_inventory`] reading surfaces through `backend`: each surface's
 /// owner feeds the basename-suffix [`match_pane`] rule unchanged, and its
-/// label and screen feed [`detect_mode`].
+/// label and screen feed [`detect_mode`] with its owning agent's profile.
 ///
 /// # Errors
 /// As [`build_inventory`].
@@ -470,6 +477,7 @@ pub fn build_inventory_with(
     backend: &dyn TerminalBackend,
     broker_url: &str,
     tmux_session: &str,
+    profiles: &AgentProfiles,
 ) -> Result<AgentInventory, PawError> {
     let body = fetch_status_body(broker_url)?;
     let agents = parse_status_agents(&body)?;
@@ -482,7 +490,12 @@ pub fn build_inventory_with(
     for surface in &surfaces {
         let title = backend.label_of(&surface.id).unwrap_or_default();
         let capture = backend.capture_tail(&surface.id).unwrap_or_default();
-        modes.insert(surface.position, detect_mode(&title, &capture));
+        let owner = agents
+            .iter()
+            .find(|a| match_pane(&a.agent_id, &pane_paths) == Some(surface.position))
+            .map_or("", |a| a.agent_id.as_str());
+        let profile = &profiles.get(owner).prompt;
+        modes.insert(surface.position, detect_mode(&title, &capture, profile));
     }
     let entries = join_inventory(agents, &pane_paths, &modes);
     Ok(AgentInventory {
@@ -690,6 +703,10 @@ mod tests {
         assert_eq!(inv.find("feat-auth").unwrap().pane_index, Some(2));
     }
 
+    fn detect_mode(title: &str, capture: &str) -> Mode {
+        super::detect_mode(title, capture, crate::config::claude_prompt_profile())
+    }
+
     #[test]
     fn detect_mode_accept_edits() {
         assert_eq!(
@@ -871,7 +888,8 @@ mod tests {
         let url = spawn_status_server(STATUS_JSON);
         // The tmux session does not exist, so list-panes fails and every
         // pane_index degrades to None — the supervisor row has none anyway.
-        let inv = build_inventory(&url, "paw-nonexistent-xyz-123").expect("inventory builds");
+        let inv = build_inventory(&url, "paw-nonexistent-xyz-123", &no_profiles())
+            .expect("inventory builds");
         assert_eq!(inv.entries.len(), 3);
         assert_eq!(inv.find("feat-auth").unwrap().pane_index, None);
         assert_eq!(inv.find("feat-auth").unwrap().mode, Mode::Unknown);
@@ -881,7 +899,12 @@ mod tests {
     #[test]
     fn build_inventory_unreachable_broker_errors() {
         // Port 1 on loopback refuses immediately → connect error propagates.
-        assert!(build_inventory("http://127.0.0.1:1", "x").is_err());
+        assert!(build_inventory("http://127.0.0.1:1", "x", &no_profiles()).is_err());
+    }
+
+    /// A profile map with no recorded agent: every pane resolves `generic`.
+    fn no_profiles() -> AgentProfiles {
+        AgentProfiles::new(HashMap::new())
     }
 
     #[test]
@@ -899,7 +922,8 @@ mod tests {
             Some(std::path::Path::new("/w/proj-feat-auth")),
         );
         let url = spawn_status_server(STATUS_JSON);
-        let inv = build_inventory_with(&backend, &url, "paw-x").expect("inventory builds");
+        let inv = build_inventory_with(&backend, &url, "paw-x", &no_profiles())
+            .expect("inventory builds");
         let row = inv.find("feat-auth").unwrap();
         assert_eq!(row.pane_index, Some(1));
         assert_eq!(row.mode, Mode::Unknown);
@@ -917,7 +941,8 @@ mod tests {
         let auth = backend.surface_at("paw-x", 2);
         backend.script_screens(&auth, &[Some("● Thinking…\n  esc to interrupt")]);
         let url = spawn_status_server(STATUS_JSON);
-        let inv = build_inventory_with(&backend, &url, "paw-x").expect("inventory builds");
+        let inv = build_inventory_with(&backend, &url, "paw-x", &no_profiles())
+            .expect("inventory builds");
         assert_eq!(inv.find("feat-auth").unwrap().pane_index, Some(2));
         assert_eq!(inv.find("feat-api").unwrap().pane_index, Some(1));
         assert_eq!(inv.find("supervisor").unwrap().pane_index, None);

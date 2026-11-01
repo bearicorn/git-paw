@@ -187,5 +187,17 @@ Claude Code profile, embedded in the binary; no other CLI in the table above
 has a shipped profile, because a guessed one would misdetect confidently
 rather than falling back visibly. Every CLI — listed or custom — resolves
 the embedded Claude default for any field it has no profile override for.
+
+The profile is resolved **per agent**: each pane is read with the profile of
+the CLI git-paw launched in it (taken from the session's launch record, not
+from anything the agent publishes), so a mixed session reads each worker by
+its own CLI's shapes. An agent with no recorded CLI resolves the `generic`
+family, whose profile is the embedded default. The compiled families other
+than `claude` (`codex`, `agy`, `qwen`, `cursor-agent`) also use Claude Code's
+shapes until their real ones are audited (planned for v0.23); per-CLI shapes
+come from a `[clis.<name>].prompt_profile` override. The first-run acceptance and
+folder-trust dialogs the launch gate answers belong to the CLI's provider
+family and are compiled in; no profile can add or change one.
+
 See [CLI Prompt-Shape Profiles](user-guide/cli-prompt-profiles.md) for the
 field reference and how to author one.

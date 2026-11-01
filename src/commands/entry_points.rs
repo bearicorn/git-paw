@@ -2,6 +2,7 @@
 //! composer line, once each agent's pane goes idle after its first prompt.
 
 use super::Output;
+use crate::config::CompiledPromptProfile;
 
 /// One pane still owing its declared workflow entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,9 @@ pub(crate) struct PendingEntryPoint {
     /// That CLI's settle delay, used both as the poll interval and between
     /// the literal send and its `Enter`.
     pub(crate) settle_delay_ms: u64,
+    /// That CLI's prompt-shape profile, which every idle check on the pane
+    /// reads.
+    pub(crate) prompt_profile: CompiledPromptProfile,
 }
 
 /// How long the launch waits, across all panes at once, for agents to finish
@@ -144,7 +148,9 @@ pub(crate) fn submit_entry_points_with<C: EntryPointClock>(
 
     // A capture we could not take is not evidence of idleness: an empty
     // string satisfies every idle marker there is.
-    let looks_idle = |capture: Option<String>| capture.is_some_and(|c| pane_is_idle_and_empty(&c));
+    let looks_idle = |capture: Option<String>, profile: &CompiledPromptProfile| {
+        capture.is_some_and(|c| pane_is_idle_and_empty(&c, profile))
+    };
 
     let mut reports: Vec<EntryPointReport> = Vec::new();
     // Refuse unsafe text before any waiting: it cannot become safe, and the
@@ -179,7 +185,8 @@ pub(crate) fn submit_entry_points_with<C: EntryPointClock>(
         let mut idx = 0;
         while idx < pending.len() {
             let surface = backend.surface_at(session, pending[idx].pane_index);
-            if looks_idle(backend.capture_tail(&surface)) {
+            let profile = pending[idx].prompt_profile.clone();
+            if looks_idle(backend.capture_tail(&surface), &profile) {
                 idle_streak[idx] += 1;
             } else {
                 idle_streak[idx] = 0;
@@ -189,7 +196,7 @@ pub(crate) fn submit_entry_points_with<C: EntryPointClock>(
                 continue;
             }
             // Look once more, immediately before typing.
-            if !looks_idle(backend.capture_tail(&surface)) {
+            if !looks_idle(backend.capture_tail(&surface), &profile) {
                 idle_streak[idx] = 0;
                 idx += 1;
                 continue;
@@ -226,7 +233,7 @@ pub(crate) fn submit_entry_points_with<C: EntryPointClock>(
             // changed.
             let still_ours = backend
                 .capture_tail(&surface)
-                .is_some_and(|c| pane_is_responsive(&c));
+                .is_some_and(|c| pane_is_responsive(&c, &profile));
             if still_ours {
                 let _ = backend.send_key(&surface, Key::Enter);
                 pending.remove(idx);
@@ -461,6 +468,7 @@ mod tests {
             agent_id: "feat-x".to_string(),
             entry_point: "/opsx:apply my-change".to_string(),
             settle_delay_ms: 100,
+            prompt_profile: crate::config::default_compiled_prompt_profile().clone(),
         }
     }
 

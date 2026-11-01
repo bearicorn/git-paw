@@ -95,6 +95,46 @@ fn no_auto_approve_thread_symbol_exists_under_src() {
     );
 }
 
+/// `cli-profile-threading`, "Detectors receive the profile of the surface they
+/// inspect": the embedded default profile is read only by profile resolution,
+/// as the fallback for a CLI with no profile of its own. A detector that read
+/// it directly would ignore the pane's CLI — the bug that change fixed — and
+/// no behavioural test can show that NO detector does.
+#[test]
+fn only_profile_resolution_reads_the_embedded_default() {
+    const RESOLUTION: &[&str] = &[
+        "src/config/prompt_profile.rs",
+        "src/config/mod.rs",
+        "src/agent_cli/mod.rs",
+        "src/agent_cli/profile.rs",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, body) in src_files() {
+        let rel = std::path::Path::new(&path)
+            .strip_prefix(root)
+            .map_or(path.clone(), |p| p.display().to_string());
+        if RESOLUTION.contains(&rel.as_str()) || rel.ends_with("tests.rs") {
+            continue;
+        }
+        // Unit tests may pin behaviour against the default; production code
+        // may not read it.
+        let production = body
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(&body);
+        for symbol in ["claude_prompt_profile(", "default_compiled_prompt_profile("] {
+            if production.contains(symbol) {
+                offenders.push(format!("{symbol} in {rel}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "only profile resolution may read the embedded default profile: {offenders:?}"
+    );
+}
+
 /// Walks `src/` and yields every `.rs` file's path and contents.
 fn src_files() -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {

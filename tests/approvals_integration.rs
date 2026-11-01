@@ -18,6 +18,13 @@ use tempfile::TempDir;
 use git_paw::broker::messages::BrokerMessage;
 use git_paw::supervisor::manual_approvals::{self, ManualApproval, ManualDecisionRecorder};
 
+/// The prompt-shape profile of a pane running Claude Code.
+fn claude_profile() -> git_paw::config::CompiledPromptProfile {
+    git_paw::agent_cli::CliProfile::resolve("claude", &std::collections::HashMap::new())
+        .compiled_prompt_profile()
+        .expect("the embedded profile compiles")
+}
+
 fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
 }
@@ -318,7 +325,11 @@ fn opt_out_recorder_writes_no_log_file() {
         "repo".to_string(),
         Some("claude".to_string()),
     );
-    let learning = recorder.record_forwarded("feat/a", "Bash command:\nmake foo\n[y/N]");
+    let learning = recorder.record_forwarded(
+        "feat/a",
+        "Bash command:\nmake foo\n[y/N]",
+        &claude_profile(),
+    );
 
     assert!(learning.is_none(), "opt-out must suppress the learning");
     assert!(
@@ -345,9 +356,10 @@ fn first_seen_emits_exactly_one_permission_pattern_learning() {
     );
 
     let captured = "Bash command:\n./scripts/migrate.sh\nrequires approval [y/N]";
-    let first = recorder.record_forwarded("feat/a", captured);
-    let second = recorder.record_forwarded("feat/a", captured);
-    let third = recorder.record_forwarded("feat/a", captured);
+    let profile = claude_profile();
+    let first = recorder.record_forwarded("feat/a", captured, &profile);
+    let second = recorder.record_forwarded("feat/a", captured, &profile);
+    let third = recorder.record_forwarded("feat/a", captured, &profile);
 
     // Exactly one learning across three forwards of the same pattern.
     let learnings: Vec<&BrokerMessage> = [&first, &second, &third]

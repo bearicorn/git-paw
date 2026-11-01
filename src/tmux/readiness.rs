@@ -6,50 +6,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::agent_cli::{CliProfile, DialogMarker};
 use crate::command_runner::CommandRunner;
-use crate::config::{CliPromptProfile, CustomCli, claude_prompt_profile, resolve_prompt_profile};
+use crate::config::{CliPromptProfile, CustomCli};
 use crate::terminal::TerminalBackend;
 
 // ---------------------------------------------------------------------------
 // Launch-readiness gate (design D1, G1)
 // ---------------------------------------------------------------------------
-
-/// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
-/// substring, paired with the case-insensitive substring of its affirmative
-/// option's OWN text.
-///
-/// The affirmative option is selected by matching its text, never a
-/// hardcoded digit or a blind `Enter` — see [`DIALOG_MARKERS`] for why.
-struct DialogMarker {
-    /// Substring identifying this dialog in a pane capture.
-    heading: &'static str,
-    /// Case-insensitive substring of the option line to select.
-    affirmative: &'static str,
-}
-
-/// Recognised first-run acceptance/trust dialogs (GP-03b). A dialog whose
-/// heading matches none of these classifies [`PaneReadiness::Indeterminate`]
-/// or [`PaneReadiness::BareShell`] exactly as before, so an unrecognised
-/// CLI's dialog falls back to the existing readiness / relaunch / fixed-
-/// budget behaviour — never worse than prior launch behaviour.
-///
-/// - Claude Code's bypass-permissions acceptance dialog: shown the first time
-///   `--dangerously-skip-permissions` runs against a config directory that
-///   has never accepted it. Its DEFAULT-highlighted option is `No, exit` —
-///   exactly the boot-exit failure mode GP-03 fixes — so the gate selects
-///   the affirmative option by TEXT, never a hardcoded digit or position.
-/// - Claude Code's "trust this folder?" dialog: shown the first time a CLI
-///   launches against a directory it has not seen before.
-const DIALOG_MARKERS: &[DialogMarker] = &[
-    DialogMarker {
-        heading: "Bypass Permissions mode",
-        affirmative: "yes, i accept",
-    },
-    DialogMarker {
-        heading: "trust the files in this folder",
-        affirmative: "yes, proceed",
-    },
-];
 
 /// Scans `captured` for a numbered option line (`1. …`, `2) …`, optionally
 /// prefixed with common TUI decoration) whose text contains `affirmative`
@@ -171,24 +135,16 @@ fn looks_like_bare_shell(captured: &str) -> bool {
     }
 }
 
-/// Classify a captured pane's content for the readiness gate against the
-/// embedded Claude Code profile ([`claude_prompt_profile`]) — byte-identical
-/// to the behaviour before per-CLI prompt-shape profiles existed.
+/// Classify a captured pane's content for the readiness gate.
 ///
-/// Prefer [`classify_pane_readiness_with_profile`] when the pane's CLI has a
-/// resolved profile available.
+/// `dialogs` are compiled provider data ([`CliProfile::dialog_markers`]),
+/// never read from a profile, so no configuration can make the gate answer
+/// one.
 #[must_use]
-pub fn classify_pane_readiness(captured: &str) -> PaneReadiness {
-    classify_pane_readiness_with_profile(captured, claude_prompt_profile())
-}
-
-/// Classify a captured pane's content for the readiness gate, using
-/// `profile`'s readiness markers (`cli-prompt-profiles` capability) rather
-/// than a compiled constant.
-#[must_use]
-pub fn classify_pane_readiness_with_profile(
+pub fn classify_pane_readiness(
     captured: &str,
     profile: &CliPromptProfile,
+    dialogs: &[DialogMarker],
 ) -> PaneReadiness {
     if profile
         .readiness_markers
@@ -197,7 +153,7 @@ pub fn classify_pane_readiness_with_profile(
     {
         return PaneReadiness::Ready;
     }
-    if let Some(marker) = DIALOG_MARKERS.iter().find(|d| captured.contains(d.heading)) {
+    if let Some(marker) = dialogs.iter().find(|d| captured.contains(d.heading)) {
         return PaneReadiness::Dialog(find_option_digit(captured, marker.affirmative));
     }
     if looks_like_bare_shell(captured) {
@@ -227,6 +183,7 @@ pub fn classify_pane_readiness_with_profile(
 pub(crate) fn gate_pane_generic<C, R, S, A>(
     budget: ReadinessBudget,
     profile: &CliPromptProfile,
+    dialogs: &[DialogMarker],
     mut capture: C,
     mut relaunch: R,
     mut sleep: S,
@@ -243,7 +200,7 @@ where
         let mut answered = false;
         loop {
             let captured = capture().unwrap_or_default();
-            match classify_pane_readiness_with_profile(&captured, profile) {
+            match classify_pane_readiness(&captured, profile, dialogs) {
                 PaneReadiness::Ready => return ReadinessOutcome::Ready,
                 PaneReadiness::Dialog(None) => return ReadinessOutcome::DialogStuck,
                 PaneReadiness::Dialog(Some(digit)) if !answered => {
@@ -265,8 +222,7 @@ where
         }
         // Attempt timed out. Relaunch only when the pane is positively a bare
         // shell AND a relaunch attempt remains; otherwise fall back.
-        let final_state =
-            classify_pane_readiness_with_profile(&capture().unwrap_or_default(), profile);
+        let final_state = classify_pane_readiness(&capture().unwrap_or_default(), profile, dialogs);
         if final_state == PaneReadiness::BareShell && attempt < budget.relaunch_attempts {
             relaunch();
         } else {
@@ -303,13 +259,13 @@ pub(crate) struct PaneCli<'a, S> {
 /// injects anyway — never worse than the prior fixed-sleep launch.
 ///
 /// A recognised first-run acceptance/trust dialog is answered by selecting
-/// its affirmative option (see [`DIALOG_MARKERS`]); see
-/// [`ReadinessOutcome::DialogStuck`] for what the caller must do when it
+/// its affirmative option (see [`crate::agent_cli::DEFAULT_DIALOG_MARKERS`]);
+/// see [`ReadinessOutcome::DialogStuck`] for what the caller must do when it
 /// cannot be resolved.
 ///
-/// The readiness markers used are resolved for `cli_id` — the CLI's
-/// *identity* (the `[clis.<name>]` key or a built-in / pass-through name) —
-/// via [`resolve_prompt_profile`] against `clis` (`cli-prompt-profiles`
+/// The readiness markers and dialogs used are resolved for `cli_id` — the
+/// CLI's *identity* (the `[clis.<name>]` key or a built-in / pass-through
+/// name) — via [`CliProfile::resolve`] against `clis` (`cli-prompt-profiles`
 /// capability): a CLI with a configured `[clis.<name>].prompt_profile`
 /// override is gated on its own readiness markers rather than Claude's.
 ///
@@ -373,10 +329,11 @@ where
     A: FnMut(u8),
     S: std::hash::BuildHasher,
 {
-    let profile = resolve_prompt_profile(cli.cli_id, cli.clis);
+    let resolved = CliProfile::resolve(cli.cli_id, cli.clis);
     gate_pane_generic(
         budget,
-        &profile,
+        &resolved.prompt_profile(),
+        resolved.dialog_markers(),
         capture,
         || relaunch(cli.cli_command),
         sleep,

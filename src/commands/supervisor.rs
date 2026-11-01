@@ -883,6 +883,8 @@ pub fn supervisor(
                 agent_id: crate::broker::messages::slugify_branch(&branches[idx]),
                 entry_point,
                 settle_delay_ms: agent_delay,
+                prompt_profile: crate::agent_cli::CliProfile::resolve(&agent_cli, &config.clis)
+                    .compiled_prompt_profile()?,
             });
         }
     }
@@ -1215,6 +1217,7 @@ pub fn unattended_drive_run(
             agent_id: broker::messages::slugify_branch(&wt.branch),
             worktree_path: wt.worktree_path.clone(),
             branch: wt.branch.clone(),
+            cli: wt.cli.clone(),
         })
         .collect();
 

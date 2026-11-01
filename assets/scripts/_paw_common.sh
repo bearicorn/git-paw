@@ -19,7 +19,7 @@
 #   repo_root                                  git top-level, empty when none
 #   discover_broker_url                        [broker] bind + port
 #   discover_docs_base_url                     top-level docs_base_url
-#   discover_prompt_profile_field <f> <def>    resolved CLI prompt-shape profile field
+#   discover_prompt_profile_field <f> <def> [cli]  resolved CLI prompt-shape profile field
 #   paw_publish <broker-url> <payload>         POST /publish, non-zero on rejection
 #   slugify <branch>                           broker agent_id slug rules
 
@@ -166,12 +166,19 @@ PY
 # alternation (each marker regex-escaped); a pattern field prints its raw
 # regex source.
 #
+# An optional third argument names the CLI to resolve for (a pane's recorded
+# CLI); without it the binary resolves the session CLI, as before.
+#
 # Falls back to `default` when `git paw` is not resolvable on PATH, exits
 # non-zero, or prints nothing (e.g. outside a recognised repo) — a helper
 # script must never block on the binary being present.
 discover_prompt_profile_field() {
-  local field=$1 default=$2 val
-  val=$(git paw __prompt-profile --field "${field}" 2>/dev/null)
+  local field=$1 default=$2 cli=${3:-} val
+  if [[ -n "${cli}" ]]; then
+    val=$(git paw __prompt-profile --cli "${cli}" --field "${field}" 2>/dev/null)
+  else
+    val=$(git paw __prompt-profile --field "${field}" 2>/dev/null)
+  fi
   if [[ -z "${val}" ]]; then
     printf '%s\n' "${default}"
   else

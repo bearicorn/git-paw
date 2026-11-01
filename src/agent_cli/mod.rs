@@ -26,7 +26,7 @@ use std::str::FromStr;
 use crate::config::{ApprovalLevel, CliPromptProfile, claude_prompt_profile};
 use crate::error::PawError;
 
-pub use profile::{CliProfile, LaunchSession, resolve_for_launch};
+pub use profile::{AgentCli, AgentProfiles, CliProfile, LaunchSession, resolve_for_launch};
 
 /// A provider family: which in-tree [`CliProvider`] supplies a CLI's built-in
 /// facts.
@@ -166,7 +166,52 @@ pub trait CliProvider: Sync {
     fn prompt_profile(&self) -> &'static CliPromptProfile {
         claude_prompt_profile()
     }
+
+    /// Dialogs the launch gate answers for this family. Fixed in code, not
+    /// configurable, because answering one grants a permission. A family
+    /// without its own dialogs uses [`DEFAULT_DIALOG_MARKERS`].
+    fn dialog_markers(&self) -> &'static [DialogMarker] {
+        DEFAULT_DIALOG_MARKERS
+    }
 }
+
+/// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
+/// substring, paired with the case-insensitive substring of its affirmative
+/// option's OWN text.
+///
+/// The affirmative option is selected by matching its text, never a
+/// hardcoded digit or a blind `Enter` — see [`DEFAULT_DIALOG_MARKERS`] for
+/// why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialogMarker {
+    /// Substring identifying this dialog in a pane capture.
+    pub heading: &'static str,
+    /// Case-insensitive substring of the option line to select.
+    pub affirmative: &'static str,
+}
+
+/// The embedded default first-run dialogs (Claude Code's). A dialog whose
+/// heading matches none of a provider's markers classifies as not-a-dialog,
+/// so an unrecognised CLI's dialog falls back to the readiness / relaunch /
+/// fixed-budget behaviour.
+///
+/// - Claude Code's bypass-permissions acceptance dialog: shown the first time
+///   `--dangerously-skip-permissions` runs against a config directory that
+///   has never accepted it. Its DEFAULT-highlighted option is `No, exit` —
+///   exactly the boot-exit failure mode GP-03 fixes — so the gate selects
+///   the affirmative option by TEXT, never a hardcoded digit or position.
+/// - Claude Code's "trust this folder?" dialog: shown the first time a CLI
+///   launches against a directory it has not seen before.
+pub const DEFAULT_DIALOG_MARKERS: &[DialogMarker] = &[
+    DialogMarker {
+        heading: "Bypass Permissions mode",
+        affirmative: "yes, i accept",
+    },
+    DialogMarker {
+        heading: "trust the files in this folder",
+        affirmative: "yes, proceed",
+    },
+];
 
 /// Claude Code. Approval rows verified against upstream 2026-07-15 and the
 /// live `--permission-mode` enumeration 2026-09-04; session-id / resume flags

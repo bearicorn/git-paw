@@ -30,10 +30,11 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
-pub(crate) use prompt_profile::merge_prompt_profile;
 pub use prompt_profile::{
-    CliPromptProfile, CliPromptProfileOverride, claude_prompt_profile, resolve_prompt_profile,
+    CliPromptProfile, CliPromptProfileOverride, CompiledPromptProfile, InvalidPattern,
+    claude_prompt_profile, resolve_prompt_profile,
 };
+pub(crate) use prompt_profile::{default_compiled_prompt_profile, merge_prompt_profile};
 pub use specs::SpecsConfig;
 pub use supervisor::{
     ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,
@@ -675,6 +676,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_session_templates(&config, path)?;
             validate_headless_args(&config, path)?;
             validate_cli_families(&config, path)?;
+            validate_prompt_profile_patterns(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -843,6 +845,21 @@ fn validate_cli_families(config: &PawConfig, path: &Path) -> Result<(), PawError
                 path.display(),
                 crate::agent_cli::CliFamily::accepted_names()
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a `[clis.<name>].prompt_profile` pattern field that is not a valid
+/// regular expression, naming `[clis.<name>].prompt_profile.<field>`.
+///
+/// Detectors then never see an invalid pattern, so they cannot panic on one
+/// or skip it.
+fn validate_prompt_profile_patterns(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        if let Some(override_) = &cli.prompt_profile {
+            prompt_profile::validate_override_patterns(name, override_)
+                .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
         }
     }
     Ok(())
