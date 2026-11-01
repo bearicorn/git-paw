@@ -2,7 +2,9 @@
 
 ## Purpose
 Detect available AI coding CLI binaries by scanning PATH for known names and merging with user-defined custom CLIs from configuration, providing a unified, deduplicated, sorted list, and resolve which CLI to use for each spec-driven branch using a multi-level priority chain that considers command-line flags, per-spec overrides, config defaults, and interactive selection, prompting the user at most once. It also covers reliable boot-block submission and CLI-pane launch hardening: injecting the prompt text literally and then sending `Enter` as a separate keystroke after a settle delay resolved per CLI from `[clis.<name>].submit_delay_ms` (with a single CLI-agnostic default and no hardcoded CLI names), clearing the shell input line before the launch command, suppressing known auto-update/confirmation prompts in the launched pane's environment, and verifying the CLI started within a bounded window and retrying the launch once on failure — so a fresh supervisor session boots and all agents self-register unattended.
+
 ## Requirements
+
 ### Requirement: Auto-detect known AI CLIs on PATH
 
 The system SHALL scan PATH for the known CLI binaries: `claude`, `codex`, `agy`, `aider`, `vibe`, `qwen`, `amp`, `opencode`, `cline`, `droid`, `pi`, `junie`, `cursor-agent`, `copilot`, `cn`, `kilo`, and `kimi`.
@@ -402,18 +404,25 @@ Test: `tests/supported_clis_docs_sync.rs::readme_and_book_tables_match_known_cli
 The `[clis.<name>]` table SHALL accept two optional string templates, `session_id_args` (arguments
 that assign a session identifier at launch) and `resume_args` (arguments that resume an existing
 session), each containing the placeholder `{{SESSION_ID}}`. Resolution for a CLI SHALL consult, in
-order: (1) the `[clis.<name>]` override when present; (2) the built-in table; (3) no template. The
-built-in table SHALL contain, at minimum, `claude` → `session_id_args = "--session-id {{SESSION_ID}}"`
-and `resume_args = "--resume {{SESSION_ID}}"`; every CLI without a built-in row and without an override
-SHALL resolve to no template. A template that omits `{{SESSION_ID}}` SHALL be rejected at config load
-with an error naming the key. The built-in rows SHALL be verified against the CLI's upstream
-documentation at implementation time.
+order: (1) the `[clis.<name>]` override when present, keyed by the CLI id; (2) the built-in row of
+the CLI's provider family (per `cli-provider`); (3) no template. The `claude` family's built-in row
+SHALL contain, at minimum, `session_id_args = "--session-id {{SESSION_ID}}"` and
+`resume_args = "--resume {{SESSION_ID}}"`; every family without a built-in row, and every CLI that
+resolves the `generic` family without an override, SHALL resolve to no template. A template that
+omits `{{SESSION_ID}}` SHALL be rejected at config load with an error naming the key. The built-in
+rows SHALL be verified against the CLI's upstream documentation at implementation time.
 
 #### Scenario: Claude resolves the built-in templates
 
 - **WHEN** templates are resolved for `claude` with no config override
 - **THEN** `session_id_args` SHALL render to `--session-id <id>` and `resume_args` to `--resume <id>`
   for the given id
+
+#### Scenario: A declared Claude variant resolves the family's templates
+
+- **GIVEN** `[clis.claude-oss]` with `family = "claude"` and no template overrides
+- **WHEN** templates are resolved for `claude-oss`
+- **THEN** `session_id_args` SHALL render to `--session-id <id>` and `resume_args` to `--resume <id>`
 
 #### Scenario: Override wins over the built-in row
 
@@ -423,7 +432,7 @@ documentation at implementation time.
 
 #### Scenario: Unknown CLI resolves no template
 
-- **WHEN** templates are resolved for `my-agent` with no `[clis.my-agent]` templates
+- **WHEN** templates are resolved for `my-agent` with no `[clis.my-agent]` templates and no `family`
 - **THEN** both `session_id_args` and `resume_args` SHALL resolve to none
 
 #### Scenario: Template without the placeholder is rejected
@@ -578,4 +587,3 @@ The `[clis.<name>]` table SHALL accept an optional string `headless_args` giving
 - **GIVEN** `[clis.my-agent] headless_args = ""`
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error naming `headless_args`
-

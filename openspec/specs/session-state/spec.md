@@ -1,7 +1,9 @@
 ## Purpose
 
 Persist session state to disk for recovery after crashes, reboots, or manual stops. Stores one JSON file per session under the XDG data directory, with atomic writes and tmux liveness checks. It also has `git paw start` write (and `purge` remove) a per-repo session JSON at `.git-paw/sessions/paw-<project>.json` — carrying the session name and each agent's branch_id, worktree path, CLI, and pane index — as the discovery surface the bundled `sweep.sh` helper reads, with a live-tmux fallback when the file is absent; distinguishes stale session receipts from live ones via a single cheap `tmux has-session` probe (`status` reports `🔴 stale`, `start` auto-invalidates stale receipts before launching, and `purge --stale` prunes only stale entries); and guarantees session recovery rebuilds exactly the panes a session defines (`N + 2` in supervisor mode) on a headless canvas sized to tile them without overflow, preserving the persisted session JSON when a `git paw start` errors mid-launch. It also renders a Markdown session summary from `BrokerState` and `PawSession` — metadata, per-agent details (status, modified files, exports, blocked time), merge order, and totals — which the supervisor writes to a timestamped, filesystem-safe file under `.git-paw/sessions/` so multiple runs coexist without overwriting.
+
 ## Requirements
+
 ### Requirement: Save session state atomically
 
 The system SHALL serialize session data to JSON and write it atomically using a temp file and rename to prevent corruption.
@@ -939,11 +941,13 @@ change load with `None` and an entry without an id serializes byte-identically t
 
 ### Requirement: Recovery relaunches a worker with its recorded session id
 
-When `git paw start` recovers a stopped session, the system SHALL relaunch each worktree whose entry
-carries a `cli_session_id` AND whose CLI resolves a resume template with that template's arguments
-appended to the CLI launch command, so the worker's conversation context is restored. A worktree
-whose entry has no id, or whose CLI resolves no resume template, SHALL be relaunched exactly as before
-this change. Recovery SHALL NOT fail because a resume template is absent.
+When `git paw start` recovers a stopped session, the system SHALL relaunch each worktree with the
+pane command built by the single launch-command builder (per `cli-provider`) for the entry's
+recorded CLI: the executable, the CLI's `args`, the approval flags for the configured
+`agent_approval`, and — when the entry carries a `cli_session_id` AND its CLI resolves a resume
+template — that template's arguments, so the worker's conversation context is restored. A worktree
+whose entry has no id, or whose CLI resolves no resume template, SHALL be relaunched without resume
+arguments. Recovery SHALL NOT fail because a resume template is absent.
 
 #### Scenario: Recovered Claude worker is resumed
 
@@ -952,11 +956,20 @@ this change. Recovery SHALL NOT fail because a resume template is absent.
 - **WHEN** the session is recovered
 - **THEN** the pane command for `feat/x` SHALL contain `--resume <uuid>`
 
+#### Scenario: Recovered worker keeps its approval flags
+
+- **GIVEN** a stopped session whose entry for `feat/x` has `cli = "claude"` and
+  `agent_approval = "auto"` in the current config
+- **WHEN** the session is recovered
+- **THEN** the pane command for `feat/x` SHALL contain `--permission-mode acceptEdits`
+
 #### Scenario: Entry without an id launches fresh
 
 - **GIVEN** a stopped session whose worktree entry has `cli_session_id = None`
 - **WHEN** the session is recovered
-- **THEN** the pane command SHALL be identical to the pre-change recovery command for that entry
+- **THEN** the pane command SHALL contain no resume arguments
+- **AND** it SHALL equal the command a fresh launch of that CLI at the same approval level would
+  build, without session-id arguments
 
 #### Scenario: CLI without a resume template launches fresh
 
@@ -1067,4 +1080,3 @@ The `Session` struct SHALL include an optional field `broker_authority: Option<S
 - **GIVEN** a session with a credential
 - **WHEN** the per-repo discovery file is written
 - **THEN** it SHALL NOT contain a `broker_authority` key
-

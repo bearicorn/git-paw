@@ -3,7 +3,9 @@
 ## Purpose
 
 This capability defines the standardized boot-instruction block injected into each agent and the shared machinery that renders it. It covers the block's format and content (exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations, commit-first task completion with a code-less manual-done fallback, and paste-handling guidance), `{{VARIABLE_NAME}}` template substitution with branch-ID slugification and full pre-expansion at render time, and the shared pure `build_boot_block(branch_id, broker_url) -> String` helper in `src/skills.rs` that every launch path uses to assemble the identical block. It also covers every injection path by which the rendered boot block reaches an agent pane: supervisor-mode prepending of the boot block (and, when configured, governance-documents and drive-loop coordination sections) to each pane-bound agent's prompt, manual (non-supervisor) mode pre-fill of the boot block into each pane's input line without sending Enter, and boot-block parity for the bare `git paw start --from-specs` launch path (`--from-all-specs` is the canonical flag and `--from-specs` a deprecated alias retained for backward compatibility, scheduled for removal at v1.0.0).
+
 ## Requirements
+
 ### Requirement: Standard boot block format
 
 The system SHALL provide a standardized boot instruction block that contains exactly four essential runtime events: register, done, blocked, and question. The boot block SHALL use a consistent format with clear section headers and a pre-expanded invocation for each event.
@@ -554,9 +556,9 @@ The bundled boot-block templates SHALL describe the `exports` field of a manual 
 
 ### Requirement: Per-CLI MCP capability override
 
-The system SHALL decide whether a target CLI "speaks MCP" (and so receives the MCP tool form of the boot block rather than the helper-script form) from the CLI identity, consulting in order: (1) an explicit `mcp = true` or `mcp = false` on the matching `[clis.<name>]` entry; (2) the built-in MCP-capable set, which SHALL be exactly `claude`, `codex`, `cursor-agent`, and `agy`; (3) otherwise not MCP-capable, so the helper-script form is used. The lookup SHALL use the leading whitespace-delimited token of the CLI identity (the `[clis.<name>]` key or built-in / pass-through name), never the resolved launch command, so a custom variant whose `command` is a built-in binary does not inherit that binary's MCP form without opting in.
+The system SHALL decide whether a target CLI "speaks MCP" (and so receives the MCP tool form of the boot block rather than the helper-script form) from the CLI identity, consulting in order: (1) an explicit `mcp = true` or `mcp = false` on the matching `[clis.<name>]` entry; (2) when `mcp` is unset, the MCP capability of the CLI's provider family (per `cli-provider`): the `claude`, `codex`, `cursor-agent` and `agy` families are MCP-capable and a known CLI resolves its own family, so with no `[clis]` entries the MCP-capable CLIs SHALL be exactly `claude`, `codex`, `cursor-agent`, and `agy`; (3) otherwise not MCP-capable, so the helper-script form is used. The lookup SHALL use the leading whitespace-delimited token of the CLI identity (the `[clis.<name>]` key or built-in / pass-through name), never the resolved launch command, so a custom variant whose `command` is a built-in binary does not inherit that binary's MCP form without opting in, either with `mcp = true` or by declaring its `family`.
 
-The `mcp` field SHALL be optional: when unset it SHALL NOT be serialized, and a config without it SHALL load and behave exactly as before this requirement. Every launch path that renders a boot block (bare start, spec-driven start, supervisor pane, and `git paw add`) SHALL apply the same resolution.
+The `mcp` field SHALL be optional: when unset it SHALL NOT be serialized, and a config without it SHALL load and behave exactly as before this requirement. Every launch path that renders a boot block (bare start, spec-driven start, and `git paw add`) SHALL apply the same resolution.
 
 #### Scenario: A custom CLI opts in to the MCP form
 
@@ -581,6 +583,18 @@ Test: `skills::tests::cli_speaks_mcp_honours_config_opt_out`
 - **THEN** it SHALL resolve to not MCP-capable
 
 Test: `skills::tests::cli_speaks_mcp_unset_custom_cli_falls_back_to_helper`
+
+#### Scenario: A declared family supplies the default
+
+- **GIVEN** `[clis.claude-oss] command = "claude"` with `family = "claude"` and no `mcp` field
+- **WHEN** MCP capability is resolved for CLI `claude-oss`
+- **THEN** it SHALL resolve MCP-capable
+
+#### Scenario: An explicit `mcp` wins over a declared family
+
+- **GIVEN** `[clis.claude-oss] command = "claude"` with `family = "claude"` and `mcp = false`
+- **WHEN** MCP capability is resolved for CLI `claude-oss`
+- **THEN** it SHALL resolve to not MCP-capable
 
 #### Scenario: Built-in MCP-capable set names Cursor's agent CLI
 
@@ -703,4 +717,3 @@ An agent added while the session is paused SHALL hold its entry point together w
 - **GIVEN** a paused session saved by an earlier binary, with a held prompt and no held entry point
 - **WHEN** `git paw start` restarts it
 - **THEN** the held prompt SHALL be submitted and no entry point typed
-
