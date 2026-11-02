@@ -1016,6 +1016,8 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///         headless_args: None,
 ///         family: None,
 ///         args: None,
+///         sandbox: None,
+///         sandbox_args: None,
 ///     },
 /// );
 /// assert_eq!(

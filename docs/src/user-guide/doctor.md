@@ -85,13 +85,37 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | Group | Checks |
 |---|---|
 | **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. Also whether this OS's FS-scoped sandbox backend (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH` — absent is ⚠ with a pointer to the [sandbox guide](sandbox.md), never ✗, because the sandbox is optional. |
-| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. One row per `[clis.<name>]` entry is ✗ when a launch would refuse it as an [ambiguous PATH shim](../supported-clis.md#migrating-from-path-shims) (a different `<name>` on `PATH` than its `command`), naming both paths. Plus three read-only reports about [per-CLI setup](cli-setup.md): **setup state**, **broad grants** and **grant residue** (below). |
+| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. One row per `[clis.<name>]` entry is ✗ when a launch would refuse it as an [ambiguous PATH shim](../supported-clis.md#migrating-from-path-shims) (a different `<name>` on `PATH` than its `command`), naming both paths. The [sandbox-mode check](#the-sandbox-mode-check) reports each worker CLI's declared sandbox mode. Plus three read-only reports about [per-CLI setup](cli-setup.md): **setup state**, **broad grants** and **grant residue** (below). |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
 | **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. Finally, whether the workflow entry point the launch submits to spec-driven agents is **reachable** from your worktrees (below). |
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker **for this repository**. A git-paw broker serving another repository is ⚠ with the `[broker] port` remedy — it is the clash that would refuse your next `git paw start`. A non-git-paw service on the port is a separate ⚠ with its own remedy. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. When disabled, an informational ✓. |
 | **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session state; registered worktrees whose directory no longer exists. Each is ⚠. A receipt that claims active while its tmux session is **gone** gets the `git paw purge --stale` remedy, as does an orphaned worktree registration. A session whose tmux session is still up but whose agent panes have all dropped back to a bare shell (past a short launch grace period) is a separate finding: it names the session, says its agent panes exited, and its remedy is `git paw start`, which recovers it — `purge --stale` never purges such a session. |
+
+### The sandbox-mode check
+
+One row per CLI a worker of your configuration can resolve to — `default_cli`,
+`default_spec_cli`, each discovered spec's `paw_cli`, and each preset's `cli` —
+naming its declared [`[clis.<name>].sandbox`](sandbox.md#sandboxed-full-auto-workers)
+mode: `native`, `wrapper` or `none`. A declared mode is shown as
+`wrapper (declared)`: git-paw reports what the config says and does not verify
+that the sandbox confines anything.
+
+- ✓ for every CLI while workers run below `full-auto`, declared or not;
+- ⚠ for **every** CLI while `[supervisor] agent_approval` is `"full-auto"`:
+  one that declares no sandbox (nothing confines those prompt-free workers),
+  and one that declares a sandbox, shown as `declared, not verified` — a
+  declaration alone never passes at `full-auto`;
+- ⚠ at any level for a `wrapper` entry whose `command` is itself a known agent
+  CLI binary (by name, or by the file it resolves to on `PATH`), not a wrapper;
+- ✗ for a CLI whose launch at the effective level would be
+  [refused](sandbox.md#sandboxed-full-auto-workers), such as a `native` Codex
+  at `full-auto` — the same refusal `git paw start` would report.
+
+It reads the configuration and `PATH` only and runs no CLI and no sandbox. It
+covers configured CLIs only; a CLI chosen with `--cli` is warned about at
+launch instead.
 
 ### The per-CLI setup checks
 

@@ -38,6 +38,128 @@ fn healthy_environment() -> EnvironmentProbe {
 
 // -- Status model ---------------------------------------------------------
 
+fn worker(cli: &str, declared: Option<&str>) -> WorkerSandboxProbe {
+    WorkerSandboxProbe {
+        cli: cli.into(),
+        declared: declared.map(Into::into),
+        refusal: None,
+        wrapper_agent_binary: None,
+    }
+}
+
+const SBX_MODE: &str = "wrapper";
+
+/// One unsandboxed (`claude`) and one wrapper-declared (`sbx`) worker.
+fn mixed_workers(full_auto: bool) -> SandboxModeProbe {
+    SandboxModeProbe {
+        full_auto,
+        workers: vec![worker("claude", None), worker("sbx", Some(SBX_MODE))],
+    }
+}
+
+fn row_for<'a>(checks: &'a [CheckResult], cli: &str) -> &'a CheckResult {
+    let name = format!("sandbox mode: {cli}");
+    checks
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no {name:?} row in {checks:?}"))
+}
+
+#[test]
+fn at_full_auto_an_undeclared_worker_warns_naming_itself_with_a_remedy() {
+    let checks = check_sandbox_mode(&mixed_workers(true));
+    let row = row_for(&checks, "claude");
+    assert_eq!(row.status, CheckStatus::Warn);
+    assert!(row.detail.contains("claude"), "{row:?}");
+    assert!(
+        row.remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("sandbox guide")),
+        "{row:?}"
+    );
+}
+
+/// Scenario "A declared sandbox at full-auto is not shown as verified".
+#[test]
+fn at_full_auto_a_declared_worker_warns_declared_not_verified() {
+    let checks = check_sandbox_mode(&mixed_workers(true));
+    let row = row_for(&checks, "sbx");
+    assert_eq!(row.status, CheckStatus::Warn);
+    assert!(
+        row.detail
+            .contains(&format!("sbx: {SBX_MODE} (declared, not verified)")),
+        "{row:?}"
+    );
+    assert!(row.remedy.is_some());
+}
+
+#[test]
+fn below_full_auto_workers_pass_and_a_declared_one_keeps_its_label() {
+    let checks = check_sandbox_mode(&mixed_workers(false));
+    assert!(
+        checks.iter().all(|c| c.status == CheckStatus::Ok),
+        "{checks:?}"
+    );
+    assert!(row_for(&checks, "claude").detail.contains("claude: none"));
+    assert!(
+        row_for(&checks, "sbx")
+            .detail
+            .contains(&format!("sbx: {SBX_MODE} (declared)"))
+    );
+}
+
+/// Scenario "A wrapper that is the agent CLI itself warns".
+#[test]
+fn a_wrapper_whose_command_is_an_agent_binary_warns_at_any_level() {
+    for full_auto in [false, true] {
+        let mut sbx = worker("sbx", Some(SBX_MODE));
+        sbx.wrapper_agent_binary = Some("claude".into());
+        let checks = check_sandbox_mode(&SandboxModeProbe {
+            full_auto,
+            workers: vec![sbx],
+        });
+        let row = row_for(&checks, "sbx");
+        assert_eq!(row.status, CheckStatus::Warn, "full_auto = {full_auto}");
+        assert!(row.detail.contains("`claude`"), "{row:?}");
+    }
+}
+
+/// Scenario "Doctor reports a launch the sandbox rule would refuse".
+#[test]
+fn a_launch_that_would_be_refused_fails_with_the_refusal() {
+    let mut codex = worker("codex", Some("native"));
+    codex.refusal = Some("[clis.codex] declares sandbox = \"native\"".into());
+    let checks = check_sandbox_mode(&SandboxModeProbe {
+        full_auto: true,
+        workers: vec![codex],
+    });
+    let row = row_for(&checks, "codex");
+    assert_eq!(row.status, CheckStatus::Fail);
+    assert!(row.detail.contains("would be refused"), "{row:?}");
+    assert!(row.remedy.is_some());
+}
+
+#[test]
+fn with_no_worker_cli_the_check_never_warns() {
+    for full_auto in [false, true] {
+        let checks = check_sandbox_mode(&SandboxModeProbe {
+            full_auto,
+            workers: Vec::new(),
+        });
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Ok, "full_auto = {full_auto}");
+    }
+}
+
+#[test]
+fn the_report_surfaces_an_unsandboxed_full_auto_warning() {
+    let checks = run_checks(&Probes {
+        sandbox_mode: mixed_workers(true),
+        ..Probes::default()
+    });
+    assert_eq!(row_for(&checks, "claude").status, CheckStatus::Warn);
+}
+
 #[test]
 fn every_non_ok_check_carries_a_remedy() {
     // The report contract: a ⚠ or ✗ is only actionable with a remedy line.
@@ -48,6 +170,7 @@ fn every_non_ok_check_carries_a_remedy() {
             backend: "sandbox-exec",
             available: true,
         },
+        sandbox_mode: SandboxModeProbe::default(),
         clis: Vec::new(),
         cli_identities: vec![CliIdentityProbe {
             id: "fast".into(),

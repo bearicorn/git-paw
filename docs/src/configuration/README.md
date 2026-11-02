@@ -74,6 +74,18 @@ args = "--model sonnet"
 # `command` at a wrapper that execs the real CLI under sandbox-exec/bwrap.
 # git-paw launches the configured `command`, so it may be the wrapper's path;
 # the wrapper need not be on PATH. See the FS-Scoped Sandbox guide.
+# Declare it with `sandbox = "wrapper"` so `git paw doctor` reports it:
+# [clis.claude-sandboxed]
+# command = "/home/me/bin/claude-sandboxed"
+# family = "claude"
+# sandbox = "wrapper"
+#
+# Or use a CLI's own sandbox: `sandbox = "native"` passes the provider's
+# native sandbox arguments (Codex: --sandbox workspace-write), or
+# `sandbox_args` when set.
+# [clis.codex]
+# command = "codex"
+# sandbox = "native"
 
 # Named presets for quick launch
 [presets.backend]
@@ -612,6 +624,8 @@ approval_markers = ["proceed? (y/n)"]
 | `headless_args` | no | Arguments that make the CLI run one non-interactive turn reading its prompt from stdin, used for the drive loop's [headless orchestrator hand-off](../user-guide/supervisor.md#headless-hand-off-of-judgment-calls). Consulted **before** the built-in table (`claude` → `-p`, `codex` → `exec`); a CLI resolving neither has no headless form, and the hand-off is unavailable for it. An empty string is rejected at config load, naming the key. The hand-off spawns this entry's `command` directly, not through a shell, so it must name a single program (a path or a name on `PATH`); the headless arguments and approval flags are split on whitespace, so quoted arguments are not supported there. |
 | `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default, applied only to panes running this CLI. Pattern fields must be valid regular expressions: an invalid one fails the config load naming `[clis.<name>].prompt_profile.<field>`. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
 | `mcp` | no | Boolean. Whether this CLI identity speaks MCP, selecting the MCP publish-tool form of the coordination boot block over the `broker.sh` helper form. Unset by default and omitted when the config is written back. |
+| `sandbox` | no | How this CLI's workers are sandboxed: `"native"` (git-paw passes the CLI's own sandbox arguments at launch) or `"wrapper"` (`command` is your FS-sandbox wrapper; nothing is added). Unset means unsandboxed and the launch command is unchanged. Declaring a sandbox never changes the approval level. A `native` CLI is refused at launch when its approval flags — built-in row or `approval_args` override — contain a flag that turns its sandbox off (Codex `--dangerously-bypass-approvals-and-sandbox`, its `full-auto` row) or set the sandbox flag to a different value than `sandbox_args`. A full-auto launch on a CLI with no `sandbox` prints a warning. git-paw does not verify the declaration. Any other value is rejected at config load, listing the accepted values. Omitted when the config is written back. See [Sandboxed full-auto workers](../user-guide/sandbox.md#sandboxed-full-auto-workers). |
+| `sandbox_args` | no | The CLI's native sandbox arguments, consulted **before** the provider family's built-in row (`codex` → `--sandbox workspace-write`; no other family has one). Passed only when `sandbox = "native"`, after `args` and before the approval flags, and left out when the approval flags already contain them verbatim. `sandbox = "native"` with neither this key nor a built-in row is rejected at config load, naming `sandbox` and `sandbox_args`. Appended verbatim, with the same trust as `approval_args`. Omitted when the config is written back. |
 
 `settings_path` used to feed a protected-path set that the auto-approve
 classifier consulted before approving a write. That classifier is retired, so

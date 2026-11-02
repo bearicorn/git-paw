@@ -28,7 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -192,6 +192,30 @@ pub struct SandboxProbe {
     pub backend: &'static str,
     /// Whether that backend resolves on `PATH`.
     pub available: bool,
+}
+
+/// One worker CLI and the sandbox mode its `[clis.<id>]` entry declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSandboxProbe {
+    /// The CLI id a worker resolves to.
+    pub cli: String,
+    /// The declared `[clis.<id>].sandbox` value, or `None` when undeclared.
+    pub declared: Option<String>,
+    /// The refusal a launch at the effective level would report, if any.
+    pub refusal: Option<String>,
+    /// For a `wrapper` declaration whose `command` is itself a known agent
+    /// CLI binary, that binary's name.
+    pub wrapper_agent_binary: Option<String>,
+}
+
+/// Read from config only. No CLI or sandbox is run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxModeProbe {
+    /// Whether the effective worker approval level is `full-auto`.
+    pub full_auto: bool,
+    /// Every CLI a worker of this configuration can resolve to — the
+    /// configured default, spec-driven and preset CLIs — in first-seen order.
+    pub workers: Vec<WorkerSandboxProbe>,
 }
 
 /// One AI CLI that resolved on `PATH`.
@@ -433,6 +457,8 @@ pub struct Probes {
     pub hygiene: HygieneProbe,
     /// FS-scoped sandbox backend availability.
     pub sandbox: SandboxProbe,
+    /// Declared sandbox mode of each worker CLI.
+    pub sandbox_mode: SandboxModeProbe,
     /// Per-CLI setup state (what `git paw setup-cli` has applied).
     pub cli_setup: crate::cli_setup::doctor::SetupProbe,
     /// Durable allow rules already in the project's CLI settings.
@@ -594,6 +620,72 @@ pub fn check_sandbox(probe: &SandboxProbe) -> CheckResult {
             ),
         )
     }
+}
+
+/// Reports declared modes; a declaration is never shown as verified. Fails
+/// only where a launch would be refused.
+#[must_use]
+pub fn check_sandbox_mode(probe: &SandboxModeProbe) -> Vec<CheckResult> {
+    const GUIDE: &str = "see the FS-scoped sandbox guide (Sandboxed full-auto workers)";
+    if probe.workers.is_empty() {
+        return vec![CheckResult::ok(
+            GROUP_CLIS,
+            "sandbox mode",
+            "no default_cli, spec or preset worker CLI configured to report",
+        )];
+    }
+    probe
+        .workers
+        .iter()
+        .map(|worker| {
+            let cli = &worker.cli;
+            let name = format!("sandbox mode: {cli}");
+            if let Some(refusal) = &worker.refusal {
+                return CheckResult::fail(
+                    GROUP_CLIS,
+                    name,
+                    format!("{cli}: a launch would be refused — {refusal}"),
+                    format!("set [clis.{cli}].approval_args to flags that keep the sandbox on — {GUIDE}"),
+                );
+            }
+            match (&worker.declared, &worker.wrapper_agent_binary, probe.full_auto) {
+                (Some(mode), Some(binary), _) => CheckResult::warn(
+                    GROUP_CLIS,
+                    name,
+                    format!(
+                        "{cli}: {mode} (declared, not verified) — but `command` is the agent \
+                         CLI `{binary}` itself, not a sandbox wrapper"
+                    ),
+                    format!("point [clis.{cli}] command at the wrapper script — {GUIDE}"),
+                ),
+                (Some(mode), None, true) => CheckResult::warn(
+                    GROUP_CLIS,
+                    name,
+                    format!(
+                        "{cli}: {mode} (declared, not verified) — workers run at \
+                         agent_approval = \"full-auto\", so nothing but that sandbox confines them"
+                    ),
+                    format!("confirm the sandbox actually confines `{cli}`; git-paw does not check it — {GUIDE}"),
+                ),
+                (Some(mode), None, false) => {
+                    CheckResult::ok(GROUP_CLIS, name, format!("{cli}: {mode} (declared)"))
+                }
+                (None, _, false) => CheckResult::ok(GROUP_CLIS, name, format!("{cli}: none")),
+                (None, _, true) => CheckResult::warn(
+                    GROUP_CLIS,
+                    name,
+                    format!(
+                        "{cli}: none — workers run at agent_approval = \"full-auto\" with no \
+                         declared sandbox"
+                    ),
+                    format!(
+                        "confine `{cli}` and declare it with [clis.{cli}] sandbox = \"wrapper\" \
+                         or \"native\" — {GUIDE}"
+                    ),
+                ),
+            }
+        })
+        .collect()
 }
 
 /// CLI-availability check: the detected roster, or the `NoCLIsFound` launch
@@ -1262,6 +1354,7 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     checks.push(check_sandbox(&probes.sandbox));
     checks.extend(check_clis(&probes.clis));
     checks.extend(check_cli_identities(&probes.cli_identities));
+    checks.extend(check_sandbox_mode(&probes.sandbox_mode));
     checks.extend(crate::cli_setup::doctor::check_cli_setup(&probes.cli_setup));
     checks.extend(crate::cli_setup::doctor::check_broad_grants(
         &probes.broad_grants,
@@ -1494,6 +1587,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
 
     let spec_cli = probe_spec_cli(&config, repo_root);
     let spec_workflow = probe_spec_workflow(&config, repo_root, config_probe.placement, &spec_cli);
+    let sandbox_mode = probe_sandbox_mode(&config, &spec_cli);
 
     Probes {
         environment,
@@ -1511,7 +1605,69 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         supervisor: probe_supervisor(&config, repo_root),
         hygiene: probe_hygiene(repo_root),
         sandbox: probe_sandbox(),
+        sandbox_mode,
     }
+}
+
+/// Collects every CLI a worker can resolve to — `default_cli`,
+/// `default_spec_cli`, each discovered spec's CLI, then each preset's CLI
+/// (presets sorted by name) — with the sandbox mode its entry declares, the
+/// refusal a launch at the effective level would hit, and whether a
+/// `wrapper` is really the agent CLI itself. Reads config and `PATH` only.
+fn probe_sandbox_mode(config: &PawConfig, spec_cli: &SpecCliProbe) -> SandboxModeProbe {
+    let level = config
+        .supervisor
+        .as_ref()
+        .map(|s| s.agent_approval)
+        .unwrap_or_default();
+    let mut presets: Vec<_> = config.presets.iter().collect();
+    presets.sort_by_key(|(name, _)| *name);
+    let candidates = config
+        .default_cli
+        .iter()
+        .chain(&config.default_spec_cli)
+        .chain(&spec_cli.resolved_clis)
+        .chain(presets.into_iter().map(|(_, preset)| &preset.cli));
+    let mut workers: Vec<WorkerSandboxProbe> = Vec::new();
+    for identity in candidates {
+        let Some(id) = identity.split_whitespace().next() else {
+            continue;
+        };
+        if workers.iter().any(|w| w.cli == id) {
+            continue;
+        }
+        let profile = crate::agent_cli::CliProfile::resolve(id, &config.clis);
+        let declared = config.clis.get(id).and_then(|e| e.sandbox.clone());
+        let wrapper_agent_binary = if declared.as_deref() == Some("wrapper") {
+            agent_binary_behind(&profile)
+        } else {
+            None
+        };
+        workers.push(WorkerSandboxProbe {
+            cli: id.to_string(),
+            declared,
+            refusal: profile
+                .ensure_sandbox_kept(&level)
+                .err()
+                .map(|e| e.to_string()),
+            wrapper_agent_binary,
+        });
+    }
+    SandboxModeProbe {
+        full_auto: level == crate::config::ApprovalLevel::FullAuto,
+        workers,
+    }
+}
+
+/// The known agent CLI name a profile's `command` is, by its own file name
+/// or the file it resolves to on `PATH` (after symlinks), or `None`.
+fn agent_binary_behind(profile: &crate::agent_cli::CliProfile) -> Option<String> {
+    let resolved = profile.executable().map(|p| p.canonicalize().unwrap_or(p));
+    [Some(PathBuf::from(profile.command())), resolved]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .find(|name| crate::agent_cli::roster_entry(name).is_some())
 }
 
 /// Probes the current OS's FS-scoped sandbox backend on `PATH`.

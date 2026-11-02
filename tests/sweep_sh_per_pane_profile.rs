@@ -231,6 +231,8 @@ fn mycli_clis() -> HashMap<String, CustomCli> {
             headless_args: None,
             family: None,
             args: None,
+            sandbox: None,
+            sandbox_args: None,
         },
     )])
 }

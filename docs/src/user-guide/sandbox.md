@@ -43,6 +43,97 @@ executable you mean, and start again.
 `git paw doctor` reports whether `sandbox-exec`/`bwrap` is installed, and
 flags an ambiguous `[clis.*]` entry before a launch would refuse it.
 
+## Sandboxed full-auto workers
+
+Tell git-paw how a CLI's workers are confined with `[clis.<name>].sandbox`.
+The declaration is yours: git-paw does **not** read, run or verify the
+sandbox, and `git paw doctor` reports the mode as *declared*, never as
+verified.
+
+**`sandbox = "wrapper"`** — `command` is your FS-sandbox wrapper (the scripts
+below). git-paw adds nothing to the launch command; the declaration only tells
+`doctor` the CLI is meant to be confined.
+
+```toml
+[clis.claude-sandboxed]
+command = "/home/me/bin/claude-sandboxed"
+family = "claude"
+sandbox = "wrapper"
+```
+
+**`sandbox = "native"`** — git-paw passes the CLI's own sandbox arguments at
+launch, after `args` and before the approval flags. They come from
+`[clis.<name>].sandbox_args`, else the provider family's built-in row. Only
+Codex has a built-in row, `--sandbox workspace-write`; for any other CLI set
+`sandbox_args` yourself, or the config fails to load naming `sandbox` and
+`sandbox_args`.
+
+```toml
+[clis.codex]
+command = "codex"
+sandbox = "native"
+# sandbox_args = "--sandbox workspace-write"   # the built-in row; override here
+```
+
+When the approval flags already contain the sandbox arguments verbatim (Codex
+at `auto` passes `--sandbox workspace-write` as its approval row), they are
+not repeated.
+
+**Nothing switches a native sandbox off.** For a CLI declared `native`,
+git-paw inspects the approval flags a launch would pass — the built-in row or
+your `approval_args` override alike — and refuses the launch, naming the CLI,
+the level, the flag and `[clis.<name>].approval_args`, when they:
+
+- contain a flag the CLI family turns its sandbox off with — for Codex,
+  `--dangerously-bypass-approvals-and-sandbox`, which is its built-in
+  `full-auto` row; or
+- set the sandbox's own flag (the first word of the sandbox arguments, such as
+  `--sandbox`) to a different value — for example `sandbox_args = "--sandbox
+  read-only"` at `auto`, where Codex's approval row already passes
+  `--sandbox workspace-write`. Two values would reach the CLI and it would
+  pick one.
+
+No pane runs the refused CLI. To run it prompt-free, give that level flags that
+keep the sandbox on:
+
+```toml
+[clis.codex]
+command = "codex"
+sandbox = "native"
+approval_args = { "full-auto" = "<the CLI's prompt-free flags>" }
+```
+
+The headless orchestrator hand-off follows the same rule: it passes the
+native sandbox arguments, and is unavailable (judgment calls stay on the
+broker) where a launch at the orchestrator's `approval` level would be refused.
+
+A `wrapper` declaration never restricts full-auto: the wrapper confines the CLI
+from outside, whatever its flags are.
+
+**Declaring a sandbox does not change the approval level.** The recipe for a
+prompt-free worker is explicit: declare the sandbox **and** set the level.
+
+```toml
+[supervisor]
+agent_approval = "full-auto"
+
+[clis.claude-sandboxed]
+command = "/home/me/bin/claude-sandboxed"
+family = "claude"
+sandbox = "wrapper"
+```
+
+Every launch (`start`, `add`, recovery) prints a warning when a pane runs at
+`full-auto` on a CLI that declares no sandbox, whichever way the CLI was chosen.
+`git paw doctor` lists each configured worker CLI's declared sandbox mode. At
+`full-auto` it warns (⚠) for every one of them — a CLI with no declaration, and
+one with a declaration, shown as `declared, not verified`, because git-paw
+cannot see whether the sandbox confines anything. It also warns when a
+`wrapper` entry's `command` is the agent CLI binary itself rather than a
+wrapper, and fails (✗) where a launch would be refused. Read
+what a sandboxed full-auto worker can still do in the
+[Security Posture](./security-posture.md#sandboxed-full-auto-workers).
+
 ## macOS (`sandbox-exec`)
 
 A wrapper (the script `command` points at):

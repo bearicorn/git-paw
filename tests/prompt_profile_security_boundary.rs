@@ -68,6 +68,8 @@ fn clis_with_adversarial_profile() -> std::collections::HashMap<String, CustomCl
             headless_args: None,
             family: None,
             args: None,
+            sandbox: None,
+            sandbox_args: None,
         },
     );
     clis

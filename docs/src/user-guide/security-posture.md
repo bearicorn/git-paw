@@ -82,6 +82,62 @@ classifier approving such a write; with nothing approving automatically, those
 prompts reach you like any other. To enforce those boundaries mechanically, use
 deny rules in the agent CLI's own settings, or the sandbox.
 
+## Sandboxed full-auto workers
+
+Because git-paw approves no permission prompt on its own, a worker at `auto`
+still stops on every command its CLI asks about, and under
+`git paw start --unattended` each of those prompts waits on a human. There are
+two ways to run an `--unattended` wave without its prompts waiting on a human:
+the agent CLI's own allow rules, and **sandboxed `full-auto`** — workers at
+`agent_approval = "full-auto"` on a CLI you have declared sandboxed.
+
+Declare how a CLI's workers are confined with `[clis.<name>].sandbox`:
+
+- `sandbox = "wrapper"` — `command` is your FS-sandbox wrapper; git-paw adds
+  nothing to the launch command.
+- `sandbox = "native"` — git-paw passes the CLI's own sandbox arguments (Codex:
+  `--sandbox workspace-write`, or your `sandbox_args`). A `native` sandbox is
+  **refused rather than disabled**: a launch whose approval flags — built-in
+  or your `approval_args` override — would turn that sandbox off (Codex's
+  `--dangerously-bypass-approvals-and-sandbox`) or set it to a conflicting
+  value fails, naming `[clis.<name>].approval_args`, and no pane runs the CLI.
+  The headless orchestrator hand-off follows the same rule.
+
+`sandbox_args`, like `command`, `args` and `approval_args`, is shell text in a
+pane: it is appended verbatim to the launch command the pane's shell runs, so
+anyone who can edit the config can run anything through it.
+
+**Declaring a sandbox does not change any approval level.** It never raises a
+worker to `full-auto`; you set `agent_approval = "full-auto"` yourself. See
+[Sandboxed full-auto workers](./sandbox.md#sandboxed-full-auto-workers) for the
+configuration.
+
+**Residual risk.** With no permission prompt, **no command that worker runs is
+put to a human**: nothing is escalated, so only the agent CLI's own deny rules
+and the sandbox stand between it and your machine. The FS-scoped sandbox
+confines writes outside the worktree (and, with the documented profile, to
+`.git/hooks` and `.git/config`); it does **not** restrict:
+
+- **network egress** — the worker can reach any host your user can;
+- **secret reads** — without [read-hardening](./sandbox.md#confidentiality-hardening)
+  it can read your SSH keys, cloud credentials and other repositories;
+- **shared-repository ref updates** — the shared `.git` stays writable so the
+  worker can commit, so it can also rewrite or delete any branch ref in it,
+  another agent's included;
+- **credentialed pushes** — a push made with your credentials (an SSH agent, a
+  credential helper, a token in the environment) goes out as you.
+
+The mitigations are read-hardening and leaving pushes to you or the
+unsandboxed orchestrator, outside the sandbox.
+
+**A declared sandbox is your assertion, not git-paw's finding.** git-paw does
+not verify a declared sandbox: it never reads or runs the wrapper, and it does
+not check what a CLI's native sandbox allows. A launch warns when a pane runs
+at `full-auto` on a CLI that declares no sandbox. `git paw doctor` reports the
+mode as *declared*, and at `full-auto` it warns for every worker CLI —
+`declared, not verified` where a sandbox is declared — so a declaration alone
+never passes.
+
 ## Writing into an agent CLI's settings
 
 git-paw writes a permission rule into an agent CLI's own settings in exactly

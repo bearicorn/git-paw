@@ -269,11 +269,12 @@ pub fn start(
         .agent_approval;
 
     // Resolve every CLI record before any worktree exists, so an ambiguous
-    // PATH shim refuses the launch with nothing created.
+    // PATH shim or a disabled native sandbox refuses the launch with nothing
+    // created.
     let profiles = selection
         .mappings
         .iter()
-        .map(|(_, cli)| resolve_for_launch(cli, &config.clis))
+        .map(|(_, cli)| resolve_for_launch(cli, &config.clis, approval))
         .collect::<Result<Vec<_>, _>>()?;
 
     for ((branch, cli), profile) in selection.mappings.iter().zip(&profiles) {
@@ -772,7 +773,7 @@ fn launch_spec_session(
 
     let profiles = mappings
         .iter()
-        .map(|(_, cli)| resolve_for_launch(cli, &config.clis))
+        .map(|(_, cli)| resolve_for_launch(cli, &config.clis, approval))
         .collect::<Result<Vec<_>, _>>()?;
 
     for ((branch, cli), profile) in mappings.iter().zip(&profiles) {
@@ -1326,7 +1327,7 @@ fn submit_held_boot_prompts(
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
-        let resolved = resolve_for_launch(&wt.cli, &config.clis)
+        let resolved = resolve_for_launch(&wt.cli, &config.clis, &approval)
             .and_then(|profile| Ok((profile.compiled_prompt_profile()?, profile)));
         let (prompt_profile, profile) = match resolved {
             Ok(resolved) => resolved,

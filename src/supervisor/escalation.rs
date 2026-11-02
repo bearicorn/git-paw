@@ -188,8 +188,8 @@ pub struct HeadlessInvocation {
     pub cli: String,
     /// The program to run: `[clis.<name>].command`, else the CLI name.
     pub program: String,
-    /// The entry's `args`, split on whitespace: no shell runs here, so
-    /// quoting is not supported.
+    /// The entry's `args`, then its native sandbox arguments, split on
+    /// whitespace: no shell runs here, so quoting is not supported.
     pub launch_args: Vec<String>,
     /// The approval flags resolved for the orchestrator's approval level.
     pub approval_flags: Vec<String>,
@@ -274,6 +274,9 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
         ));
     };
     let level = supervisor.orchestrator_approval();
+    if let Err(e) = profile.ensure_sandbox_kept(&level) {
+        return unavailable(e.to_string());
+    }
     let flags = profile.approval_flags(&level);
     let warning = (level == crate::config::ApprovalLevel::FullAuto && flags.trim().is_empty())
         .then(|| {
@@ -287,12 +290,14 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
         invocation: Ok(HeadlessInvocation {
             cli: cli.to_string(),
             program: profile.command().to_string(),
-            launch_args: profile
-                .args()
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect(),
+            launch_args: [
+                profile.args().unwrap_or_default().to_string(),
+                profile.launch_sandbox_args(&level).unwrap_or_default(),
+            ]
+            .iter()
+            .flat_map(|part| part.split_whitespace())
+            .map(str::to_string)
+            .collect(),
             approval_flags: flags.split_whitespace().map(str::to_string).collect(),
             headless_args: headless.split_whitespace().map(str::to_string).collect(),
         }),
@@ -1129,6 +1134,31 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "-p"
             ]
+        );
+    }
+
+    /// Scenario "The headless hand-off keeps a native sandbox on".
+    #[test]
+    fn the_headless_hand_off_passes_native_sandbox_arguments() {
+        let r = resolve(&config(
+            "[supervisor]\ncli = \"codex\"\napproval = \"manual\"\n\
+             [clis.codex]\ncommand = \"codex\"\nsandbox = \"native\"\n",
+        ));
+        assert_eq!(argv(&r), ["codex", "--sandbox", "workspace-write", "exec"]);
+    }
+
+    /// Scenario "The headless hand-off refuses a disabled native sandbox".
+    #[test]
+    fn the_headless_hand_off_is_unavailable_when_it_would_disable_a_native_sandbox() {
+        let r = resolve(&config(
+            "[supervisor]\ncli = \"codex\"\napproval = \"full-auto\"\n\
+             [clis.codex]\ncommand = \"codex\"\nsandbox = \"native\"\n",
+        ));
+        assert!(r.invocation.is_err());
+        assert!(
+            r.notice().contains("[clis.codex].approval_args"),
+            "{}",
+            r.notice()
         );
     }
 

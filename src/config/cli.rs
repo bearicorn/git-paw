@@ -129,6 +129,15 @@ pub struct CustomCli {
     /// [`Self::approval_args`], not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    /// Sandbox mode: `native` or `wrapper`. Unset means no sandbox. git-paw
+    /// does not verify it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    /// The CLI's native sandbox arguments, overriding its provider family's
+    /// built-in row; passed only when `sandbox = "native"`, after
+    /// [`Self::args`] and before the approval flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_args: Option<String>,
 }
 
 /// Resolves the headless (one-shot, stdin-reading) arguments for `cli`,
@@ -210,6 +219,8 @@ pub fn add_custom_cli_to(
             headless_args: None,
             family: None,
             args: None,
+            sandbox: None,
+            sandbox_args: None,
         },
     );
 

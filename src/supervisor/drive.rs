@@ -3854,6 +3854,8 @@ mod tests {
                         headless_args: None,
                         family: None,
                         args: None,
+                        sandbox: None,
+                        sandbox_args: None,
                     },
                 )
             })
@@ -8063,6 +8065,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         let merge_check = FakeMergeCheck::default();
@@ -10483,6 +10487,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         )])
     }

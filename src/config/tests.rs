@@ -530,6 +530,8 @@ fn config_survives_save_and_load() {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         )]),
         presets: HashMap::from([(
@@ -641,6 +643,8 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         headless_args: None,
         family: None,
         args: None,
+        sandbox: None,
+        sandbox_args: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -1985,6 +1989,8 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
         headless_args: None,
         family: None,
         args: None,
+        sandbox: None,
+        sandbox_args: None,
     }
 }
 
@@ -2060,6 +2066,8 @@ fn cli_with_session_templates(
         headless_args: None,
         family: None,
         args: None,
+        sandbox: None,
+        sandbox_args: None,
     }
 }
 
@@ -3774,6 +3782,8 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             headless_args: None,
             family: None,
             args: None,
+            sandbox: None,
+            sandbox_args: None,
         },
     );
     clis
@@ -3846,6 +3856,8 @@ fn clis_with_command(name: &str, command: &str) -> HashMap<String, CustomCli> {
             headless_args: None,
             family: None,
             args: None,
+            sandbox: None,
+            sandbox_args: None,
         },
     );
     clis
@@ -4052,6 +4064,73 @@ fn a_known_cli_family_loads() {
     let entry = &config.clis["claude-oss"];
     assert_eq!(entry.family.as_deref(), Some("claude"));
     assert_eq!(entry.args.as_deref(), Some("--model opus"));
+}
+
+// ---------------------------------------------------------------------------
+// worker-sandbox-mode: [clis.<name>].sandbox + sandbox_args
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cli_without_sandbox_keys_serializes_without_them() {
+    let cli: CustomCli = toml::from_str("command = \"claude\"\n").unwrap();
+    let text = toml::to_string(&cli).unwrap();
+    assert!(!text.contains("sandbox"), "{text}");
+    assert_eq!(toml::from_str::<CustomCli>(&text).unwrap(), cli);
+}
+
+#[test]
+fn sandbox_keys_round_trip() {
+    let cli: CustomCli =
+        toml::from_str("command = \"foo\"\nsandbox = \"native\"\nsandbox_args = \"--confine .\"\n")
+            .unwrap();
+    let back: CustomCli = toml::from_str(&toml::to_string(&cli).unwrap()).unwrap();
+    assert_eq!(back.sandbox.as_deref(), Some("native"));
+    assert_eq!(back.sandbox_args.as_deref(), Some("--confine ."));
+}
+
+/// Scenario "An unknown sandbox value is rejected".
+#[test]
+fn an_unknown_sandbox_value_is_rejected_naming_the_key_and_accepted_values() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.sbx]\ncommand = \"sbx\"\nsandbox = \"docker\"\n",
+    );
+    let err = load_config_file(&path).unwrap_err().to_string();
+    for needle in ["sandbox", "native", "wrapper"] {
+        assert!(err.contains(needle), "should name {needle}: {err}");
+    }
+}
+
+/// Scenario "Native without arguments fails the load".
+#[test]
+fn a_native_sandbox_with_no_arguments_fails_the_load() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.foo]\ncommand = \"foo\"\nsandbox = \"native\"\n",
+    );
+    let err = load_config_file(&path).unwrap_err().to_string();
+    assert!(
+        err.contains("sandbox") && err.contains("sandbox_args"),
+        "{err}"
+    );
+}
+
+#[test]
+fn native_and_wrapper_sandboxes_with_resolvable_arguments_load() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.codex]\ncommand = \"codex\"\nsandbox = \"native\"\n\n\
+         [clis.foo]\ncommand = \"foo\"\nsandbox = \"native\"\nsandbox_args = \"--confine .\"\n\n\
+         [clis.sbx]\ncommand = \"/bin/sbx\"\nsandbox = \"wrapper\"\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert_eq!(config.clis["sbx"].sandbox.as_deref(), Some("wrapper"));
 }
 
 // ---------------------------------------------------------------------------

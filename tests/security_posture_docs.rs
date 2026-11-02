@@ -310,6 +310,74 @@ fn posture_chapter_documents_hook_bypass_and_tmux_driving() {
     );
 }
 
+/// Lowercased, with whitespace collapsed, so phrase checks match across line
+/// breaks.
+fn sandboxed_full_auto_section() -> String {
+    let posture = read("docs/src/user-guide/security-posture.md");
+    let start = posture
+        .find("## Sandboxed full-auto workers")
+        .expect("security-posture.md needs a `## Sandboxed full-auto workers` section");
+    let rest = &posture[start..];
+    let end = rest[3..].find("\n## ").map_or(rest.len(), |i| i + 3);
+    rest[..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+// core-security-posture scenario "The sandboxed full-auto section is present".
+#[test]
+fn posture_documents_sandboxed_full_auto_workers() {
+    let section = sandboxed_full_auto_section();
+    let missing = contains_all(
+        &section,
+        &[
+            "sandbox = \"native\"",
+            "sandbox = \"wrapper\"",
+            "agent_approval = \"full-auto\"",
+            "does not change any approval level",
+            "refused rather than disabled",
+            "--unattended",
+            "without its prompts waiting on a human",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "sandboxed full-auto section is missing: {missing:?}"
+    );
+}
+
+// core-security-posture scenario "Residual risks are stated".
+#[test]
+fn posture_states_sandboxed_full_auto_residual_risks() {
+    let section = sandboxed_full_auto_section();
+    let missing = contains_all(
+        &section,
+        &[
+            "no command that worker runs is put to a human",
+            "network egress",
+            "secret reads",
+            "shared-repository ref updates",
+            "credentialed pushes",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "sandboxed full-auto residual risks are missing: {missing:?}"
+    );
+}
+
+// core-security-posture scenario "Declarations are not presented as verified".
+#[test]
+fn posture_states_declared_sandboxes_are_not_verified() {
+    let section = sandboxed_full_auto_section();
+    assert!(
+        section.contains("does not verify a declared sandbox"),
+        "the section must state that git-paw does not verify a declared sandbox"
+    );
+}
+
 // The chapters must be wired into the mdBook table of contents, or mdbook build
 // silently omits them.
 #[test]
