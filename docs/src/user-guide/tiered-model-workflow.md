@@ -131,6 +131,33 @@ max_cycles = 5            # give up on a branch after this many verify-fix round
 on_exhausted = "escalate" # escalate | abandon
 ```
 
+### Sandboxed full-auto cheap workers
+
+`--unattended` escalates every permission prompt to you, so a wave of cheap
+workers at `auto` still waits on you for each command their CLI asks about.
+To keep that wave moving, confine the workers and run them at `full-auto`:
+declare the sandbox on the worker profile and set the level explicitly —
+declaring a sandbox never raises the level on its own.
+
+```toml
+[supervisor]
+agent_approval = "full-auto"
+
+[clis.sonnet]
+command = "/home/me/bin/claude-sandboxed"   # your FS-sandbox wrapper
+family = "claude"
+args = "--model sonnet"
+sandbox = "wrapper"
+```
+
+`git paw doctor` warns before the run if a worker CLI at `full-auto` declares
+no sandbox. A sandboxed full-auto worker puts no command to you at all, and the
+FS sandbox does not confine network, secret reads, branch refs in the shared
+repository or pushes made with your credentials — read
+[Sandboxed full-auto workers](security-posture.md#sandboxed-full-auto-workers)
+before you rely on it, and see the [sandbox guide](sandbox.md#sandboxed-full-auto-workers)
+for the `native` form.
+
 From here the orchestrator answers questions, sequences merges, and re-engages
 failing workers on its own; see [the correction loop](supervisor.md#unattended-correction-loop)
 and [the pump-to-brain hand-off](supervisor.md#the-loop-is-a-pump-the-supervisor-is-the-brain)

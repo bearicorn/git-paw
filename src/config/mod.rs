@@ -677,6 +677,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_headless_args(&config, path)?;
             validate_cli_families(&config, path)?;
             validate_prompt_profile_patterns(&config, path)?;
+            validate_cli_sandboxes(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -860,6 +861,40 @@ fn validate_prompt_profile_patterns(config: &PawConfig, path: &Path) -> Result<(
         if let Some(override_) = &cli.prompt_profile {
             prompt_profile::validate_override_patterns(name, override_)
                 .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a `[clis.<name>].sandbox` that is not `native` or `wrapper`, and a
+/// `native` declaration for which no sandbox arguments resolve.
+///
+/// A `native` CLI with nothing to pass would launch unsandboxed while its
+/// config claims otherwise, so it fails the load, naming both keys.
+fn validate_cli_sandboxes(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    use crate::agent_cli::{CliProfile, SandboxMode};
+    for (name, cli) in &config.clis {
+        let Some(value) = cli.sandbox.as_deref() else {
+            continue;
+        };
+        let Ok(mode) = value.parse::<SandboxMode>() else {
+            return Err(PawError::ConfigError(format!(
+                "{}: [clis.{name}] sandbox has unknown value '{value}' (expected one of: {})",
+                path.display(),
+                SandboxMode::accepted_names()
+            )));
+        };
+        if mode == SandboxMode::Native
+            && CliProfile::resolve(name, &config.clis)
+                .native_sandbox_args()
+                .is_none()
+        {
+            return Err(PawError::ConfigError(format!(
+                "{}: [clis.{name}] sandbox = \"native\" but no native sandbox arguments \
+                 resolve for this CLI; set [clis.{name}] sandbox_args, or declare \
+                 sandbox = \"wrapper\" if `command` is a sandbox wrapper",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -1279,6 +1314,10 @@ worktree_placement = "child"
 # Arguments that run one non-interactive turn reading the prompt from stdin,
 # for the headless orchestrator hand-off (built in: claude "-p", codex "exec").
 # headless_args = "--batch"
+#
+# Sandbox mode: "wrapper" or "native". Unset means no sandbox.
+# sandbox = "wrapper"
+# sandbox_args = "--sandbox workspace-write"
 
 # Named presets for quick launches.
 # [presets.my-preset]

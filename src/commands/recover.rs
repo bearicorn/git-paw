@@ -36,7 +36,7 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
         .cli_session_id
         .as_deref()
         .map_or(LaunchSession::None, LaunchSession::Resume);
-    Ok(resolve_for_launch(&entry.cli, clis)?.launch_command(&approval, session))
+    Ok(resolve_for_launch(&entry.cli, clis, &approval)?.launch_command(&approval, session))
 }
 
 /// Options for [`recover`].
@@ -467,6 +467,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         assert_eq!(

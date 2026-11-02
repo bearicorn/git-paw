@@ -121,6 +121,57 @@ impl FromStr for CliFamily {
     }
 }
 
+/// How a CLI's workers are sandboxed, as declared by `[clis.<name>].sandbox`.
+///
+/// A declaration is the user's assertion; git-paw never verifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// git-paw passes the CLI's own sandbox arguments at launch.
+    Native,
+    /// `command` is the user's FS-sandbox wrapper; nothing is added.
+    Wrapper,
+}
+
+impl SandboxMode {
+    /// Every mode, in declaration order.
+    pub const ALL: [Self; 2] = [Self::Native, Self::Wrapper];
+
+    /// The mode's config value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Wrapper => "wrapper",
+        }
+    }
+
+    /// The accepted config values, comma-separated, for error messages.
+    #[must_use]
+    pub fn accepted_names() -> String {
+        Self::ALL
+            .iter()
+            .map(|m| format!("\"{}\"", m.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl FromStr for SandboxMode {
+    type Err = PawError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == s)
+            .ok_or_else(|| {
+                PawError::ConfigError(format!(
+                    "unknown sandbox mode '{s}' (expected one of: {})",
+                    Self::accepted_names()
+                ))
+            })
+    }
+}
+
 /// The built-in facts of one provider family.
 ///
 /// Every method but [`CliProvider::name`] has a default that is the Null
@@ -136,6 +187,17 @@ pub trait CliProvider: Sync {
     /// Native permission flags for `level`, or `""` when the family has none.
     fn approval_flags(&self, _level: ApprovalLevel) -> &'static str {
         ""
+    }
+
+    /// The arguments that turn on the CLI's own sandbox, or `None` when the
+    /// family has none encoded.
+    fn native_sandbox_args(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Flags that turn the CLI's own sandbox off, wherever they come from.
+    fn sandbox_disabling_flags(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Template assigning a fresh session id at launch (contains
@@ -257,6 +319,12 @@ impl CliProvider for CodexProvider {
             ApprovalLevel::Auto => "--sandbox workspace-write",
             ApprovalLevel::Manual => "",
         }
+    }
+    fn native_sandbox_args(&self) -> Option<&'static str> {
+        Some("--sandbox workspace-write")
+    }
+    fn sandbox_disabling_flags(&self) -> &'static [&'static str] {
+        &["--dangerously-bypass-approvals-and-sandbox"]
     }
     fn headless_args(&self) -> Option<&'static str> {
         Some("exec")

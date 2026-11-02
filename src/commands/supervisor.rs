@@ -617,10 +617,14 @@ pub fn supervisor(
     // row, broker or not, so the grid always has one.
     crate::surface::supervisor_layout(branches.len(), true)?;
 
-    // Resolve every branch's CLI first, so an ambiguous PATH shim refuses the
-    // launch before any worktree exists.
+    // Resolve every branch's CLI first, so an ambiguous PATH shim or a
+    // disabled native sandbox refuses the launch before any worktree exists.
     for branch in &branches {
-        crate::agent_cli::resolve_for_launch(&effective_agent_cli(branch), &config.clis)?;
+        crate::agent_cli::resolve_for_launch(
+            &effective_agent_cli(branch),
+            &config.clis,
+            agent_approval,
+        )?;
     }
     git::prune_worktrees(repo_root)?;
 

@@ -5197,6 +5197,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         clis

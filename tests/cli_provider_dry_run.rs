@@ -91,3 +91,69 @@ fn an_ambiguous_shim_fails_the_dry_run_and_doctor() {
         "{row}"
     );
 }
+
+/// Scenario "An unsandboxed full-auto launch warns": the CLI comes from
+/// `--cli`, not the config, so only the launch itself can warn.
+#[test]
+fn a_full_auto_launch_with_no_declared_sandbox_warns() {
+    let tr = setup_test_repo();
+    write_config(
+        tr.path(),
+        "[supervisor]\nagent_approval = \"full-auto\"\n\n[clis.codex]\ncommand = \"echo\"\n",
+    );
+    let out = dry_run(tr.path(), "codex");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a warning does not refuse:\n{stderr}");
+    assert!(
+        stderr.contains("`codex` runs at full-auto with no declared sandbox"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("no declared sandbox").count(),
+        1,
+        "warned once per CLI:\n{stderr}"
+    );
+}
+
+/// Scenario "Codex full-auto under a native sandbox is refused": both the dry
+/// run and the real launch fail before any worktree (and so any pane) exists.
+#[test]
+fn a_native_sandbox_disabled_by_full_auto_refuses_the_launch_with_nothing_created() {
+    let tr = setup_test_repo();
+    write_config(
+        tr.path(),
+        "[supervisor]\nagent_approval = \"full-auto\"\n\n\
+         [clis.codex]\ncommand = \"echo\"\nsandbox = \"native\"\n",
+    );
+
+    let out = dry_run(tr.path(), "codex");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the dry run must refuse");
+    for needle in ["codex", "full-auto", "[clis.codex].approval_args"] {
+        assert!(stderr.contains(needle), "should name {needle}: {stderr}");
+    }
+
+    let home = tempfile::TempDir::new().expect("home tempdir");
+    let out = cmd()
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["start", "--cli", "codex", "--branches", "feat-a"])
+        .output()
+        .expect("run start");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the launch must refuse");
+    assert!(stderr.contains("[clis.codex].approval_args"), "{stderr}");
+
+    let worktrees = std::process::Command::new("git")
+        .current_dir(tr.path())
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git worktree list");
+    let listed = String::from_utf8_lossy(&worktrees.stdout);
+    assert_eq!(
+        listed.matches("worktree ").count(),
+        1,
+        "no worktree, so no pane, may be created:\n{listed}"
+    );
+}

@@ -29,6 +29,8 @@ fn entry(command: &str) -> CustomCli {
         headless_args: None,
         family: None,
         args: None,
+        sandbox: None,
+        sandbox_args: None,
     }
 }
 
@@ -511,6 +513,217 @@ fn recovery_carries_approval_flags_then_resume_args() {
     let flags = cmd.find("--permission-mode acceptEdits").expect("flags");
     let resume = cmd.find("--resume abc").expect("resume");
     assert!(flags < resume, "{cmd}");
+}
+
+// --- Sandbox declarations (worker-sandbox-mode) ---
+
+fn sandboxed(command: &str, family: Option<&str>, mode: &str) -> CustomCli {
+    let mut cli = entry(command);
+    cli.family = family.map(str::to_string);
+    cli.sandbox = Some(mode.to_string());
+    cli
+}
+
+#[test]
+fn only_codex_has_a_native_sandbox_and_sandbox_disabling_flags() {
+    for family in CliFamily::ALL {
+        let provider = family.provider();
+        let is_codex = family == CliFamily::Codex;
+        assert_eq!(
+            provider.native_sandbox_args(),
+            is_codex.then_some("--sandbox workspace-write"),
+            "{family}"
+        );
+        let expected: &[&str] = if is_codex {
+            &["--dangerously-bypass-approvals-and-sandbox"]
+        } else {
+            &[]
+        };
+        assert_eq!(provider.sandbox_disabling_flags(), expected, "{family}");
+    }
+}
+
+/// Scenario "An override cannot re-add a sandbox-disabling flag".
+#[test]
+fn an_approval_args_override_carrying_a_disabling_flag_is_refused() {
+    let mut codex = sandboxed("codex", None, "native");
+    codex.approval_args = HashMap::from([(
+        "auto".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+    )]);
+    let map = clis(&[("codex", codex)]);
+    let msg = resolve_for_launch("codex", &map, &ApprovalLevel::Auto)
+        .expect_err("a disabling flag is refused whatever its source")
+        .to_string();
+    for needle in [
+        "codex",
+        "auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "[clis.codex].approval_args",
+    ] {
+        assert!(msg.contains(needle), "should name {needle}: {msg}");
+    }
+}
+
+/// Scenario "Conflicting sandbox settings are refused".
+#[test]
+fn sandbox_args_conflicting_with_the_approval_flags_are_refused() {
+    let mut codex = sandboxed("codex", None, "native");
+    codex.sandbox_args = Some("--sandbox read-only".to_string());
+    let map = clis(&[("codex", codex)]);
+    let msg = resolve_for_launch("codex", &map, &ApprovalLevel::Auto)
+        .expect_err("two --sandbox values must not both reach the CLI")
+        .to_string();
+    assert!(
+        msg.contains("--sandbox") && msg.contains("sandbox_args"),
+        "{msg}"
+    );
+    let manual = resolve_for_launch("codex", &map, &ApprovalLevel::Manual)
+        .expect("no approval flag sets the sandbox at manual");
+    assert_eq!(
+        manual.launch_command(&ApprovalLevel::Manual, LaunchSession::None),
+        "codex --sandbox read-only"
+    );
+}
+
+/// Scenario "An unsandboxed full-auto launch warns".
+#[test]
+fn only_an_undeclared_cli_at_full_auto_gets_the_launch_warning() {
+    let declared = clis(&[("sbx", sandboxed("/bin/sbx", Some("claude"), "wrapper"))]);
+    let none = HashMap::new();
+    let warning = CliProfile::resolve("claude", &none)
+        .unsandboxed_full_auto_warning(&ApprovalLevel::FullAuto)
+        .expect("undeclared full-auto warns");
+    assert!(
+        warning.contains("claude") && warning.contains("sandbox"),
+        "{warning}"
+    );
+    assert_eq!(
+        CliProfile::resolve("claude", &none).unsandboxed_full_auto_warning(&ApprovalLevel::Auto),
+        None
+    );
+    assert_eq!(
+        CliProfile::resolve("sbx", &declared)
+            .unsandboxed_full_auto_warning(&ApprovalLevel::FullAuto),
+        None
+    );
+}
+
+/// Scenarios "An undeclared CLI launches unchanged", "Codex receives its native
+/// sandbox", "The sandbox argument is not duplicated", "An override supplies
+/// the arguments".
+#[test]
+fn native_sandbox_arguments_sit_after_args_and_before_approval_flags() {
+    let mut codex = sandboxed("codex", None, "native");
+    codex.args = Some("--model o4".to_string());
+    let mut foo = sandboxed("foo", None, "native");
+    foo.sandbox_args = Some("--confine .".to_string());
+    let map = clis(&[("codex", codex), ("foo", foo)]);
+    let none = HashMap::new();
+    let cases: &[(&str, &HashMap<String, CustomCli>, ApprovalLevel, &str)] = &[
+        (
+            "codex",
+            &map,
+            ApprovalLevel::Manual,
+            "codex --model o4 --sandbox workspace-write",
+        ),
+        (
+            "codex",
+            &map,
+            ApprovalLevel::Auto,
+            "codex --model o4 --sandbox workspace-write",
+        ),
+        ("foo", &map, ApprovalLevel::FullAuto, "foo --confine ."),
+        (
+            "codex",
+            &none,
+            ApprovalLevel::FullAuto,
+            "codex --dangerously-bypass-approvals-and-sandbox",
+        ),
+        ("codex", &none, ApprovalLevel::Manual, "codex"),
+    ];
+    for (id, map, level, expected) in cases {
+        let cmd = CliProfile::resolve(id, map).launch_command(level, LaunchSession::None);
+        assert_eq!(cmd, *expected, "({id}, {level:?})");
+        assert!(
+            cmd.matches("--sandbox workspace-write").count() <= 1,
+            "{cmd}"
+        );
+    }
+}
+
+/// Scenario "Codex full-auto under a native sandbox is refused".
+#[test]
+fn codex_full_auto_under_a_native_sandbox_is_refused() {
+    let map = clis(&[("codex", sandboxed("codex", None, "native"))]);
+    let err = resolve_for_launch("codex", &map, &ApprovalLevel::FullAuto)
+        .expect_err("a sandbox-disabling row must be refused");
+    let msg = err.to_string();
+    for needle in [
+        "codex",
+        "full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "[clis.codex].approval_args",
+    ] {
+        assert!(msg.contains(needle), "should name {needle}: {msg}");
+    }
+    for level in [ApprovalLevel::Manual, ApprovalLevel::Auto] {
+        resolve_for_launch("codex", &map, &level).expect("lower levels launch");
+    }
+}
+
+/// Scenario "An explicit override is honoured".
+#[test]
+fn an_approval_args_override_is_used_as_given_under_a_native_sandbox() {
+    let mut codex = sandboxed("codex", None, "native");
+    codex.approval_args =
+        HashMap::from([("full-auto".to_string(), "--example-no-prompts".to_string())]);
+    let map = clis(&[("codex", codex)]);
+    let profile = resolve_for_launch("codex", &map, &ApprovalLevel::FullAuto)
+        .expect("an explicit override is the user's choice");
+    assert_eq!(
+        profile.launch_command(&ApprovalLevel::FullAuto, LaunchSession::None),
+        "codex --sandbox workspace-write --example-no-prompts"
+    );
+}
+
+/// Scenarios "A wrapper declaration adds nothing to the command", "A
+/// declaration does not raise the approval level", "A wrapper sandbox does
+/// not restrict full-auto".
+#[test]
+fn a_wrapper_declaration_changes_neither_the_command_nor_the_level() {
+    let declared = clis(&[(
+        "sbx",
+        sandboxed("/home/u/bin/claude-sandboxed", Some("claude"), "wrapper"),
+    )]);
+    let mut plain_entry = entry("/home/u/bin/claude-sandboxed");
+    plain_entry.family = Some("claude".to_string());
+    let plain = clis(&[("sbx", plain_entry)]);
+    for level in LEVELS {
+        let profile = resolve_for_launch("sbx", &declared, &level).expect("never refused");
+        assert_eq!(
+            profile.launch_command(&level, LaunchSession::None),
+            CliProfile::resolve("sbx", &plain).launch_command(&level, LaunchSession::None),
+            "{level:?}"
+        );
+    }
+    let auto = CliProfile::resolve("sbx", &declared)
+        .launch_command(&ApprovalLevel::Auto, LaunchSession::None);
+    assert!(auto.ends_with("--permission-mode acceptEdits"), "{auto}");
+    assert!(!auto.contains("--dangerously-skip-permissions"), "{auto}");
+    let full = CliProfile::resolve("sbx", &declared)
+        .launch_command(&ApprovalLevel::FullAuto, LaunchSession::None);
+    assert!(full.contains("--dangerously-skip-permissions"), "{full}");
+}
+
+/// A native declaration never changes the approval level either.
+#[test]
+fn a_native_declaration_keeps_the_auto_level() {
+    let map = clis(&[("codex", sandboxed("codex", None, "native"))]);
+    assert_eq!(
+        CliProfile::resolve("codex", &map).approval_flags(&ApprovalLevel::Auto),
+        "--sandbox workspace-write"
+    );
 }
 
 // --- The ambiguous-shim refusal (task 3.3) ---

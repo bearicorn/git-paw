@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
-use super::{CliFamily, DialogMarker, roster_entry};
+use super::{CliFamily, DialogMarker, SandboxMode, roster_entry};
 use crate::config::{
     ApprovalLevel, CliPromptProfile, CompiledPromptProfile, CustomCli, SESSION_ID_PLACEHOLDER,
     default_compiled_prompt_profile, launch_command, merge_prompt_profile,
@@ -134,6 +134,108 @@ impl CliProfile {
             .unwrap_or_else(|| self.family.provider().approval_flags(*level).to_string())
     }
 
+    /// The declared sandbox mode, or `None` when the CLI declares none.
+    /// Config load rejects an unknown value before it reaches here.
+    #[must_use]
+    pub fn sandbox_mode(&self) -> Option<SandboxMode> {
+        self.entry
+            .as_ref()
+            .and_then(|e| e.sandbox.as_deref())
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// The native sandbox arguments: the `[clis.<id>].sandbox_args`
+    /// override, else the family's built-in row, else `None`.
+    #[must_use]
+    pub fn native_sandbox_args(&self) -> Option<String> {
+        self.entry
+            .as_ref()
+            .and_then(|e| e.sandbox_args.clone())
+            .or_else(|| {
+                self.family
+                    .provider()
+                    .native_sandbox_args()
+                    .map(str::to_string)
+            })
+            .filter(|args| !args.trim().is_empty())
+    }
+
+    /// The native sandbox arguments a launch at `level` passes: only for
+    /// `sandbox = "native"`, and `None` when the approval flags already
+    /// contain them.
+    #[must_use]
+    pub fn launch_sandbox_args(&self, level: &ApprovalLevel) -> Option<String> {
+        if self.sandbox_mode() != Some(SandboxMode::Native) {
+            return None;
+        }
+        let approval = self.approval_flags(level);
+        self.native_sandbox_args()
+            .filter(|args| !contains_words(&approval, args))
+    }
+
+    /// Refuses a launch that would switch off a declared native sandbox: the
+    /// effective approval flags for `level` — built-in row or `approval_args`
+    /// override alike — carry one of the family's sandbox-disabling flags, or
+    /// set the sandbox's own flag to a different value than the sandbox
+    /// arguments.
+    ///
+    /// # Errors
+    ///
+    /// [`PawError::ConfigError`] naming the CLI, the level, the offending
+    /// flag and `[clis.<id>].approval_args`.
+    pub fn ensure_sandbox_kept(&self, level: &ApprovalLevel) -> Result<(), PawError> {
+        if self.sandbox_mode() != Some(SandboxMode::Native) {
+            return Ok(());
+        }
+        let approval = self.approval_flags(level);
+        let words: Vec<&str> = approval.split_whitespace().collect();
+        let refuse = |why: String| {
+            Err(PawError::ConfigError(format!(
+                "[clis.{id}] declares sandbox = \"native\", but its {level} flags {why}; \
+                 refusing to launch {id} at {level}. Set [clis.{id}].approval_args \
+                 {{ \"{level}\" = \"...\" }} to flags that keep the sandbox on, or use a \
+                 lower agent_approval",
+                id = self.id,
+                level = level.kebab_name(),
+            )))
+        };
+        if let Some(flag) = self
+            .family
+            .provider()
+            .sandbox_disabling_flags()
+            .iter()
+            .find(|flag| words.contains(flag))
+        {
+            return refuse(format!("contain `{flag}`, which turns that sandbox off"));
+        }
+        if let Some(args) = self.native_sandbox_args()
+            && let Some(name) = args.split_whitespace().next()
+            && words.contains(&name)
+            && !contains_words(&approval, &args)
+        {
+            return refuse(format!(
+                "set `{name}` to a different value than the sandbox arguments `{args}` \
+                 (check [clis.{id}].sandbox_args)",
+                id = self.id,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The launch warning for a pane at `level` that runs `full-auto` on a
+    /// CLI declaring no sandbox, or `None`.
+    #[must_use]
+    pub fn unsandboxed_full_auto_warning(&self, level: &ApprovalLevel) -> Option<String> {
+        (*level == ApprovalLevel::FullAuto && self.sandbox_mode().is_none()).then(|| {
+            format!(
+                "warning: `{id}` runs at full-auto with no declared sandbox: no permission \
+                 prompt reaches a human and nothing confines it. Confine it and declare \
+                 [clis.{id}] sandbox (see the FS-scoped sandbox guide)",
+                id = self.id,
+            )
+        })
+    }
+
     /// The session-id template rendered for `session_id`: the override, else
     /// the family's row, else `None`.
     #[must_use]
@@ -220,10 +322,10 @@ impl CliProfile {
             .unwrap_or(crate::DEFAULT_SUBMIT_DELAY_MS)
     }
 
-    /// The pane command for one launch: the executable, the CLI's `args`, the
-    /// approval flags for `level`, then the session-id arguments (fresh
-    /// launch) or resume arguments (recovery). An empty part contributes no
-    /// separator.
+    /// The pane command for one launch: the executable, the CLI's `args`,
+    /// [`Self::launch_sandbox_args`], the approval flags for `level`, then
+    /// the session-id arguments (fresh launch) or resume arguments
+    /// (recovery). An empty part contributes no separator.
     ///
     /// The executable is a configured entry's `command` as one shell word, or
     /// a built-in CLI's name, resolved by the pane's shell.
@@ -234,10 +336,13 @@ impl CliProfile {
             LaunchSession::Assign(id) => self.session_id_args(id),
             LaunchSession::Resume(id) => self.resume_args(id),
         };
+        let approval = self.approval_flags(level);
+        let sandbox = self.launch_sandbox_args(level);
         let mut command = self.base_command.clone();
         for part in [
             self.args().unwrap_or_default(),
-            &self.approval_flags(level),
+            sandbox.as_deref().unwrap_or_default(),
+            &approval,
             session_args.as_deref().unwrap_or_default(),
         ] {
             if !part.trim().is_empty() {
@@ -299,19 +404,32 @@ impl CliProfile {
     }
 }
 
-/// Resolves the record for `identity` for a launch, refusing the ambiguous
-/// PATH shim ([`CliProfile::ensure_unambiguous`]). Every worker launch path
-/// goes through this before it builds a pane command.
+/// Resolves the record for `identity` for a launch at `level`, refusing the
+/// ambiguous PATH shim ([`CliProfile::ensure_unambiguous`]) and a level that
+/// would switch a declared native sandbox off
+/// ([`CliProfile::ensure_sandbox_kept`]). Every worker launch path goes
+/// through this before it creates a worktree or builds a pane command.
+///
+/// Prints [`CliProfile::unsandboxed_full_auto_warning`] to stderr, once per
+/// CLI per process.
 ///
 /// # Errors
 ///
-/// When the identity is an ambiguous shim.
+/// When the identity is an ambiguous shim, or the launch would disable its
+/// declared native sandbox.
 pub fn resolve_for_launch<S: BuildHasher>(
     identity: &str,
     clis: &HashMap<String, CustomCli, S>,
+    level: &ApprovalLevel,
 ) -> Result<CliProfile, PawError> {
     let profile = CliProfile::resolve(identity, clis);
     profile.ensure_unambiguous()?;
+    profile.ensure_sandbox_kept(level)?;
+    if let Some(warning) = profile.unsandboxed_full_auto_warning(level)
+        && first_warning_for(profile.id())
+    {
+        eprintln!("{warning}");
+    }
     Ok(profile)
 }
 
@@ -402,6 +520,26 @@ impl AgentProfiles {
             .get(agent_id)
             .map_or(&self.generic, |(_, resolved)| resolved)
     }
+}
+
+/// Whether no unsandboxed-full-auto warning was printed for `id` yet in this
+/// process, recording it as printed. A launch resolves the same CLI more
+/// than once (pre-flight, then per pane).
+fn first_warning_for(id: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    match seen.lock() {
+        Ok(mut set) => set.insert(id.to_string()),
+        Err(_) => true,
+    }
+}
+
+/// Whether `needle`'s words appear as a contiguous run of `haystack`'s words.
+fn contains_words(haystack: &str, needle: &str) -> bool {
+    let hay: Vec<&str> = haystack.split_whitespace().collect();
+    let words: Vec<&str> = needle.split_whitespace().collect();
+    !words.is_empty() && hay.windows(words.len()).any(|w| w == words.as_slice())
 }
 
 /// Locates `command` the way a shell would: a path containing `/` is taken

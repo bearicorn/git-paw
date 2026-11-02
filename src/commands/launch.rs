@@ -226,7 +226,7 @@ pub(crate) fn attach_agent(
     runtime_slot: u16,
     out: &mut dyn Output,
 ) -> Result<AttachedAgent, PawError> {
-    let profile = crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis)?;
+    let profile = crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis, ctx.approval)?;
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
 
     // Provision the worktree's runtime state — the declared env-file copies,
@@ -356,7 +356,7 @@ pub(crate) fn dry_run_launch_line(
     approval: config::ApprovalLevel,
     clis: &std::collections::HashMap<String, config::CustomCli>,
 ) -> Result<String, PawError> {
-    let command = crate::agent_cli::resolve_for_launch(cli, clis)?
+    let command = crate::agent_cli::resolve_for_launch(cli, clis, &approval)?
         .launch_command(&approval, LaunchSession::None);
     Ok(format!("      runs: {command}"))
 }

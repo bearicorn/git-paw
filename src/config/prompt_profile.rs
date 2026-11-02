@@ -654,6 +654,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         assert_eq!(
@@ -685,6 +687,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         assert_eq!(
@@ -734,6 +738,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         let resolved = resolve_prompt_profile("mycli", &clis);
@@ -778,6 +784,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         assert_eq!(
@@ -807,6 +815,8 @@ mod tests {
                 headless_args: None,
                 family: None,
                 args: None,
+                sandbox: None,
+                sandbox_args: None,
             },
         );
         assert_eq!(
