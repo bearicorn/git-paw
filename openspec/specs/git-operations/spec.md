@@ -233,6 +233,8 @@ Test: `git_integration::remove_worktree_force_removes_dirty_worktree`
 
 ### Requirement: Repository validation SHALL work against real git repos
 
+Repository validation SHALL work against real git repos.
+
 #### Scenario: Succeeds inside a real git repo
 - **GIVEN** a temporary git repository with an initial commit
 - **WHEN** `validate_repo()` is called
@@ -248,6 +250,8 @@ Test: `git_integration::validate_repo_succeeds_inside_git_repo`
 Test: `git_integration::validate_repo_fails_outside_git_repo`
 
 ### Requirement: Branch listing SHALL work against real git repos
+
+Branch listing SHALL work against real git repos.
 
 #### Scenario: Lists created branches
 - **GIVEN** a repo with branches `feature/auth` and `fix/db`
@@ -272,6 +276,8 @@ Test: `git_integration::list_branches_deduplicates_local_and_remote`
 
 ### Requirement: Worktree lifecycle SHALL work against real git repos
 
+Worktree lifecycle SHALL work against real git repos.
+
 #### Scenario: Create and remove worktree
 - **GIVEN** a branch in a temporary repo
 - **WHEN** `create_worktree()` then `remove_worktree()` are called
@@ -294,6 +300,8 @@ Test: `git_integration::worktree_placed_as_sibling_of_repo`
 Test: `git_integration::create_worktree_fails_for_checked_out_branch`
 
 ### Requirement: Directory naming SHALL be correct in integration tests
+
+Directory naming SHALL be correct in integration tests.
 
 #### Scenario: Project name from real repo path
 - **GIVEN** a repo at `.../test-repo/`

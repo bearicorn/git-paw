@@ -223,6 +223,8 @@ Test: `tmux::tests::resolve_session_name_appends_suffix_on_collision`
 
 ### Requirement: Tmux session lifecycle SHALL work against a real tmux server
 
+Tmux session lifecycle SHALL work against a real tmux server.
+
 #### Scenario: Create and kill session lifecycle
 - **GIVEN** a tmux session is created via the builder
 - **WHEN** `execute()`, `is_session_alive()`, and `kill_session()` are called
@@ -259,6 +261,8 @@ Test: `e2e_tests::tmux_is_session_alive_returns_false_for_nonexistent`
 Test: `e2e_tests::attach_succeeds_for_live_session`
 
 ### Requirement: E2E commands SHALL behave correctly against real repos
+
+E2E commands SHALL behave correctly against real repos.
 
 #### Scenario: Dry run shows session plan
 - **GIVEN** a git repo with branches and `--dry-run --cli echo --branches feat/a,feat/b`

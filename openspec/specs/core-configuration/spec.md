@@ -268,6 +268,8 @@ Test: `config::tests::load_config_override_does_not_affect_repo_resolution`
 
 ### Requirement: Custom CLI management SHALL persist through file I/O
 
+Custom CLI management SHALL persist through file I/O.
+
 #### Scenario: Add CLI with absolute path
 - **GIVEN** no config file
 - **WHEN** `add_custom_cli_to()` is called with an absolute path
@@ -326,6 +328,8 @@ Test: `config_integration::remove_all_custom_clis_leaves_empty_config`
 
 ### Requirement: Global and repo config SHALL merge custom CLIs correctly
 
+Global and repo config SHALL merge custom CLIs correctly.
+
 #### Scenario: Repo custom CLIs merge with global
 - **GIVEN** global config with 2 CLIs and repo config with 2 CLIs (one overlapping)
 - **WHEN** `load_config_from()` is called
@@ -334,6 +338,8 @@ Test: `config_integration::remove_all_custom_clis_leaves_empty_config`
 Test: `config_integration::repo_custom_clis_merge_with_global_custom_clis`
 
 ### Requirement: Config SHALL handle many custom CLIs
+
+Config SHALL handle many custom CLIs.
 
 #### Scenario: Config with 10 custom CLIs
 - **GIVEN** a config file with 10 custom CLI definitions
@@ -359,6 +365,8 @@ The system SHALL support a `default_spec_cli` field in `PawConfig` that specifie
 - **THEN** the merged config SHALL have `default_spec_cli = Some("gemini")`
 
 ### Requirement: Repo SHALL override new v0.2.0 scalar fields
+
+Repo SHALL override new v0.2.0 scalar fields.
 
 #### Scenario: Repo overrides new v0.2.0 scalar fields
 - **GIVEN** global config has `default_spec_cli = "claude"` and repo has `default_spec_cli = "gemini"`
