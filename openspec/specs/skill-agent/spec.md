@@ -2,7 +2,9 @@
 
 ## Purpose
 Defines the embedded coordination and supervisor skill templates git-paw injects into agents, their resolution order (user override then embedded default), and the placeholder-rendering contract. This gives coding agents their broker coordination discipline (intent, heartbeats, stash hygiene, cherry-pick) and gives the supervisor its verification, merge-orchestration, permission-sweep, and user-interaction procedures, all as project-agnostic bundled content. It also adds a "Context budget" section to the bundled coordination skill teaching agents when to compact, clear, or summarise (with a residual-budget heuristic and commit-before-compact discipline), and gives the supervisor a configurable token threshold so `sweep.sh` can proactively flag context-bloated agents via a synthetic `agent.status` before they freeze.
+
 ## Requirements
+
 ### Requirement: Embedded coordination skill
 
 The embedded `coordination.md` skill content SHALL reflect the v0.5 state in which agents publish `agent.intent` before editing as the primary coordination signal, while `agent.status` publishing remains automated by the filesystem watcher and `agent.artifact` publishing remains automated by the post-commit git hook. The embedded content SHALL therefore:
@@ -333,38 +335,11 @@ The system SHALL define a public type `SkillTemplate` with at least these fields
 
 ### Requirement: Embedded supervisor skill
 
-The embedded supervisor skill SHALL include a "Spec Audit Procedure" section that instructs the supervisor to verify implementation matches spec before publishing `agent.verified`. The procedure SHALL include:
-
-- How to locate spec files for a given change
-- How to extract WHEN/THEN scenarios from spec files
-- How to search the codebase for matching tests
-- How to verify struct fields, function signatures, and types match SHALL/MUST requirements
-- How to compile gaps into an `agent.feedback` error list
-- When to publish `agent.verified` (no gaps) vs `agent.feedback` (gaps found)
-
-The spec audit SHALL run after the test command passes and before `agent.verified` is published.
-
-The embedded supervisor skill SHALL ALSO include a "Watch peer intents" pointer that informs the supervisor that `agent.intent` messages arrive in its inbox alongside other peer events. The pointer SHALL state that programmatic conflict-warning logic is not part of this release and that the supervisor MAY inspect intents and prompt agents via `agent.feedback` or `agent.question` if it spots overlap manually. The pointer is intentionally advisory — full conflict-detection algorithms are owned by the `conflict-detection` change.
-
-The embedded supervisor skill SHALL ALSO include a first-class workflow step covering how to answer an asking agent's `agent.question`. The step SHALL require the supervisor to:
-
-1. Publish the `agent.feedback` response to the broker as before.
-2. **ALSO** send the answer text to the asking agent's pane via `tmux send-keys -t <session>:0.<pane-index> "<answer>" Enter` (`<session>` being the session name recorded in `.git-paw/AGENTS.local.md`), because v0.5.0 agents do not poll their inbox for `agent.feedback` responses (drift 34). The instruction SHALL state this rationale explicitly so future contributors understand the workaround is transitional and slated for relaxation when MCP-mediated inbox access lands in v0.6.0.
-3. **ALSO** apply the existing paste-buffer recovery sub-case when the answer text is long enough to land in a paste buffer on a paste-aware CLI — i.e. after the `tmux send-keys` of the answer, the supervisor SHALL inspect the pane and, if a paste-buffer indicator is present, send a follow-up `Enter` keystroke to submit the buffered content. This re-uses the paste-buffer recovery action already documented under stall detection; the supervisor skill SHALL cross-reference it (e.g. "see the paste-buffer recovery sub-case under stall detection") rather than duplicate the full recovery text.
-
-The embedded supervisor skill SHALL ALSO include a "Supervisor publishes agent.intent for main-side work" section (or equivalent heading) instructing the supervisor agent to publish `agent.intent` from `agent_id = "supervisor"` whenever it is about to commit changes directly to `main` while coding agents are running. The section SHALL:
-
-- Explain the visibility gap it closes: supervisor commits to `main` are not surfaced as broker events, and agents working in feat branches may produce commits incompatible with a freshly-advanced `main` if they are not notified.
-- Provide an example publishing it through the bundled helper — `.git-paw/scripts/broker.sh --agent supervisor intent <summary> <files> [ttl]` — which sends `type` = `agent.intent`, `agent_id` = `"supervisor"`, and a payload containing `files`, `summary`, and `valid_for_seconds`. The example SHALL NOT be a raw HTTP request.
-- Cross-reference the agent-side `agent.intent` flow documented in `coordination.md` (the `Before you start editing` section) so the reader understands the supervisor reuses the same wire format.
-
-The embedded supervisor skill SHALL ALSO include a "Verify accept-edits commits before merge" section (or equivalent heading) instructing the supervisor agent how to audit `agent.artifact { modified_files }` against the change's expected file set when the underlying agent ran in an auto-accept-edits mode that bypasses per-edit prompts. The section SHALL:
-
-- Explain the visibility gap auto-accept-edits modes create: once enabled, file edits silently apply without re-prompting and the supervisor cannot watch each edit in real time.
-- Instruct the supervisor to locate the change's `proposal.md` and read its expected file list (typically under an `Impact` / `Code` section) before inspecting an `agent.artifact`.
-- Instruct the supervisor to diff `modified_files` against the expected list; files in `modified_files` but absent from the expected list SHALL be flagged as out-of-scope edits.
-- Specify the supervisor's response: benign out-of-scope edits (whitespace, adjacent typo fixes) MAY be noted in `agent.verified`; substantive out-of-scope edits SHALL be raised via `agent.feedback` asking the agent to revert or justify.
-- State that out-of-scope edits SHALL NOT be silently auto-approved.
+The embedded supervisor skill SHALL include: a Spec Audit procedure run after the test command and
+before `agent.verified`; a `Watch peer intents` pointer; an `agent.question` answer step that
+publishes the reply AND types it into the asking agent's input with `sweep.sh tell`, because agents
+do not poll their inbox; a section on publishing `agent.intent` for main-side work through
+`broker.sh`; and an accept-edits `modified_files` audit before merge.
 
 #### Scenario: Supervisor skill contains spec audit procedure
 
@@ -390,15 +365,15 @@ The embedded supervisor skill SHALL ALSO include a "Verify accept-edits commits 
 #### Scenario: Supervisor skill instructs tmux-send-keys alongside agent.feedback answers
 
 - **WHEN** the embedded supervisor skill is inspected
-- **THEN** it contains explicit guidance that, when answering an `agent.question`, the supervisor MUST publish `agent.feedback` AND ALSO send the answer to the asking agent's pane via `tmux send-keys`
-- **AND** it contains the substring `tmux send-keys` in the section covering `agent.question` answers
+- **THEN** it contains explicit guidance that, when answering an `agent.question`, the supervisor MUST publish the reply AND ALSO deliver the answer to the asking agent's input via `sweep.sh tell`
+- **AND** it contains the substring `sweep.sh tell` in the section covering `agent.question` answers
 - **AND** it states the rationale (agents do not poll their inbox for `agent.feedback` responses)
 
 #### Scenario: Supervisor skill cross-references paste-buffer recovery for long answers
 
 - **WHEN** the supervisor skill's `agent.question` answer step is inspected
-- **THEN** it instructs the supervisor to apply the paste-buffer recovery sub-case when the answer text is long enough to land in a paste buffer
-- **AND** it instructs the supervisor to follow up with an `Enter` keystroke after the answer if a paste-buffer indicator is present
+- **THEN** it instructs the supervisor to apply the paste-buffer recovery sub-case when the answer does not submit
+- **AND** it says what to do when `sweep.sh tell` reports `wedged` or `refused`
 
 #### Scenario: Supervisor skill instructs publishing agent.intent for main-side work
 
@@ -430,16 +405,11 @@ The embedded supervisor skill SHALL ALSO include a "Verify accept-edits commits 
 
 ### Requirement: Supervisor skill — paste-buffer recovery in stall detection
 
-The embedded `supervisor.md` skill SHALL include a paste-buffer recovery sub-case under its existing stall-detection section. The sub-case SHALL instruct the supervisor agent that when a peer agent's `last_seen` has not advanced (or, at launch time, before any heartbeat has arrived) AND a `tmux capture-pane` of that peer's pane shows a paste-buffer indicator or the intended text sitting unsubmitted on the input line, the supervisor SHALL recover by clearing the pane's input line (`tmux send-keys -t <target> C-u`), re-typing the intended text, then sending `Enter` — because a bare `Enter` / `C-m` against a stale input line is a no-op that does not submit the buffered or stale content.
-
-The sub-case SHALL:
-
-1. Identify itself as an additional stall-detection case alongside the existing "idle prompt → likely done" and "thinking/waiting → prompt to self-report" cases.
-2. List at least one known paste-buffer indicator pattern. The list SHALL include Claude Code's `Pasted text #N` (where `N` is a number) and SHALL be presented as illustrative-not-exhaustive so the supervisor agent can apply judgment to indicators on other CLIs.
-3. Specify the recovery action as clearing the stuck pane's input line (`tmux send-keys -t <pane> C-u`), re-typing the intended text, then `Enter` — and SHALL state that a lone `Enter` / `C-m` against a stale input line is a no-op that does not submit.
-4. State that the recovery is safe-by-default — on a non-paste-aware CLI or a misclassified pane, clearing the line and re-typing either reproduces the intended input or leaves a benign prompt.
-5. Frame indicator detection as lenient: if a pane shows long buffered or unsubmitted text in the input area without a follow-up response, the supervisor SHOULD attempt the recovery even if the literal indicator string is not on the listed-patterns list.
-6. State that paste-buffer recovery SHALL also be applied **proactively at launch time** — the supervisor agent SHALL NOT wait for the `last_seen`-based stall threshold before inspecting agent panes for paste-buffer state. Coding-agent boot prompts are frequently long enough on paste-aware CLIs (e.g. Claude Code v2.1.x) to land in a paste buffer immediately, and waiting 30+ seconds for stall detection wastes the agents' productive time.
+The supervisor skill SHALL include a paste-buffer recovery sub-case under stall detection, applied
+proactively at launch too: when a pane shows a paste-buffer indicator (such as Claude Code's
+`Pasted text #N`, illustrative only) or unsubmitted text, the supervisor SHALL re-send the intended
+text with `sweep.sh tell`, which re-types and verifies it, and the skill SHALL state that a lone
+`Enter` against a stale input line is a no-op.
 
 #### Scenario: Supervisor skill mentions paste-buffer recovery
 
@@ -454,9 +424,9 @@ The sub-case SHALL:
 #### Scenario: Supervisor skill specifies the corrected recovery action
 
 - **WHEN** the paste-buffer recovery sub-case is inspected
-- **THEN** it instructs the supervisor agent to use `tmux capture-pane` to inspect the suspected pane
-- **AND** it instructs the supervisor agent to recover by clearing the input line (`C-u`), re-typing the intended text, then sending `Enter`
-- **AND** it states that a lone `Enter` / `C-m` against a stale input line is a no-op, and that the clear-and-retype recovery is safe-by-default on non-paste-aware CLIs
+- **THEN** it instructs the supervisor agent to inspect the suspected pane with `sweep.sh capture`
+- **AND** it instructs the supervisor agent to recover by re-sending the intended text with `sweep.sh tell`, which clears (`C-u`) and re-types its own text and sends `Enter` until the input empties
+- **AND** it states that a lone `Enter` / `C-m` against a stale input line is a no-op, and that the recovery is safe-by-default on non-paste-aware CLIs
 
 #### Scenario: Supervisor skill frames indicator detection as lenient
 
@@ -1665,4 +1635,3 @@ The orchestrator skill SHALL instruct the orchestrator to follow the session by 
 - **WHEN** the monitoring section is inspected
 - **THEN** it SHALL state that the drive loop escalates permission prompts and approves none
 - **AND** SHALL instruct the orchestrator to relay each escalated prompt to the human and to run `sweep.sh approve` only on the human's explicit instruction
-
