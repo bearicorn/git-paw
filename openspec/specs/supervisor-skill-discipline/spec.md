@@ -2,7 +2,9 @@
 
 ## Purpose
 Encodes the operational disciplines the bundled supervisor skill teaches the supervisor agent: drive pane work through `sweep.sh` (never inline loops), never send-keys to its own pane, use `git -C` for cross-worktree git, nudge on commit cadence and rely on agents standing by post-commit, and create isolated verification worktrees under a repo-local gitignored scratch dir checked out at the re-resolved branch tip. It also encodes stream-timeout recovery (recognizing the error shape including a coding agent's `stuck-stream-timeout`, taking a pre-action `checkpoint` `agent.status`, replaying only the missing downstream publishes idempotently, emitting a `recovery_cycles` learning, and treating repeated re-verify cycles as normal progress rather than a stall), per-event (concurrent, non-deferred) verification of each agent's commit as its `committed` event arrives (with an optional `supervisor.verify-now` broker nudge), and the full-suite / no-fail-fast testing-gate discipline — backed by git-paw's guard-neutralised `just verify` recipe wired through `{{TEST_COMMAND}}` — so an early-aborted run is never mistaken for a PASS. It also provides supervisor-pane directives for coordinating agents: `/agents` returns the current agent inventory (each row carrying branch_id, status, last_seen, cli, best-effort mode, and path-resolved pane_index), composed from broker `/status` and `tmux list-panes`, cached in memory with a refresh cadence and exposed as a reusable `coordination::inventory` library helper with target validation; and `/tell <agent_id> <prompt>` validates the target against that inventory and routes a prompt to the agent via a selectable delivery mode (`agent.feedback` or `tmux send-keys`), recording each route in learnings, requiring user confirmation for proactive routes, and never invoking another CLI to generate the prompt.
+
 ## Requirements
+
 ### Requirement: Mandate sweep.sh; forbid inline pane loops
 
 The bundled supervisor skill SHALL include a section directing
@@ -635,8 +637,8 @@ with the candidate-list error from the shared validation helper.
 `/tell` SHALL select a delivery mode using this precedence:
 1. When `[supervisor.tell] mode = "send-keys"` is configured AND
    the target's detected mode is `accept-edits`, use
-   `tmux send-keys` to inject the prompt directly into the
-   target's pane.
+   `sweep.sh tell` to type the prompt into the target's input
+   with verified submission.
 2. When `[supervisor.tell] mode = "feedback"` (default), publish
    an `agent.feedback` broker message targeted at the agent.
 3. When the configured mode is `send-keys` but the target's
@@ -656,8 +658,8 @@ with the candidate-list error from the shared validation helper.
 - **GIVEN** `[supervisor.tell] mode = "send-keys"` and an agent
   whose detected mode is `accept-edits`
 - **WHEN** `/tell` targets that agent
-- **THEN** the supervisor SHALL use `tmux send-keys` to inject
-  the prompt into the agent's pane
+- **THEN** the supervisor SHALL use `sweep.sh tell` to type
+  the prompt into the agent's input
 
 #### Scenario: send-keys mode falls back when target mode is unknown
 
@@ -735,3 +737,28 @@ into another agent CLI.
   delivery (broker publish OR `tmux send-keys`), with no agent
   CLI process spawned to produce the prompt content
 
+### Requirement: Typed delivery to an agent goes through sweep.sh tell
+
+The bundled supervisor skill SHALL instruct the driving agent to deliver any message it types into a
+coding agent's input — including `/tell` in `send-keys` delivery mode and the paste-buffer recovery
+procedure — through `sweep.sh tell <agent> <message>`, and SHALL NOT instruct it to type a message
+with raw `tmux send-keys`.
+
+#### Scenario: The skill routes send-keys delivery through the helper
+
+- **WHEN** the supervisor skill is rendered
+- **THEN** its `/tell` send-keys delivery and its paste-buffer recovery guidance SHALL name `sweep.sh tell`
+- **AND** SHALL NOT instruct typing a message with raw `tmux send-keys`
+
+### Requirement: The skill explains the sweep.sh tell results
+
+The bundled supervisor skill SHALL explain the three results of `sweep.sh tell`: `delivered`;
+`wedged` (escalate or fall back to the broker feedback mode); and `refused` (resolve the stated reason
+first; for a live permission prompt, relay it to the human and run `sweep.sh approve` only on the
+human's instruction).
+
+#### Scenario: The skill explains the results
+
+- **WHEN** the supervisor skill is rendered
+- **THEN** it SHALL describe what to do on `wedged` and on `refused`
+- **AND** for a `refused` caused by a live permission prompt it SHALL say to relay the prompt to the human, not to answer it

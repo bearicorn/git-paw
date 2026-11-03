@@ -11,7 +11,9 @@ path-scoped allow rules for git-paw's own helper scripts, together with the rule
 helpers against silent modification. It keeps every unrelated key, value and key order, and it
 refuses unsafe targets. Every write is recorded in the setup record, and `--undo` removes exactly
 what git-paw added.
+
 ## Requirements
+
 ### Requirement: The setup-cli command applies named setup items for one agent CLI
 
 The system SHALL provide a `git paw setup-cli <CLI>` subcommand with the item flags `--allowlist`,
@@ -291,9 +293,10 @@ table keyed by the names of the helper scripts the binary bundles:
   publishes nothing;
 - `_paw_common.sh`: no entry (it is sourced, never invoked).
 
-The item SHALL add `Bash(.git-paw/scripts/sweep.sh approve *)` to `permissions.ask`, so the
-keystroke-sending `approve` subcommand always prompts even when another rule would allow it. The item
-SHALL NOT add an allow entry for `sweep.sh approve`, `sweep.sh verified`, `sweep.sh feedback-gate`,
+The item SHALL add `Bash(.git-paw/scripts/sweep.sh approve *)` and
+`Bash(.git-paw/scripts/sweep.sh tell *)` to `permissions.ask`, so the keystroke-sending `approve` and
+`tell` subcommands always prompt even when another rule would allow them. The item SHALL NOT add an
+allow entry for `sweep.sh approve`, `sweep.sh tell`, `sweep.sh verified`, `sweep.sh feedback-gate`,
 `sweep.sh conflict-ack`, `sweep.sh answer` or `sweep.sh advanced-main`, for `docs-fetch.sh get`, an
 interpreter-prefixed form, an absolute-path form, a wildcard over a directory, or any entry naming a
 command other than a git-paw helper script. Every bundled helper script SHALL appear in the grant
@@ -304,7 +307,7 @@ SHALL be either granted or listed as never granted.
 
 - **WHEN** the allowlist item is planned for `claude`
 - **THEN** its `permissions.allow` entries SHALL be exactly the twelve grant-table entries
-- **AND** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh approve *)`
+- **AND** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh approve *)` and `Bash(.git-paw/scripts/sweep.sh tell *)`
 
 Test: `cli_setup::facts::tests::allow_entries_are_exactly_the_grant_table, cli_setup::plan::tests::allow_entries_are_exactly_the_grant_table`
 
@@ -316,10 +319,18 @@ Test: `cli_setup::facts::tests::allow_entries_are_exactly_the_grant_table, cli_s
 #### Scenario: Keystroke and verdict subcommands are never allowed
 
 - **WHEN** the allowlist item is planned for `claude`
-- **THEN** no `permissions.allow` entry SHALL name `sweep.sh approve`, `sweep.sh verified`, `sweep.sh feedback-gate` or `docs-fetch.sh get`
+- **THEN** no `permissions.allow` entry SHALL name `sweep.sh approve`, `sweep.sh tell`, `sweep.sh verified`, `sweep.sh feedback-gate` or `docs-fetch.sh get`
 - **AND** no `permissions.allow` entry SHALL begin `Bash(.git-paw/scripts/sweep.sh *`
 
 Test: `cli_setup::facts::tests::no_allow_entry_names_a_keystroke_or_verdict_subcommand, cli_setup::facts::tests::the_keystroke_subcommand_is_asked_not_allowed`
+
+#### Scenario: The message-typing tell subcommand always prompts
+
+- **WHEN** the allowlist item is planned for `claude`
+- **THEN** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh tell *)`
+- **AND** the grant table SHALL list `sweep.sh tell` as never granted
+
+Test: `cli_setup::facts::tests::the_message_typing_tell_subcommand_always_prompts`
 
 #### Scenario: Every planned allow entry names a bundled helper
 
@@ -565,4 +576,3 @@ Test: `cli_setup::undo::tests::protection_is_kept_while_an_edited_helper_grant_r
 - **THEN** every entry recorded for the other CLI SHALL remain on disk and in the record
 
 Test: `cli_setup::undo::tests::another_clis_entries_are_untouched_on_disk_and_in_the_record, cli_setup::shell::tests::another_clis_entries_are_untouched`
-
