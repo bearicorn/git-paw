@@ -46,6 +46,7 @@ pub mod purge;
 pub mod recover;
 pub mod remove;
 pub mod replay;
+pub mod send;
 pub mod setup_cli;
 pub mod spec_mode;
 pub mod start;

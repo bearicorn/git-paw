@@ -487,6 +487,13 @@ usage: $0 <subcommand> [args]
                                       command and never selects a durable grant;
                                       refuses a pane the roster does not list as a coding agent; skips a pane another approver
                                       has claimed
+  tell <agent> [<message…>]           type a message into a coding agent and verify it
+                                      submitted (no message arguments: read it from stdin);
+                                      prints delivered / wedged / refused: <reason> and
+                                      exits 0 / 2 / 3, or 4 when git paw __send fails;
+                                      refuses a live permission prompt, a selection menu,
+                                      a busy or mid-response pane, text already in the
+                                      input line, a non-agent target and a linked worktree
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
@@ -772,6 +779,50 @@ cmd_approve() {
   sleep 0.05
   tmux send-keys -t "${SESSION}:0.${pane}" Enter >/dev/null 2>&1
   echo "approved pane ${pane} (option 1)"
+}
+
+# Types a message into a coding agent and verifies it submitted, through
+# `git paw __send`, which reuses the submit-and-verify actuator of the drive
+# loop with the CLI profile of that agent: text, settle delay, a separate
+# Enter, a check that the input emptied, and a bounded recovery. The message
+# goes on STDIN, so it never appears in the argv of `__send`; pass no message
+# arguments and pipe it in to keep it out of the argv of this script too.
+# Exit status: 0 delivered, 2 wedged, 3 refused (nothing sent), 4 error
+# (`__send` failed or is missing, as on an older git-paw). `__send` itself
+# takes the pane claim and refuses a live permission prompt, a selection
+# menu, a non-agent target and a linked-worktree caller.
+cmd_tell() {
+  local agent=${1:-}
+  if [[ -z "${agent}" ]]; then
+    echo "refused: usage: $0 tell <agent> [<message...>] (no message: read stdin)"
+    exit 3
+  fi
+  shift
+  local out rc=0
+  # `--agent=<id>` in one word, so an id starting with `-` cannot be read as
+  # a flag.
+  if [[ $# -gt 0 ]]; then
+    out=$(printf '%s' "$*" | git paw __send "--agent=${agent}") || rc=$?
+  elif [[ -t 0 ]]; then
+    echo "refused: no message given and stdin is a terminal"
+    exit 3
+  else
+    out=$(git paw __send "--agent=${agent}") || rc=$?
+  fi
+  # Trust an exit status only together with the result line `__send` prints
+  # for it, so a usage error from a git-paw without `__send` (exit 2) never
+  # reads as wedged.
+  case "${rc}:${out}" in
+    0:delivered|2:wedged|3:refused:*)
+      printf '%s\n' "${out}"
+      return "${rc}"
+      ;;
+  esac
+  if [[ -n "${out}" ]]; then
+    printf '%s\n' "${out}" >&2
+  fi
+  echo "error: git paw __send failed (exit ${rc}); this git-paw may predate sweep.sh tell" >&2
+  return 4
 }
 
 cmd_status() {
@@ -2009,6 +2060,7 @@ main() {
     snapshot) cmd_snapshot "$@" ;;
     capture) cmd_capture "$@" ;;
     approve) cmd_approve "$@" ;;
+    tell) cmd_tell "$@" ;;
     status) cmd_status "$@" ;;
     events) cmd_events "$@" ;;
     detect-stuck) cmd_detect_stuck "$@" ;;

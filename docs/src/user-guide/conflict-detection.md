@@ -226,7 +226,7 @@ this inbox. The orchestrator (your own agent session outside the tmux
 session) sees the question in its broker inbox and can:
 
 1. Type a reply, which the supervisor skill forwards to both involved
-   agents via `tmux send-keys` (the same dual-write pattern documented in
+   agents via `sweep.sh tell` (the same dual-write pattern documented in
    [Agent Coordination § Supervisor Acknowledgement](coordination.md#supervisor-acknowledgement-of-agentquestion)).
 2. Resolve the conflict directly by editing one agent's intent or
    pausing the offending agent until the other side commits.

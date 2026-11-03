@@ -1185,7 +1185,7 @@ inventory_max_age_seconds = 60
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `mode` | `"feedback"` | Default delivery channel for `/tell`. `"feedback"` queues an `agent.feedback` the target picks up on its next inbox poll (safe for mixed-mode sessions). `"send-keys"` injects the prompt straight into the target pane with `tmux send-keys` — used only when the target is in accept-edits mode, otherwise `/tell` falls back to `feedback` and prints a note. |
+| `mode` | `"feedback"` | Default delivery channel for `/tell`. `"feedback"` queues an `agent.feedback` the target picks up on its next inbox poll (safe for mixed-mode sessions). `"send-keys"` types the prompt straight into the target's input with `sweep.sh tell`, which verifies it submitted — used only when the target is in accept-edits mode, otherwise `/tell` falls back to `feedback` and prints a note. |
 | `inventory_max_age_seconds` | `60` | How stale the cached `/agents` inventory may be before `/tell`/`/agents` re-poll the broker. Lower it for tighter freshness at the cost of more frequent polling. |
 
 The `[supervisor.tell]` table is fully optional. A v0.5.0 config with

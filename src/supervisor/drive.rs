@@ -592,7 +592,7 @@ pub struct ExhaustedBranch {
 /// Maximum length of free text the loop types into a pane. A gate verdict or an
 /// escalation can carry a long error list; the pane only needs enough to
 /// re-orient its model, which then reads the full detail from the broker.
-const INJECTED_TEXT_MAX_CHARS: usize = 600;
+pub const INJECTED_TEXT_MAX_CHARS: usize = 600;
 
 /// Flattens `text` to a single line and caps it at [`INJECTED_TEXT_MAX_CHARS`].
 ///
@@ -2213,21 +2213,137 @@ fn send_nudge(
         return Ok(NudgeOutcome::Skipped);
     }
 
+    let mut port = SubmitPort {
+        capturer: deps.capturer,
+        dispatcher: &mut *deps.dispatcher,
+        clock: deps.clock,
+        guard: None,
+    };
+    match submit_and_verify(&mut port, session, pane_index, text, settle_delay, profile)? {
+        SubmitResult::Delivered => Ok(NudgeOutcome::Delivered),
+        SubmitResult::Wedged => Ok(escalate_wedged(deps, target.agent_id, text)),
+        SubmitResult::Aborted(_) => Ok(NudgeOutcome::Skipped), // no guard, never aborts
+    }
+}
+
+/// A re-check run on a fresh capture before each `Enter` and `C-u`:
+/// `Some(reason)` stops the send.
+pub type SubmitGuard<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Borrowed terminal seams for [`submit_and_verify`]. The caller owns the
+/// backends.
+pub struct SubmitPort<'a> {
+    /// Reads the surface to verify the submission.
+    pub capturer: &'a dyn PaneCapture,
+    /// Types the text and its separate `Enter`.
+    pub dispatcher: &'a mut dyn KeyDispatcher,
+    /// Waits out the settle delay.
+    pub clock: &'a dyn Clock,
+    /// When set, a prompt or menu that appears mid-sequence stops it before
+    /// any `Enter` or `C-u` can land on it. The drive loop passes `None`.
+    pub guard: Option<SubmitGuard<'a>>,
+}
+
+/// Outcome of [`submit_and_verify`] once keystrokes went out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitResult {
+    /// The text was verified submitted.
+    Delivered,
+    /// The text was still on the input line after every recovery attempt.
+    Wedged,
+    /// The guard stopped the sequence before an `Enter` or `C-u`; the text
+    /// may sit unsubmitted on the input line.
+    Aborted(String),
+}
+
+/// Runs the port's guard, if any, on a fresh capture.
+fn guard_stops(port: &SubmitPort<'_>, session: &str, pane_index: usize) -> Option<String> {
+    let guard = port.guard?;
+    guard(&port.capturer.capture(session, pane_index))
+}
+
+/// Types `text` and verifies it submitted. The caller must hold the pane's
+/// [`PaneClaim`] and check the pane is safe to type into; without a guard
+/// this sends unconditionally. It never escalates.
+///
+/// # Errors
+/// Returns an error when a keystroke cannot be dispatched.
+pub fn submit_and_verify(
+    port: &mut SubmitPort<'_>,
+    session: &str,
+    pane_index: usize,
+    text: &str,
+    settle_delay: Duration,
+    profile: &CompiledPromptProfile,
+) -> Result<SubmitResult, PawError> {
     let [body, submit] = nudge_keystrokes(text);
-    deps.dispatcher
+    port.dispatcher
         .send_text(session, pane_index, &body)
         .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
-    deps.clock.sleep(settle_delay);
-    deps.dispatcher
+    port.clock.sleep(settle_delay);
+    if let Some(reason) = guard_stops(port, session, pane_index) {
+        return Ok(SubmitResult::Aborted(reason));
+    }
+    port.dispatcher
         .send_key(session, pane_index, &submit)
         .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
-    deps.clock.sleep(settle_delay);
+    port.clock.sleep(settle_delay);
 
-    let verify = deps.capturer.capture(session, pane_index);
+    let verify = port.capturer.capture(session, pane_index);
     if decide::decide_recovery_step(&verify, text, 0, profile) == decide::RecoveryStep::Delivered {
-        return Ok(NudgeOutcome::Delivered);
+        return Ok(SubmitResult::Delivered);
     }
-    recover_stale_input(deps, target, text, settle_delay)
+    recover_input_line(port, session, pane_index, text, settle_delay, profile)
+}
+
+/// The caller holds the pane's [`PaneClaim`] and has seen the text still on
+/// the line, so `C-u` only clears our own input.
+fn recover_input_line(
+    port: &mut SubmitPort<'_>,
+    session: &str,
+    pane_index: usize,
+    text: &str,
+    settle_delay: Duration,
+    profile: &CompiledPromptProfile,
+) -> Result<SubmitResult, PawError> {
+    let mut attempts: u8 = 0;
+    loop {
+        if let Some(reason) = guard_stops(port, session, pane_index) {
+            return Ok(SubmitResult::Aborted(reason));
+        }
+        port.dispatcher
+            .send_key(session, pane_index, "C-u")
+            .map_err(|e| PawError::TmuxError(format!("send-keys C-u failed: {e}")))?;
+        port.dispatcher
+            .send_text(session, pane_index, text)
+            .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
+        port.clock.sleep(settle_delay);
+        if let Some(reason) = guard_stops(port, session, pane_index) {
+            return Ok(SubmitResult::Aborted(reason));
+        }
+        port.dispatcher
+            .send_key(session, pane_index, "Enter")
+            .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
+        port.clock.sleep(settle_delay);
+        attempts += 1;
+
+        let verify = port.capturer.capture(session, pane_index);
+        match decide::decide_recovery_step(&verify, text, attempts, profile) {
+            decide::RecoveryStep::Delivered => return Ok(SubmitResult::Delivered),
+            decide::RecoveryStep::Retry => {}
+            decide::RecoveryStep::Wedged => return Ok(SubmitResult::Wedged),
+        }
+    }
+}
+
+fn escalate_wedged(deps: &mut DriveDeps<'_>, agent_id: &str, text: &str) -> NudgeOutcome {
+    let escalation = decide::wedged_escalation(agent_id, text);
+    // Deduped per (agent_id, text), so a stuck line is reported once, not on
+    // every sweep.
+    if deps.record_wedged(escalation.clone()) {
+        deps.alerts.escalate(&escalation);
+    }
+    NudgeOutcome::Wedged
 }
 
 /// Whether a post-`Enter` capture shows `text` already submitted, judging by
@@ -2276,41 +2392,17 @@ fn recover_stale_input(
         profile,
         ..
     } = *target;
-    let mut attempts: u8 = 0;
-    loop {
-        // Clear the stale line a prior step (this function's own earlier
-        // iteration, or the caller's initial send/`Enter`) put there — never
-        // agent-authored input another approver is mid-way through, since
-        // the caller holds the pane's exclusive claim throughout.
-        deps.dispatcher
-            .send_key(session, pane_index, "C-u")
-            .map_err(|e| PawError::TmuxError(format!("send-keys C-u failed: {e}")))?;
-        deps.dispatcher
-            .send_text(session, pane_index, text)
-            .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
-        deps.clock.sleep(settle_delay);
-        deps.dispatcher
-            .send_key(session, pane_index, "Enter")
-            .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
-        deps.clock.sleep(settle_delay);
-        attempts += 1;
-
-        let verify = deps.capturer.capture(session, pane_index);
-        match decide::decide_recovery_step(&verify, text, attempts, profile) {
-            decide::RecoveryStep::Delivered => return Ok(NudgeOutcome::Delivered),
-            decide::RecoveryStep::Retry => {}
-            decide::RecoveryStep::Wedged => break,
-        }
+    let mut port = SubmitPort {
+        capturer: deps.capturer,
+        dispatcher: &mut *deps.dispatcher,
+        clock: deps.clock,
+        guard: None,
+    };
+    match recover_input_line(&mut port, session, pane_index, text, settle_delay, profile)? {
+        SubmitResult::Delivered => Ok(NudgeOutcome::Delivered),
+        SubmitResult::Wedged => Ok(escalate_wedged(deps, agent_id, text)),
+        SubmitResult::Aborted(_) => Ok(NudgeOutcome::Skipped), // no guard, never aborts
     }
-
-    let escalation = decide::wedged_escalation(agent_id, text);
-    // Escalate to the broker only the first time this exact line wedges —
-    // deduped per `(agent_id, command)` — so a persistently stuck line is
-    // reported once, not every ~15s sweep.
-    if deps.record_wedged(escalation.clone()) {
-        deps.alerts.escalate(&escalation);
-    }
-    Ok(NudgeOutcome::Wedged)
 }
 
 /// The input box is recognised via [`is_idle_input_box_line`] — either the
@@ -2365,14 +2457,14 @@ fn input_box_rows(capture: &str, profile: &CompiledPromptProfile) -> Option<Vec<
 /// Extracts the text sitting in a pane's input box as a single
 /// whitespace-joined string — the sigil row plus any continuation rows, in
 /// display order — or `None` when [`input_box_rows`] finds no box.
-fn input_box_text(capture: &str, profile: &CompiledPromptProfile) -> Option<String> {
+pub(crate) fn input_box_text(capture: &str, profile: &CompiledPromptProfile) -> Option<String> {
     Some(input_box_rows(capture, profile)?.join(" "))
 }
 
 /// Whether `capture`'s input box shows a paste-buffer placeholder — e.g.
 /// `Pasted text #1` — matching `profile`'s `paste_buffer_pattern`, rather
 /// than text that can be re-typed verbatim.
-fn input_box_shows_placeholder(capture: &str, profile: &CompiledPromptProfile) -> bool {
+pub(crate) fn input_box_shows_placeholder(capture: &str, profile: &CompiledPromptProfile) -> bool {
     input_box_text(capture, profile)
         .is_some_and(|text| profile.paste_buffer_regex().is_match(&text))
 }
@@ -2725,7 +2817,7 @@ impl MessageObserver for HttpLogObserver {
 }
 
 /// Production [`Clock`] backed by the real wall clock.
-struct SystemClock;
+pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -4495,6 +4587,196 @@ mod tests {
     #[test]
     fn input_box_rows_is_none_for_an_unrecognised_shape() {
         assert_eq!(input_box_rows("standing by...\n$ "), None);
+    }
+
+    /// Long enough that a paste-aware CLI renders it as a placeholder.
+    fn four_hundred_char_message() -> String {
+        "please re-read the verification feedback and fix the failing gate ".repeat(7)[..400]
+            .to_string()
+    }
+
+    fn empty_input_box() -> String {
+        "╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n  ? for shortcuts".to_string()
+    }
+
+    #[test]
+    fn a_raw_send_of_a_long_message_leaves_a_paste_placeholder_unsubmitted() {
+        use crate::terminal::fake::FakeBackend;
+        let mut fake = FakeBackend::new();
+        let surface = fake.surface_at("paw-x", 2);
+        fake.script_screens(
+            &surface,
+            &[Some(&idle_input_box("[Pasted text #1 +3 lines]"))],
+        );
+        let message = four_hundred_char_message();
+
+        KeyDispatcher::send_text(&mut fake, "paw-x", 2, &message).unwrap();
+        KeyDispatcher::send_key(&mut fake, "paw-x", 2, "Enter").unwrap();
+
+        let after = PaneCapture::capture(&fake, "paw-x", 2);
+        assert!(
+            input_box_shows_placeholder(&after),
+            "the message is still sitting in the paste buffer: {after}"
+        );
+        assert_ne!(
+            decide::decide_recovery_step(
+                &after,
+                &message,
+                0,
+                crate::config::default_compiled_prompt_profile()
+            ),
+            decide::RecoveryStep::Delivered,
+            "a raw send is not a delivered message"
+        );
+    }
+
+    /// The actuator recovers the same placeholder: it re-types and submits,
+    /// then sees the input box empty and reports the message delivered.
+    #[test]
+    fn submit_and_verify_recovers_a_paste_placeholder_and_reports_delivered() {
+        use crate::terminal::Key;
+        use crate::terminal::fake::{FakeBackend, Operation};
+        let fake = FakeBackend::new();
+        let surface = fake.surface_at("paw-x", 2);
+        fake.script_screens(
+            &surface,
+            &[
+                Some(&idle_input_box("[Pasted text #1 +3 lines]")),
+                Some(&empty_input_box()),
+            ],
+        );
+        let message = four_hundred_char_message();
+        let clock = FakeClock::new();
+        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let mut port = SubmitPort {
+            capturer: &fake,
+            dispatcher: &mut dispatcher,
+            clock: &clock,
+            guard: None,
+        };
+        let result = submit_and_verify(
+            &mut port,
+            "paw-x",
+            2,
+            &message,
+            Duration::from_millis(250),
+            crate::config::default_compiled_prompt_profile(),
+        )
+        .unwrap();
+        assert_eq!(result, SubmitResult::Delivered);
+        let keystrokes: Vec<Operation> = fake
+            .operations_on(&surface)
+            .into_iter()
+            .filter(Operation::is_keystroke)
+            .collect();
+        assert_eq!(
+            keystrokes,
+            vec![
+                Operation::SendText {
+                    surface: surface.clone(),
+                    text: message.clone()
+                },
+                Operation::SendKey {
+                    surface: surface.clone(),
+                    key: Key::Enter
+                },
+                Operation::SendKey {
+                    surface: surface.clone(),
+                    key: Key::ClearLine
+                },
+                Operation::SendText {
+                    surface: surface.clone(),
+                    text: message.clone()
+                },
+                Operation::SendKey {
+                    surface,
+                    key: Key::Enter
+                },
+            ],
+            "text, a separate Enter, then one clear + re-type + Enter"
+        );
+    }
+
+    /// A line still unsubmitted after every bounded attempt is reported
+    /// wedged, and nothing is escalated by the actuator itself.
+    #[test]
+    fn submit_and_verify_reports_wedged_after_the_bounded_attempts() {
+        use crate::terminal::fake::FakeBackend;
+        let fake = FakeBackend::new();
+        let surface = fake.surface_at("paw-x", 2);
+        fake.script_screens(
+            &surface,
+            &[Some(&idle_input_box("[Pasted text #1 +3 lines]"))],
+        );
+        let clock = FakeClock::new();
+        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let mut port = SubmitPort {
+            capturer: &fake,
+            dispatcher: &mut dispatcher,
+            clock: &clock,
+            guard: None,
+        };
+        let result = submit_and_verify(
+            &mut port,
+            "paw-x",
+            2,
+            &four_hundred_char_message(),
+            Duration::from_millis(250),
+            crate::config::default_compiled_prompt_profile(),
+        )
+        .unwrap();
+        assert_eq!(result, SubmitResult::Wedged);
+    }
+
+    /// A guard re-checks a fresh capture before every `Enter` and `C-u`: a
+    /// prompt that appears after the first `Enter` stops the retry before
+    /// its `C-u`, so no further key lands on the prompt.
+    #[test]
+    fn a_guard_stops_the_sequence_before_the_next_key() {
+        use crate::terminal::fake::{FakeBackend, Operation};
+        let fake = FakeBackend::new();
+        let surface = fake.surface_at("paw-x", 2);
+        let placeholder = idle_input_box("[Pasted text #1 +3 lines]");
+        fake.script_screens(
+            &surface,
+            &[
+                Some(&placeholder),                                 // guard before the first Enter
+                Some(&placeholder),                                 // verify: still present
+                Some("Do you want to proceed?\n❯ 1. Yes\n  2. No"), // guard before C-u
+            ],
+        );
+        let clock = FakeClock::new();
+        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let guard = |capture: &str| {
+            capture
+                .contains("Do you want to proceed?")
+                .then(|| "permission prompt showing".to_string())
+        };
+        let mut port = SubmitPort {
+            capturer: &fake,
+            dispatcher: &mut dispatcher,
+            clock: &clock,
+            guard: Some(&guard),
+        };
+        let result = submit_and_verify(
+            &mut port,
+            "paw-x",
+            2,
+            "please continue",
+            Duration::from_millis(250),
+            crate::config::default_compiled_prompt_profile(),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            SubmitResult::Aborted("permission prompt showing".to_string())
+        );
+        let keys = fake
+            .operations_on(&surface)
+            .into_iter()
+            .filter(Operation::is_keystroke)
+            .count();
+        assert_eq!(keys, 2, "only the text and the first Enter went out");
     }
 
     // --- idle pane with buffered input (D) ----------------------------------

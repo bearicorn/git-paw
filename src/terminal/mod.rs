@@ -318,6 +318,13 @@ pub trait TerminalBackend {
     /// mistake "could not look" for the strongest evidence of idleness.
     fn capture_tail(&self, surface: &SurfaceId) -> Option<String>;
 
+    /// [`Self::capture_tail`] with colour and style escapes kept, so a caller
+    /// can tell dim placeholder text from typed text. A backend that cannot
+    /// keep them returns the plain screen.
+    fn capture_styled(&self, surface: &SurfaceId) -> Option<String> {
+        self.capture_tail(surface)
+    }
+
     /// The name of the process in a surface's foreground, or `None` when it
     /// could not be read.
     ///

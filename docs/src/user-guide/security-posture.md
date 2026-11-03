@@ -43,8 +43,8 @@ option 1 that would grant a durable "don't ask again" permission.
 session holds only the dashboard and the coding agents, each confined to its own
 worktree; the orchestrator runs in your own agent session, under the permission
 mode you chose for it, and git-paw launches it with no flags. Every git-paw
-keystroke sender — `sweep.sh approve`, and the drive loop's nudges, stale-input
-recovery and buffered-input submits — follows one role-based rule: keystrokes
+keystroke sender — `sweep.sh approve`, `sweep.sh tell`, and the drive loop's
+nudges, stale-input recovery and buffered-input submits — follows one role-based rule: keystrokes
 reach only a pane resolved as a coding agent (by the session's discovery roster
 for the helper, by the recorded layout and the pane's owning worktree for the
 loop). The dashboard and any pane no agent worktree owns are refused, whatever
@@ -157,8 +157,18 @@ relative path and fixed subcommand, from a compiled table. Nothing is derived
 from a command argument, your configuration or your repository content. No
 entry names `curl`, an interpreter, an absolute path or a directory wildcard.
 The keystroke-sending and verdict-publishing subcommands are deliberately
-excluded, and `sweep.sh approve` is pinned to an **ask** rule so it always
-reaches a human. The twelfth entry, `sweep.sh events`, is a pure read of the
+excluded, and `sweep.sh approve` and `sweep.sh tell` (which types a message
+into another agent's input) are pinned to **ask** rules so each always
+reaches a human. `sweep.sh tell` also refuses, sending nothing, while the
+target shows a live permission prompt or a selection menu and while another
+sender holds the pane, and it re-reads the pane before every key it sends. It
+also refuses when run from a linked worktree; that is a guard against a
+coding agent steering a peer by mistake, **not a security boundary** — the
+check is on the working directory, and anything able to run a command in the
+main checkout can run `git paw __send` there. A broad hand-written rule such
+as `Bash(.git-paw/scripts/sweep.sh *)` would let `tell` run without the
+prompt where the `ask` rule is missing; `git paw doctor` reports it as grant
+residue. The twelfth entry, `sweep.sh events`, is a pure read of the
 broker's log and status — no keystroke, no verdict. See the full table in
 [Per-CLI Setup](cli-setup.md).
 

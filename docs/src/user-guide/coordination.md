@@ -997,8 +997,10 @@ blocked indefinitely.
 
 The supervisor skill therefore instructs supervisors (both human and LLM) to
 **both** publish `agent.answer` (the non-error reply shape — `agent.feedback`
-stays reserved for corrective errors) **and** send the answer text to the
-asking agent's tmux pane via `tmux send-keys`. The MCP publish tools include
+stays reserved for corrective errors) **and** type the answer text into the
+asking agent's input with `sweep.sh tell`, which verifies it was submitted
+(see [Sending a message to a worker](supervisor.md#sending-a-message-to-a-worker--sweepsh-tell)).
+The MCP publish tools include
 no inbox read, so the dual write applies to agents booted with the
 [MCP tool form](#mcp-tool-form) too.
 

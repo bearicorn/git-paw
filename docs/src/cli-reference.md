@@ -919,3 +919,6 @@ git-paw also has hidden subcommands that it runs itself; they are not listed in
   broker.
 - `__prompt-profile` — prints one resolved prompt-shape profile field for the
   bundled `sweep.sh` helper.
+- `__send --agent <id>` — the backend of `sweep.sh tell`: reads a message on
+  stdin, types it into that coding agent with verified submission, prints
+  `delivered`, `wedged` or `refused: <reason>` and exits `0`, `2` or `3`.

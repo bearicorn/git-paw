@@ -147,6 +147,8 @@ pub const SWEEP_GRANTED: &[&str] = &[
 /// worker act with supervisor authority without a prompt:
 ///
 /// - `approve` presses keys in another pane;
+/// - `tell` types free text into another agent's input, so a granted `tell`
+///   would be a prompt-injection relay from one agent into a peer;
 /// - `verified` and `feedback-gate` publish supervisor verdicts, so a worker
 ///   could forge its own verification;
 /// - `conflict-ack` publishes an `agent.feedback` into two *other* agents'
@@ -159,6 +161,7 @@ pub const SWEEP_GRANTED: &[&str] = &[
 ///   dispatch guard keeps passing on either side of that merge.
 pub const SWEEP_NEVER_GRANTED: &[&str] = &[
     "approve",
+    "tell",
     "verified",
     "feedback-gate",
     "conflict-ack",
@@ -167,13 +170,14 @@ pub const SWEEP_NEVER_GRANTED: &[&str] = &[
     "classify",
 ];
 
-/// The `sweep.sh` subcommand that is pinned to the CLI's "always ask" rules.
+/// The `sweep.sh` subcommands that are pinned to the CLI's "always ask" rules.
 ///
-/// It sends keystrokes to another pane. An ask rule wins over any matching
-/// allow rule, including a broader `sweep.sh *` grant a user may already have,
-/// so pinning it here means `approve` always reaches a human (gate F4
-/// confirmed this in every permission mode tested).
-pub const SWEEP_ASK_SUBCOMMAND: &str = "approve";
+/// Both send keystrokes to another pane: `approve` answers a prompt and
+/// `tell` types a message. An ask rule wins over any matching allow rule,
+/// including a broader `sweep.sh *` grant a user may already have, so pinning
+/// them here means each always reaches a human (gate F4 confirmed this in
+/// every permission mode tested).
+pub const SWEEP_ASK_SUBCOMMANDS: &[&str] = &["approve", "tell"];
 
 /// A rule the allowlist item writes to protect the helpers it grants
 /// (design D6).
@@ -335,13 +339,13 @@ pub fn planned_allow_entries() -> Vec<String> {
 }
 
 /// Returns the `permissions.ask` entries the allowlist item plans: the pinned
-/// keystroke subcommand, then the protection rules that prompt.
+/// keystroke subcommands, then the protection rules that prompt.
 #[must_use]
 pub fn planned_ask_entries() -> Vec<String> {
-    let mut entries = vec![format!(
-        "Bash({}/sweep.sh {SWEEP_ASK_SUBCOMMAND} *)",
-        HELPER_DIR
-    )];
+    let mut entries: Vec<String> = SWEEP_ASK_SUBCOMMANDS
+        .iter()
+        .map(|sub| format!("Bash({HELPER_DIR}/sweep.sh {sub} *)"))
+        .collect();
     entries.extend(
         PROTECTION_RULES
             .iter()
@@ -501,6 +505,16 @@ mod tests {
             ]
         );
         assert_eq!(planned.len(), 12, "the grant table is twelve allow entries");
+        let ask = planned_ask_entries();
+        for keystroke in [
+            "Bash(.git-paw/scripts/sweep.sh approve *)",
+            "Bash(.git-paw/scripts/sweep.sh tell *)",
+        ] {
+            assert!(
+                ask.contains(&keystroke.to_string()),
+                "{keystroke} not asked"
+            );
+        }
     }
 
     /// `cli-setup` scenario "The read-only events subcommand is granted":
@@ -527,6 +541,27 @@ mod tests {
             planned_ask_entries()
                 .contains(&"Bash(.git-paw/scripts/sweep.sh approve *)".to_string()),
             "approve must be pinned to the ask rules"
+        );
+    }
+
+    /// `cli-setup` scenario "The message-typing tell subcommand always
+    /// prompts": `tell` is pinned to ask, listed as never granted, and no
+    /// allow entry names it.
+    #[test]
+    fn the_message_typing_tell_subcommand_always_prompts() {
+        assert!(
+            planned_ask_entries().contains(&"Bash(.git-paw/scripts/sweep.sh tell *)".to_string()),
+            "tell must be pinned to the ask rules"
+        );
+        assert!(
+            SWEEP_NEVER_GRANTED.contains(&"tell"),
+            "tell must be listed as never granted"
+        );
+        assert!(
+            planned_allow_entries()
+                .iter()
+                .all(|e| !e.contains("sweep.sh tell")),
+            "no allow entry may name tell"
         );
     }
 

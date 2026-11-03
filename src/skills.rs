@@ -3068,8 +3068,11 @@ mod tests {
         );
     }
 
+    /// Spec scenario "Supervisor skill specifies the corrected recovery
+    /// action": the recovery re-sends with `sweep.sh tell`, which clears
+    /// (`C-u`), re-types and submits with `Enter`.
     #[test]
-    fn supervisor_skill_paste_buffer_recovery_uses_tmux() {
+    fn supervisor_skill_paste_buffer_recovery_uses_sweep_tell() {
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
@@ -3091,8 +3094,12 @@ mod tests {
             "paste-buffer recovery should reference a pane-capture command (sweep.sh capture or tmux capture-pane)"
         );
         assert!(
-            window.contains("tmux send-keys"),
-            "paste-buffer recovery should reference tmux send-keys for the recovery"
+            window.contains(".git-paw/scripts/sweep.sh tell"),
+            "paste-buffer recovery should re-send with sweep.sh tell"
+        );
+        assert!(
+            !window.contains("tmux send-keys -t"),
+            "paste-buffer recovery must not type with raw tmux send-keys"
         );
         assert!(
             window.contains("C-u"),
@@ -5929,12 +5936,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
-    /// drift 34 — supervisor skill instructs `tmux send-keys` alongside the
-    /// published answer, with the "agents do not poll" rationale. Since
-    /// agent-answer-variant, question replies ride `agent.answer` (feedback is
-    /// reserved for corrective errors), so the dual-write pins to that shape.
+    /// drift 34 — supervisor skill instructs typing the answer into the
+    /// agent with `sweep.sh tell` alongside the published answer, with the
+    /// "agents do not poll" rationale (spec scenario "Supervisor skill
+    /// instructs tmux-send-keys alongside agent.feedback answers").
     #[test]
-    fn supervisor_skill_documents_tmux_send_keys_alongside_answer() {
+    fn supervisor_skill_documents_sweep_tell_alongside_answer() {
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
@@ -5945,8 +5952,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             .map_or(tmpl.content.len(), |off| start + 1 + off);
         let section = &tmpl.content[start..next_heading];
         assert!(
-            section.contains("tmux send-keys"),
-            "section should contain `tmux send-keys`"
+            section.contains("sweep.sh tell"),
+            "section should contain `sweep.sh tell`"
+        );
+        assert!(
+            !section.contains("tmux send-keys -t"),
+            "section must not type the answer with raw tmux send-keys"
         );
         assert!(
             section.contains("agent.answer"),

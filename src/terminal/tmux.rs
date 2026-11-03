@@ -329,6 +329,11 @@ impl<R: CommandRunner> TerminalBackend for TmuxBackend<R> {
         String::from_utf8(out).ok()
     }
 
+    fn capture_styled(&self, surface: &SurfaceId) -> Option<String> {
+        let out = self.read(&["capture-pane", "-p", "-e", "-t", surface.token()])?;
+        String::from_utf8(out).ok()
+    }
+
     fn foreground_process(&self, surface: &SurfaceId) -> Option<String> {
         let out = self.read(&[
             "display-message",
