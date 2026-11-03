@@ -159,14 +159,19 @@ fn fallback_emits_note() {
     );
 }
 
-// Task 6.3 — send-keys delivery references the paste-buffer double-Enter
-// pattern and the never-pane-0 guard.
+// Task 6.3 — send-keys delivery references the paste-buffer pattern and the
+// never-pane-0 guard. Spec scenario "send-keys mode targets accept-edits
+// agents": the prompt is typed with `sweep.sh tell`, never raw send-keys.
 #[test]
 fn send_keys_delivery_safety() {
     let section = routing_section();
     assert!(
-        section.contains("tmux send-keys"),
-        "must use tmux send-keys"
+        section.contains("sweep.sh tell"),
+        "send-keys mode must type through sweep.sh tell"
+    );
+    assert!(
+        !section.contains("tmux send-keys -t"),
+        "send-keys mode must not type with raw tmux send-keys"
     );
     assert!(
         section.contains("paste buffer") || section.contains("pasted text"),

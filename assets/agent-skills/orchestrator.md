@@ -258,13 +258,12 @@ sender for roster purposes.
 ### Send the answer to the agent pane too
 
 When the `agent.answer` you publish replies to an asking peer's
-`agent.question`, you MUST ALSO send the answer text to that agent's pane via
-`tmux send-keys` — the text, then a SEPARATE `Enter` (never a single combined
-text+Enter, which can land the answer in a paste buffer unsubmitted):
+`agent.question`, you MUST ALSO type the answer text into that agent's input
+with `sweep.sh tell`, which sends the text, a separate `Enter`, and checks it
+was submitted (see **Typing a message into an agent** below):
 
 ```bash
-tmux send-keys -t <session>:0.<pane-index> "<answer>"
-tmux send-keys -t <session>:0.<pane-index> Enter
+.git-paw/scripts/sweep.sh tell __FILL_IN_AGENT_ID__ "__FILL_IN_ANSWER__"
 ```
 
 Rationale: **agents do not poll their inbox** while blocked at a prompt. The
@@ -275,16 +274,15 @@ text arrives in its pane. This workaround is transitional — MCP-mediated inbox
 access will let agents consume `agent.answer` directly and remove the
 dual-write step.
 
-If the answer text is long enough to trigger a paste-buffer indicator, or the
-follow-up `Enter` above did not submit it, recover the stuck line: inspect
-the pane, then clear it (`C-u`), re-send the answer text, and `Enter` again
-— a lone `Enter` / `C-m` against a stale input line is a no-op.
-See the paste-buffer indicator sub-case under **Stall detection** for the
-full indicator list and heuristic fallback.
+If `sweep.sh tell` reports `wedged` — the answer landed in a paste buffer or
+otherwise did not submit — follow the paste-buffer sub-case under
+**Stall detection** (a lone `Enter` / `C-m` against a stale input line is a
+no-op); if it reports `refused`, act on the stated reason as described under
+**Typing a message into an agent**.
 
 ### Resolve pane to agent via pane_current_path
 
-Before you `tmux capture-pane` or `tmux send-keys` to a specific agent, you
+Before you `tmux capture-pane` a specific agent's pane, you
 need the pane index for that agent. **Pane indices are NOT alphabetical by
 `agent_id`, NOT in the CLI-argument order from
 `git paw start --specs A B C`, and SHALL NOT be inferred from `git paw status`
@@ -333,36 +331,61 @@ session name yourself):
 .git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__    # one pane, tail-50
 ```
 
-Direct `tmux send-keys` is still the right tool for pushing a typed reply
-into a specific pane (the helper does not cover the per-pane send-keys
-shape):
+### Typing a message into an agent — `sweep.sh tell`
+
+Every message you type into a coding agent's input — a reply, a nudge, a
+`/tell` prompt, a paste-buffer re-send — goes through the helper, never raw
+`tmux send-keys`:
 
 ```bash
-tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_COMMAND__" Enter
+.git-paw/scripts/sweep.sh tell __FILL_IN_AGENT_ID__ "__FILL_IN_MESSAGE__"
 ```
+
+It addresses the agent by `agent_id`, not pane index, types the text, waits
+the CLI's settle delay, sends a separate `Enter`, checks the input emptied,
+and retries a bounded number of times, re-reading the pane before every key.
+With no message arguments it reads the message from stdin, which keeps it
+out of every process's arguments. A multi-line message is typed as one line.
+Run it from the repository's main working tree. It prints one line and exits
+with its status:
+
+- **`delivered`** (exit `0`) — the message shows as a submitted user turn.
+- **`wedged`** (exit `2`) — the message was typed but not confirmed
+  submitted; a note on stderr says why. Escalate to the human, or deliver it
+  with the broker feedback mode
+  (`sweep.sh feedback-gate __FILL_IN_AGENT_ID__ directive "…"`) instead.
+- **`refused: <reason>`** (exit `3`) — nothing was typed. Resolve the reason
+  first: wait out a busy pane or a mid-response agent, use the feedback mode
+  for a message over the length limit, and leave text someone else typed in
+  the input line alone. For `refused: permission prompt showing` or
+  `refused: selection menu showing`, **relay what is on screen to the
+  human** — the message must never answer it — and run `sweep.sh approve`
+  only on the human's instruction.
+- **exit `4`**, no result line — `git paw __send` failed or is missing (an
+  older git-paw). Tell the human; do not fall back to raw keystrokes.
 
 ### Driving agent panes — use the helper, never loops, never a non-agent surface
 
 Two disciplines keep pane-driving hands-off and safe:
 
 **Use `.git-paw/scripts/sweep.sh` for all pane capture, approval, and
-multi-pane sends — never an ad-hoc shell loop.** Do NOT write
+message sends — never an ad-hoc shell loop.** Do NOT write
 `for p in <panes>; do tmux send-keys -t ...:0.$p ...; done`-style inline
 loops. The `$p` expansion trips the `simple_expansion` permission gate, so
 **every iteration of the loop raises a separate approval prompt** — turning
 one sweep into N human approvals and defeating unattended operation. The
 bundled helper already does the explicit, per-pane sends (`snapshot`,
-`capture`, `approve`) with no variable expansion, so it sweeps every agent
-pane without tripping the gate. Reach for a single explicit
-`tmux send-keys -t ...:0.<index>` only to push one typed reply to one pane
-(as above) — never to iterate over panes.
+`capture`, `approve`, `tell`) with no variable expansion, so it sweeps every
+agent pane without tripping the gate. A typed message to one agent is one
+`sweep.sh tell` call (as above) — never a loop over panes.
 
 **Only ever send keystrokes to coding-agent panes — NEVER to a non-agent
 surface.** Pane 0 is the dashboard: a TUI that discards typed text, so keys
 sent there are lost. Your own terminal is not in the session at all: typing
 into it interrupts the command you are mid-way through running. `sweep.sh`
-targets agent panes by design; when you send keys directly, always pass an
-explicit agent pane index resolved from the roster and confirm it is not 0.
+targets agent panes by design: `tell` refuses any target that is not a
+coding agent in the roster, and `approve` any pane the roster does not list
+as one.
 
 In an attended session nothing approves permission prompts in the background.
 Your own sweep is how a stuck agent's prompt reaches the human — relay what you
@@ -684,20 +707,19 @@ other.
     - If the pane shows an idle prompt (no activity): the agent is likely done. Publish
       `agent.status { status: "done" }` on behalf of the agent, then proceed to Test.
     - If the pane shows the agent is thinking or waiting: prompt the agent to self-report
-      its state via `tmux send-keys`. The literal `__FILL_IN_…__` tokens below SHALL be
-      substituted before the keys are sent — leaving them unfilled produces an obvious
+      its state with `sweep.sh tell`. The literal `__FILL_IN_…__` tokens below SHALL be
+      substituted before the message is sent — leaving them unfilled produces an obvious
       broken request that the broker will reject (per the placeholder-validation rules)
       rather than a phantom agent:
       ```
-      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "You appear stalled. If you are blocked on another agent's work, run your own helper: .git-paw/scripts/broker.sh blocked __FILL_IN_WHAT_YOU_NEED__ __FILL_IN_BLOCKING_AGENT_ID__"
-      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
+      .git-paw/scripts/sweep.sh tell __FILL_IN_AGENT_ID__ "You appear stalled. If you are blocked on another agent's work, run your own helper: .git-paw/scripts/broker.sh blocked __FILL_IN_WHAT_YOU_NEED__ __FILL_IN_BLOCKING_AGENT_ID__"
       ```
     - If the agent is stuck on a permission prompt: relay it to the human, naming the agent and the pending command, and approve it (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) only once they tell you to. Sending guidance instead is always available to you.
     - **Paste-buffer recovery** — if the pane shows a paste-buffer indicator
       (the CLI has buffered long pasted content, or a directive you already
-      sent, but never submitted it), recover by clearing the stale input line
-      and re-typing — **a lone `Enter` / `C-m` is a no-op against a stale
-      input line and does NOT submit it.** This applies both in the
+      sent, but never submitted it), recover by re-sending the intended text
+      with `sweep.sh tell` — **a lone `Enter` / `C-m` is a no-op against a
+      stale input line and does NOT submit it.** This applies both in the
       stall-detection loop AND proactively at launch (step 1.5 above) —
       coding-agent boot prompts are often long enough on paste-aware CLIs to
       land in a paste buffer immediately, so don't wait for the 5-minute
@@ -710,20 +732,20 @@ other.
         input area without a follow-up response (no rendered LLM output, no
         in-progress thinking indicator), attempt the recovery even if the
         literal indicator pattern is unfamiliar
-      Recovery action — clear (`C-u`), re-type the intended text (the boot
-      prompt at launch, or whatever directive you last sent that pane), then
-      submit with a SEPARATE `Enter`:
+      Recovery action — inspect the pane, then re-send the intended text (the
+      boot prompt at launch, or whatever directive you last sent that agent)
+      with `sweep.sh tell`, which types it, sends a SEPARATE `Enter`, and
+      clears (`C-u`) and re-types its own text until the input empties:
       ```
       .git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__   # inspect first — confirm the indicator and note the intended text
-      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ C-u
-      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_INTENDED_TEXT__"
-      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
+      .git-paw/scripts/sweep.sh tell __FILL_IN_AGENT_ID__ "__FILL_IN_INTENDED_TEXT__"
       ```
-      The clear-and-retype recovery is **safe-by-default**: on a
-      non-paste-aware CLI or a misclassified pane it either reproduces the
-      intended input or leaves a benign empty prompt — never worse than the
-      stuck state you started from. No harm in trying when the heuristic
-      suggests a paste-buffer stall.
+      The re-send recovery is **safe-by-default**: on a non-paste-aware CLI
+      or a misclassified pane it either reproduces the intended input or is
+      refused, typing nothing — never worse than the stuck state you started
+      from. `sweep.sh tell` refuses an input line holding text that is not a
+      paste placeholder rather than typing over it; leave such a line to the
+      human. On `wedged`, escalate or fall back to the broker feedback mode.
 3.5 **Escalate ambiguity** — if a spec is unclear, if two agents disagree, or if a regression cannot be attributed to a single agent, publish `agent.question` with your specific question, then stop and wait for human guidance.
 
 3.6 **Commit-cadence nudge** — on each sweep, check each agent's uncommitted
@@ -1313,7 +1335,7 @@ Map each kind of user input to the existing mechanism — do not invent new chan
 
 2. **Directive** ("ask feat-auth to use bcrypt", "tell feat-api to skip the migration",
    "have feat-errors retry that test"). Publish `agent.feedback` to the named agent AND
-   confirm to the user conversationally what you did. Use `tmux send-keys` only for
+   confirm to the user conversationally what you did. Use `sweep.sh tell` only for
    low-stakes nudges that don't need a permanent record on the broker.
    ```bash
    .git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ directive "__FILL_IN_USER_DIRECTIVE__"
@@ -1330,7 +1352,7 @@ Map each kind of user input to the existing mechanism — do not invent new chan
    ```
 
 The mechanisms (`sweep.sh status` / `inbox` reads, `sweep.sh capture`, `agent.feedback`,
-`tmux send-keys`, `agent.question`) are unchanged. The addition is *when to use which* in response to user
+`sweep.sh tell`, `agent.question`) are unchanged. The addition is *when to use which* in response to user
 input.
 
 ### Routing through the supervisor — `/agents` and `/tell`
@@ -1396,7 +1418,7 @@ multi-line block). Then:
    and stop.
 2. **Choose the delivery mode** by this precedence (design D3):
    - `[supervisor.tell] mode = "send-keys"` **and** the target's detected
-     `mode` is `accept-edits` → deliver via `tmux send-keys`;
+     `mode` is `accept-edits` → deliver via `sweep.sh tell`;
    - `[supervisor.tell] mode = "feedback"` (the default) → deliver via
      `agent.feedback`;
    - `[supervisor.tell] mode = "send-keys"` but the target's detected mode is
@@ -1411,18 +1433,18 @@ multi-line block). Then:
      ```bash
      .git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ directive "__FILL_IN_USER_PROMPT__"
      ```
-   - **send-keys mode** — inject the prompt directly into the target's pane.
-     Resolve the pane index from the inventory first and confirm it is **not
-     pane 0** (the dashboard). Send the text, then a SEPARATE `Enter` (never a
-     single combined text+Enter):
+   - **send-keys mode** — type the prompt into the target's input with the
+     helper, which addresses the agent by id (never pane 0, the dashboard),
+     sends a SEPARATE `Enter`, and verifies the prompt was submitted:
      ```bash
-     tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_USER_PROMPT__"
-     tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
+     .git-paw/scripts/sweep.sh tell __FILL_IN_AGENT_ID__ "__FILL_IN_USER_PROMPT__"
      ```
-     If the prompt is long enough to land in a paste buffer (`Pasted text
-     #N`), or the follow-up `Enter` did not submit it, follow the
-     paste-buffer recovery (`C-u`, re-type, `Enter`) under **Stall
-     detection** — a lone `Enter` is a no-op against a stale input line.
+     On `wedged` (for example the prompt stuck in a paste buffer, `Pasted
+     text #N`), follow the paste-buffer recovery under **Stall detection** —
+     a lone `Enter` is a no-op against a stale input line — or fall back to
+     the feedback mode. On `refused`, act on the reason as described under
+     **Typing a message into an agent**; a live permission prompt is relayed
+     to the human, never answered by the prompt.
 4. **Acknowledge** in your session what you did — which agent, which delivery
    mode, and a short echo of the prompt.
 5. **Record the routing decision** (when `[supervisor] learnings = true`).

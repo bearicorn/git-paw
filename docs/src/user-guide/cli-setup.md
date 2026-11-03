@@ -57,7 +57,7 @@ differently configured repositories plan byte-identical entries.
 |---|---|---|
 | `broker.sh` | every subcommand | — |
 | `docs-fetch.sh` | `find` only | `get` |
-| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn`, `events` | `approve`, `verified`, `feedback-gate`, `conflict-ack`, `answer`, `advanced-main`, `classify` |
+| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn`, `events` | `approve`, `tell`, `verified`, `feedback-gate`, `conflict-ack`, `answer`, `advanced-main`, `classify` |
 | `_paw_common.sh` | — (it is sourced, never invoked) | — |
 
 That is **twelve** allow entries in total.
@@ -80,6 +80,13 @@ What is withheld, and why:
 - **`sweep.sh approve`** presses keys in another pane. It also gets an
   explicit **ask** rule, so it prompts even if some broader rule of your own
   would otherwise allow it.
+- **`sweep.sh tell`** types a message into another agent's input. A
+  pre-approved `tell` would let one agent relay text into a peer's pane
+  without anyone seeing it, so it is never granted and gets its own **ask**
+  rule, `Bash(.git-paw/scripts/sweep.sh tell *)`, like `approve`. A broad
+  allow rule you wrote yourself, such as `Bash(.git-paw/scripts/sweep.sh *)`,
+  covers `tell` too and lets it run silently wherever that `ask` rule is
+  missing; `git paw doctor` reports such a rule as grant residue.
 - **`sweep.sh verified` and `feedback-gate`** publish supervisor verdicts, and
   **`conflict-ack`** writes feedback into other agents' inboxes. The target
   file reaches worker sessions as well as the supervisor's, so granting these
@@ -138,8 +145,9 @@ supported" and write nothing.
 ### Re-running after an upgrade
 
 **git-paw never rewrites recorded grants itself.** When a release adds an
-entry to the grant table — `sweep.sh events` is the v0.18 example — a file you
-applied under an earlier version keeps exactly the entries that version wrote.
+entry to the grant table — `sweep.sh events` is the v0.18 example, and the
+`sweep.sh tell` ask rule a later one — a file you applied under an earlier
+version keeps exactly the entries that version wrote.
 Nothing updates it in the background.
 
 `git paw doctor` notices and reports the applied setup as **out of date**,

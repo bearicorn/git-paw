@@ -41,7 +41,10 @@ claim and no check that a permission prompt is not showing — where typed text 
 ### Modified Capabilities
 
 - `broker-agent-helper`: new `sweep.sh tell` verb and its hidden `git paw __send` backend.
-- `supervisor-skill-discipline`: typed delivery to an agent goes through `sweep.sh tell`.
+- `supervisor-skill-discipline`: typed delivery to an agent goes through `sweep.sh tell`;
+  *Delivery mode selection* names `sweep.sh tell` for `send-keys` mode.
+- `skill-agent`: *Embedded supervisor skill* (the answer dual-write) and *Supervisor skill —
+  paste-buffer recovery in stall detection* name `sweep.sh tell` instead of raw `tmux send-keys`.
 - `cli-setup`: *Allowlist entries are path-scoped to git-paw's helper scripts* — `sweep.sh tell` is
   listed as never granted and gets an `ask` rule. The delta starts from v0.18.0
   `agent-hook-and-tmux-guards`'s text (which builds on `orchestrator-read-surface`'s, which starts
@@ -50,7 +53,8 @@ claim and no check that a permission prompt is not showing — where typed text 
 ## Impact
 
 - **Code:** `src/supervisor/drive.rs` (factor the nudge actuator out as a reusable function over the
-  terminal port, unchanged behaviour), new hidden subcommand in `src/cli.rs` + its handler,
+  terminal port, unchanged behaviour), new hidden subcommand in `src/cli.rs` + its handler
+(`src/commands/send.rs`, dispatched inline from `src/main.rs`),
   `assets/scripts/sweep.sh` (+ tracked `.git-paw/scripts/sweep.sh`), the bundled supervisor skill,
   `src/cli_setup/facts.rs` (grant table: `tell` never granted, `ask` rule).
 - **CLI:** one hidden subcommand (not in `git paw --help`); no public surface change.
@@ -66,8 +70,7 @@ claim and no check that a permission prompt is not showing — where typed text 
   recovery this verb reuses), `classifier-retirement` (the per-pane claim now guards explicit
   approvals and the loop's nudges and submits; the skill relays prompts) and `cli-setup-consent`
   (the grant table), v0.18.0 `terminal-backend-seam` (surface addressing), `orchestrator-skill-export`
-  (the skill it edits; that change also modifies the `/tell` requirements, so this change adds a
-  requirement rather than modifying them), `orchestrator-read-surface` and
+  (the skill it edits), `orchestrator-read-surface` and
   `agent-hook-and-tmux-guards` (their MODIFIED grant-table requirement, adding `sweep.sh events` and
   then the full never-granted `sweep.sh` list, is the base of this change's `cli-setup` delta and
   must archive first; re-diff against its archived text before archiving this change), and this cycle's

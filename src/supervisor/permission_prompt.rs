@@ -74,7 +74,7 @@ pub fn extract_path_from_file_prompt(
 ///
 /// A bare `>` is deliberately NOT stripped: it is significant to the
 /// `> /dev/` danger pattern when it appears mid-line as a redirect.
-fn strip_decoration(line: &str) -> &str {
+pub(crate) fn strip_decoration(line: &str) -> &str {
     line.trim_start_matches(|c: char| {
         c.is_whitespace()
             || matches!(

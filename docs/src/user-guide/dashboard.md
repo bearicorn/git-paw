@@ -264,6 +264,6 @@ Because the dashboard is cheap to relaunch (`git paw start` re-attaches to the s
 
 Earlier dashboard versions included a "Questions" panel and a "Reply to" input field for human-typed answers to `agent.question` events. The panel was removed in v0.5.0; the dashboard has no inbox. Questions and replies go through the orchestrator — your own agent session, outside tmux — and its helpers, not through the dashboard.
 
-`agent.question` messages still flow through the broker. The orchestrator reads incoming questions from the broker (through `sweep.sh`, the broker helper or the MCP server) and replies with `sweep.sh answer` (an `agent.answer` on the broker) plus `tmux send-keys` to the asking agent's pane. See the [Orchestrator mode](../quick-start-orchestrator.md) chapter and the exported orchestrator skill (`.git-paw/skills/orchestrator/SKILL.md`) for the reply flow.
+`agent.question` messages still flow through the broker. The orchestrator reads incoming questions from the broker (through `sweep.sh`, the broker helper or the MCP server) and replies with `sweep.sh answer` (an `agent.answer` on the broker) plus [`sweep.sh tell`](supervisor.md#sending-a-message-to-a-worker--sweepsh-tell) into the asking agent's input. See the [Orchestrator mode](../quick-start-orchestrator.md) chapter and the exported orchestrator skill (`.git-paw/skills/orchestrator/SKILL.md`) for the reply flow.
 
 See the [v0.5.0 changelog](../changelog.md) for the removal note.

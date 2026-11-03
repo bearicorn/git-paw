@@ -1067,6 +1067,38 @@ mod tests {
         );
     }
 
+    /// `verified-agent-send` upgrade: a setup applied before `sweep.sh tell`
+    /// existed lacks its ask rule, so doctor reports the setup out of date
+    /// and names `--undo` then `--allowlist`.
+    #[test]
+    fn a_record_without_the_tell_ask_rule_is_out_of_date_until_reapplied() {
+        const TELL: &str = "Bash(.git-paw/scripts/sweep.sh tell *)";
+
+        let mut probe = applied_probe();
+        probe.entries.retain(|e| e.value != TELL);
+        let content = probe.files.get(&target()).cloned().flatten().unwrap();
+        let mut root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let ask = root["permissions"]["ask"].as_array_mut().unwrap();
+        assert!(
+            ask.iter().any(|v| v.as_str() == Some(TELL)),
+            "fixture holds tell"
+        );
+        ask.retain(|v| v.as_str() != Some(TELL));
+        probe.files.insert(target(), Some(root.to_string()));
+
+        let c = only(&check_cli_setup(&probe), "claude setup");
+        assert_eq!(c.status, CheckStatus::Warn, "{}", c.detail);
+        assert!(c.detail.contains("out of date"), "{}", c.detail);
+        let remedy = c.remedy.clone().unwrap_or_default();
+        assert!(remedy.contains("--undo"), "{remedy}");
+        assert!(remedy.contains("--allowlist"), "{remedy}");
+
+        assert_eq!(
+            only(&check_cli_setup(&applied_probe()), "claude setup").status,
+            CheckStatus::Ok
+        );
+    }
+
     #[test]
     fn an_entry_the_user_already_had_counts_as_applied() {
         let mut probe = applied_probe();
@@ -1490,6 +1522,22 @@ mod tests {
             // standing in for it: this covers `approve` without naming it.
             "Bash(.git-paw/scripts/sweep.sh ap*)",
             "Bash(.git-paw/scripts/sweep.sh c*)",
+        ] {
+            assert!(
+                withheld_grant(rule).is_some(),
+                "{rule} should be reported as residue"
+            );
+        }
+    }
+
+    /// A hand-written rule that would let `sweep.sh tell` run without a
+    /// prompt — named, wildcarded or completed — is reported as residue.
+    #[test]
+    fn a_rule_that_would_allow_tell_is_flagged() {
+        for rule in [
+            "Bash(.git-paw/scripts/sweep.sh tell *)",
+            "Bash(.git-paw/scripts/sweep.sh *)",
+            "Bash(.git-paw/scripts/sweep.sh te*)",
         ] {
             assert!(
                 withheld_grant(rule).is_some(),

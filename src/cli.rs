@@ -719,6 +719,34 @@ pub enum Command {
         field: String,
     },
 
+    /// Internal: type a message into a coding agent's input and verify it submitted
+    #[command(
+        hide = true,
+        name = "__send",
+        about = "Internal: type a message into a coding agent and verify it submitted",
+        long_about = "Internal subcommand used by the bundled sweep.sh helper's `tell` verb. \
+                      Reads the message from STDIN (never from its arguments), then types it \
+                      into the named coding agent's input with the drive loop's \
+                      submit-and-verify actuator and that agent's CLI profile: the text, the \
+                      CLI's settle delay, a separate Enter, a check that the input emptied, \
+                      and a bounded clear + re-type + Enter recovery.\n\n\
+                      Prints one line and exits with its status: `delivered` (0), `wedged` \
+                      (2) or `refused: <reason>` (3). Refuses, sending nothing, from a linked \
+                      worktree, for a target that is not a coding agent in the session \
+                      roster, while another sender holds the pane's claim, while the pane \
+                      shows a live permission prompt, and for a message over the injected-text \
+                      limit. Not intended for direct invocation."
+    )]
+    Send {
+        /// Agent id of the coding agent to type into.
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Agent id of the coding agent to type into"
+        )]
+        agent: String,
+    },
+
     /// View captured session logs
     #[command(
         about = "View captured session logs",
@@ -1899,6 +1927,7 @@ mod tests {
             "__broker",
             "__authority",
             "__prompt-profile",
+            "__send",
             "selftest",
         ] {
             assert!(
@@ -1930,6 +1959,7 @@ mod tests {
             ],
             vec!["__prompt-profile", "--field", "approval_markers"],
             vec!["__authority"],
+            vec!["__send", "--agent", "feat-x"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("git-paw").chain(args.iter().copied())).is_ok(),

@@ -847,8 +847,8 @@ coding agent's own row.)
 
 ## Resolve Pane to Agent via `pane_current_path`
 
-Before the supervisor `tmux capture-pane`s or `tmux send-keys`s a specific
-agent, it needs the pane index for that agent. The bundled supervisor skill
+Before the supervisor `tmux capture-pane`s a specific agent's pane, it
+needs the pane index for that agent. The bundled supervisor skill
 is explicit that **pane indices are NOT alphabetical by `agent_id`, NOT in
 the CLI-argument order from `git paw start --specs A B C`, and SHALL NOT be
 inferred from `git paw status` output or the dashboard's row order** (both
@@ -904,9 +904,9 @@ session runs without the human approving the supervisor's every command:
   Ad-hoc `for p in <panes>; do tmux send-keys -t ...:0.$p ...; done` loops
   trip the `simple_expansion` permission gate on each iteration, so one
   sweep becomes one approval prompt per pane. The helper does the explicit
-  per-pane sends with no variable expansion. A single explicit
-  `tmux send-keys -t ...:0.<index>` is reserved for pushing one typed reply
-  to one pane.
+  per-pane sends with no variable expansion. A typed message to one agent is
+  one `sweep.sh tell` call (see
+  [Sending a message to a worker](#sending-a-message-to-a-worker--sweepsh-tell)).
 - **Never send-keys to the dashboard (pane 0).** It is a TUI, not an agent;
   keys sent there land in the dashboard, not in any agent. `sweep.sh`
   targets coding-agent panes by design.
@@ -918,6 +918,65 @@ session runs without the human approving the supervisor's every command:
 The skill also nudges any agent whose uncommitted working set exceeds ~10
 files to commit its completed section, preserving per-section verification
 granularity.
+
+### Sending a message to a worker — `sweep.sh tell`
+
+Every message the orchestrator types into a coding agent — a `/tell` prompt
+in `send-keys` mode, an answer to an agent's question, a stall nudge, a
+paste-buffer re-send — goes through one helper verb:
+
+```bash
+.git-paw/scripts/sweep.sh tell feat-auth "rebase onto main before continuing"
+
+# Or pipe the message in, so it is in no process's arguments at all:
+printf '%s' "rebase onto main before continuing" | .git-paw/scripts/sweep.sh tell feat-auth
+```
+
+It passes the message on stdin to the hidden `git paw __send`, which types it
+with the same submit-and-verify logic the drive loop uses for its own nudges,
+with that agent's CLI profile: the text, the CLI's settle delay, a separate
+`Enter`, a check that the input emptied, and a bounded clear, re-type and
+`Enter` retry. Before every `Enter` and `C-u` it reads the pane again, and
+stops if a permission prompt or a selection menu has appeared. A
+paragraph-length message that a CLI first shows as a paste placeholder is
+still submitted. A multi-line message is typed as one line (whitespace runs
+become one space), and a note on stderr says so. Message arguments are visible
+in your shell history and in a process listing; the piped form keeps them out.
+Run it from the repository's main working tree. It prints one line and exits
+with its status:
+
+| Result | Exit | Meaning |
+|---|---|---|
+| `delivered` | `0` | The message shows in the pane as a submitted user turn. |
+| `wedged` | `2` | Typed but not confirmed submitted — still on the input line, stopped by a prompt or menu, or the input emptied without a new turn. A note on stderr says which. Escalate, or use the broker feedback mode. |
+| `refused: <reason>` | `3` | Nothing was typed. |
+| (no result line) | `4` | `git paw __send` failed or does not exist — for example a git-paw older than this helper. |
+
+It refuses, typing nothing, when:
+
+- it runs from a linked worktree rather than the main working tree. This
+  guards against a mistake — a coding agent typing into a peer from its own
+  worktree — and is **not a security boundary**: anything that can run a
+  command in the main checkout can run `git paw __send` there;
+- the target is not a coding agent in the session roster, or has no live
+  pane;
+- another sender (`sweep.sh approve`, or the drive loop's nudges) holds the
+  pane — `refused: pane busy`;
+- the pane shows a live permission prompt — `refused: permission prompt
+  showing` — or a selection menu (a numbered option with a cursor, or an
+  `Enter to select` footer), where an `Enter` would pick an option. Relay a
+  prompt to the human; the message must never answer it;
+- the agent is mid-response, or its input line holds typed text other than a
+  paste placeholder (a dim or grey prompt suggestion does not count);
+- the message is empty, contains a control character, or is over 600
+  characters — use the broker feedback mode for a long message.
+
+`git paw setup-cli` never grants `sweep.sh tell`, and pins it to an `ask`
+rule, so your CLI asks before every call — see
+[Per-CLI Setup](cli-setup.md). A broad rule you wrote yourself, such as
+`Bash(.git-paw/scripts/sweep.sh *)`, would let `tell` run without that prompt
+in a setup without the `ask` rule; `git paw doctor` lists such a rule as grant
+residue.
 
 ## Spec audit governance sub-step
 
@@ -1043,8 +1102,9 @@ helper falls back to refusing pane 0. The drive loop applies the same
 role-based rule: it never types into the dashboard or an unattributed pane.
 The refusal cannot be changed by a prompt profile.
 
-**One sender per pane, enforced.** Keystrokes can come from `sweep.sh approve`
-and from the drive loop's own nudge and buffered-input recovery. If two land on
+**One sender per pane, enforced.** Keystrokes can come from `sweep.sh approve`,
+from `sweep.sh tell`, and from the drive loop's own nudge and buffered-input
+recovery. If two land on
 one pane, the second falls through onto whatever appears next. So before
 sending, every sender takes that pane's **exclusive claim**: an atomic
 create-if-absent of `<repo>/.git-paw/tmp/approve-pane-<N>.claim`, held across
@@ -1410,7 +1470,7 @@ not invent new channels:
    when the user is asking *because they don't know either*.
 
 The mechanisms (`sweep.sh status` / `inbox` or the MCP reads,
-`sweep.sh capture`, `sweep.sh feedback-gate`, `tmux send-keys`,
+`sweep.sh capture`, `sweep.sh feedback-gate`, `sweep.sh tell`,
 `agent.question`) are unchanged. The addition is *when
 to use which* in response to user input.
 
@@ -1486,8 +1546,9 @@ release; smart, supervisor-decided routing is a future candidate.
   `agent.feedback` broker message and the agent consumes it on its next inbox
   poll. Safe for mixed-mode sessions: the prompt is queued and recorded, never
   raced into a running prompt.
-- **`send-keys`** — the prompt is injected directly into the target's pane
-  with `tmux send-keys`. Faster, but only safe when the target is in
+- **`send-keys`** — the prompt is typed directly into the target's input
+  with [`sweep.sh tell`](#sending-a-message-to-a-worker--sweepsh-tell), which
+  verifies it was submitted. Faster, but only safe when the target is in
   accept-edits mode. When you configure `send-keys` but the target's detected
   mode is `interactive` or `unknown`, `/tell` **falls back to `feedback`** and
   prints a note so you can investigate the mode-detection drift. Because of

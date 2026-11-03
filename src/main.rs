@@ -255,6 +255,19 @@ fn run(command: Command) -> Result<(), PawError> {
         }
         Command::Authority => cmd_authority(),
         Command::PromptProfile { cli, field } => cmd_prompt_profile(cli.as_deref(), &field),
+        Command::Send { agent } => {
+            use std::io::Read as _;
+            let cwd = std::env::current_dir().map_err(|e| {
+                PawError::SessionError(format!("cannot read current directory: {e}"))
+            })?;
+            let mut message = String::new();
+            std::io::stdin().read_to_string(&mut message)?;
+            let code = commands::send::send(&cwd, &agent, &message, &mut CliOutput)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
             branch,
