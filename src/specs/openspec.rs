@@ -12,7 +12,10 @@ use rmcp::schemars;
 use serde::Serialize;
 
 use crate::error::PawError;
-use crate::specs::{SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, read_named_artifact};
+use crate::specs::{
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
+    read_named_artifact,
+};
 use crate::task_prompts::TaskPromptTemplates;
 
 const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/openspec.md");
@@ -30,6 +33,22 @@ pub struct OpenSpecBackend;
 impl SpecBackend for OpenSpecBackend {
     fn kind(&self) -> SpecBackendKind {
         SpecBackendKind::OpenSpec
+    }
+
+    fn default_dir(&self) -> &'static str {
+        "specs"
+    }
+
+    fn parse_tasks(&self, content: &str) -> Vec<SpecTask> {
+        parse_checkbox_tasks(content)
+    }
+
+    fn constitution(&self, _specs_dir: &Path) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    fn supports_spec_authoring(&self) -> bool {
+        true
     }
 
     fn path_doctrine(&self) -> &'static str {

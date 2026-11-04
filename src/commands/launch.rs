@@ -766,7 +766,7 @@ mod tests {
     }
 
     /// Maps to `core-lang-agnostic` scenario "Markdown task prompt does not
-    /// reference the OpenSpec artifacts path".
+    /// reference the `OpenSpec` artifacts path".
     #[test]
     fn task_prompt_markdown_backend_uses_sidecar_pointer() {
         let entry = crate::specs::SpecEntry {
@@ -884,7 +884,7 @@ mod tests {
     }
 
     /// Maps to `core-lang-agnostic` scenario "No non-OpenSpec task prompt
-    /// names the OpenSpec artifacts path".
+    /// names the `OpenSpec` artifacts path".
     #[test]
     fn no_non_openspec_task_prompt_names_the_openspec_artifacts_path() {
         use crate::specs::{SpecBackendKind, SpecEntry};

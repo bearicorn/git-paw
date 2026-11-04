@@ -12,7 +12,10 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::{SpecBackend, SpecBackendKind, SpecEntry};
+use super::{
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
+    single_file_artifacts,
+};
 use crate::error::PawError;
 use crate::specs::branch_segment_slug;
 use crate::static_regex::static_regex;
@@ -44,6 +47,30 @@ impl SpecBackend for SuperpowersBackend {
 
     fn default_dir(&self) -> &'static str {
         PLANS_DIR
+    }
+
+    fn title_artifact(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn artifacts(&self, _spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact> {
+        single_file_artifacts(entry)
+    }
+
+    fn parse_tasks(&self, content: &str) -> Vec<SpecTask> {
+        parse_checkbox_tasks(content)
+    }
+
+    fn uses_opsx_workflow(&self) -> bool {
+        false
+    }
+
+    fn constitution(&self, _specs_dir: &Path) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    fn supports_spec_authoring(&self) -> bool {
+        false
     }
 
     fn path_doctrine(&self) -> &'static str {

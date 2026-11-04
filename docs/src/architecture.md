@@ -98,7 +98,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop and its one-loop-per-session binding, permission-prompt detection, the live-prompt gate and per-pane claim, keystroke dispatch, manual-decision log, branch refresh). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Four backends (`openspec`, `markdown`, `speckit`, `superpowers`); `mod.rs` holds the dispatch entry point and `resolve.rs` resolves `--specs` names. |
-| **Task prompts** | `src/task_prompts.rs` | The bundled per-backend task-prompt templates and the one exhaustive `SpecBackendKind` selector over them. Each format names a prose template and, optionally, a **workflow entry point** template — the single command line a launch submits as its own composer message once the agent's pane goes idle. The launch's `build_task_prompt` and the doctor's spec-workflow probe both read this selector, so no workflow command is written in Rust and the two cannot drift. |
+| **Task prompts** | `src/task_prompts.rs` | The task-prompt template shape, its rendering, the no-spec fallback, and `templates_for`, which reads each format's templates from its `SpecBackend`. Each format declares a prose template and, optionally, a **workflow entry point** template — the single command line a launch submits as its own composer message once the agent's pane goes idle. The launch's `build_task_prompt` and the doctor's spec-workflow probe both read the same templates, so no workflow command is written in Rust and the two cannot drift. |
 | **opsx** | `src/opsx/` | OpenSpec role-gating guard (`role_guard.rs`): run by the broker on every committed `agent.artifact`, it flags archive activity by a non-supervisor agent per `[opsx] role_gating`. Inert unless the spec engine is OpenSpec. |
 | **MCP** | `src/mcp/` | `git paw mcp`. Model Context Protocol server over stdio. Read-only tools expose coordination, governance, docs, specs, session, learnings, skills, git, and source-browsing state to MCP-aware clients; the bounded write surface is four session-scoped publish tools (a worktree publishes as its own agent, the main working tree as `supervisor`) plus, for a root session only, the session lifecycle tools and the two verdict tools, and the spec-authoring write tools for a root session of a repository that set `[mcp] allow_repo_writes`. Runs standalone (no session/broker/supervisor required; broker-backed reads degrade to empty results). Detail below. |
 | **Coordination** | `src/coordination/` | User→agent coordination helpers (inventory + target validation) backing the `/agents` and `/tell` supervisor commands. Distinct from `src/broker/` peer-to-peer (agent↔agent) coordination. Detail below. |
@@ -173,12 +173,26 @@ and never profile-sourced.
 
 | File | Purpose |
 |------|---------|
-| `src/specs/mod.rs` | Public surface (`SpecBackend` trait, `SpecEntry`) and the dispatch entry point (`scan_specs` / `scan_specs_with_override`). Picks the backend from the `--specs-format` CLI override or the `[specs] type` config — the only two sources (no filesystem auto-detection). |
+| `src/specs/mod.rs` | Public surface (`SpecBackend` trait, `SpecBackendKind`, `SpecEntry`) and the dispatch entry point (`scan_specs` / `scan_specs_with_override`). `resolve_specs_config` parses the `--specs-format` override or the `[specs] type` config — the only two sources (no filesystem auto-detection) — into a `SpecBackendKind` and a directory, once. |
 | `src/specs/resolve.rs` | Resolves `--specs NAME[,NAME...]` against the scanned entries: exact id match, then Spec Kit feature-name and numeric-prefix matches; an unknown or ambiguous name fails the whole resolution. |
 | `src/specs/openspec.rs` | OpenSpec backend: scans `<dir>/<change>/tasks.md` directories, skips `<dir>/archive/`. |
 | `src/specs/markdown.rs` | Markdown backend: scans flat `.md` files with YAML frontmatter; only `paw_status: pending` is picked up. |
 | `src/specs/speckit.rs` | Spec Kit backend: scans `.specify/specs/<feature>/`, decomposes the current phase into `[P]`-task worktrees plus one consolidated `phase/…` worktree; probes `<dir>/../memory/constitution.md` for the governance auto-wire. |
 | `src/specs/superpowers.rs` | Superpowers backend: scans `docs/superpowers/plans/*.md` plan files; each plan with incomplete steps becomes one entry (one worktree), never fanned out per task. |
+| `src/specs/backend_pin_tests.rs` | Test-only: pins every per-format output (task prompt, path doctrine, MCP spec payloads, task parsing, opsx gating, governance auto-wire) for one fixture spec of each format. |
+
+**The spec backend Strategy.** `SpecBackendKind` is the closed identity of a
+spec format: every `SpecEntry` carries it, and it parses from and renders to
+the wire name used by `[specs] type`, `--specs-format` and the MCP `backend`
+field. `SpecBackend` is the Strategy that carries everything a format decides:
+its conventional directory, scanning, the path-doctrine sentence, the task
+prompt, the artifact whose heading titles a spec, the artifacts and task list
+the MCP server serves, whether the opsx role-gating applies, and governance
+discovery (Spec Kit's constitution). `SpecBackendKind::backend()` is the only
+exhaustive match from a kind to its behaviour; skills, the launch, the MCP
+server, config loading, `init` and `doctor` all ask the kind for its backend
+instead of matching on it or comparing strings, and
+`tests/source_audit.rs` enforces that.
 
 ### `src/mcp/` modules
 

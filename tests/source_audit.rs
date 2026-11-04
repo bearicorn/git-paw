@@ -466,9 +466,19 @@ fn spec_format_dispatch_happens_only_inside_specs() {
         r#"(==|!=)\s*(Some\()?"(openspec|markdown|speckit|superpowers)"|"(openspec|markdown|speckit|superpowers)"\s*(=>|==|!=|\|)"#,
     )
     .unwrap();
-    let kind_match =
-        regex::Regex::new(r"SpecBackendKind::\w+\s*(\||=>|\{)|matches!\([^)]*SpecBackendKind::")
-            .unwrap();
+    // A match arm, a `matches!`, or an equality test against one variant.
+    let kind_match = regex::Regex::new(
+        r"SpecBackendKind::\w+\s*(\||=>|\{|==|!=)|matches!\([^)]*SpecBackendKind::|(==|!=)\s*(Some\()?SpecBackendKind::",
+    )
+    .unwrap();
+    for caught in [
+        "if kind == SpecBackendKind::OpenSpec {",
+        "x.ok() != Some(SpecBackendKind::OpenSpec)",
+        "SpecBackendKind::SpecKit == kind",
+        "SpecBackendKind::Markdown => 1,",
+    ] {
+        assert!(kind_match.is_match(caught), "guard misses: {caught}");
+    }
     let specs_dir = std::path::Path::new("src").join("specs");
     let mut offenders = Vec::new();
     for (path, body) in source_files() {

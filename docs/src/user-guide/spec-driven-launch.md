@@ -125,6 +125,8 @@ Add JWT token support to the auth module.
 
 Only files with `paw_status: pending` are picked up.
 
+**Boot prompt.** A Markdown worker's task prompt points it at its `.git-paw/AGENTS.local.md` sidecar, which carries the spec file's body inline, and tells it the spec file is the whole contract. A Markdown spec has no artifact directory, so the prompt names none — in particular, no OpenSpec `openspec/changes/` path.
+
 ### Spec Kit Format
 
 Spec Kit projects place each feature in its own directory under `.specify/specs/<feature>/`, alongside an optional `.specify/memory/constitution.md` for project-level rules.

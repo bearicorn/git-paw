@@ -70,13 +70,9 @@ pub struct SpecTask {
     pub complete: bool,
 }
 
-/// The Strategy for everything that differs between spec formats.
-///
-/// Each format implements it once; code outside `src/specs/` reaches a
-/// format's behaviour only through [`SpecBackendKind::backend`]. Default
-/// methods cover the common case, so an implementation overrides only what
-/// differs; `scan`, `path_doctrine` and `task_prompt_templates` have no
-/// default.
+/// Everything that differs between spec formats. Each format implements it
+/// once, deciding every method itself; code outside `src/specs/` uses a
+/// format only through [`SpecBackendKind::backend`].
 pub trait SpecBackend: fmt::Debug {
     /// The identity tag this backend sets on every entry it scans.
     fn kind(&self) -> SpecBackendKind;
@@ -84,9 +80,7 @@ pub trait SpecBackend: fmt::Debug {
     /// The format's conventional specs directory, relative to the repository
     /// root. Supplied when the format comes from `--specs-format` and no
     /// `[specs] dir` is set, and written by `git paw init`.
-    fn default_dir(&self) -> &'static str {
-        "specs"
-    }
+    fn default_dir(&self) -> &'static str;
 
     /// Scans `dir` for pending specs and returns them as `SpecEntry` values.
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError>;
@@ -105,40 +99,34 @@ pub trait SpecBackend: fmt::Debug {
 
     /// The file inside a spec's directory whose first `# ` heading titles the
     /// spec, if the format has one.
-    fn title_artifact(&self) -> Option<&'static str> {
-        None
-    }
+    fn title_artifact(&self) -> Option<&'static str>;
 
     /// The artifacts served for `entry`, whose directory is `spec_dir`.
-    ///
-    /// Default: a single-file spec, served as one artifact named after the
-    /// entry and carrying the assembled entry prompt.
-    fn artifacts(&self, spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact> {
-        let _ = spec_dir;
-        vec![SpecArtifact {
-            name: entry.id.clone(),
-            content: entry.prompt.clone(),
-        }]
-    }
+    fn artifacts(&self, spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact>;
 
-    /// Parses a spec's task list. Default: a flat checkbox list whose `## `
-    /// headings start phases.
-    fn parse_tasks(&self, content: &str) -> Vec<SpecTask> {
-        parse_checkbox_tasks(content)
-    }
+    /// Parses a spec's task list.
+    fn parse_tasks(&self, content: &str) -> Vec<SpecTask>;
 
     /// Whether the format runs the opsx workflow, which gates the opsx
     /// role-gating skill regions and the role-gating guard.
-    fn uses_opsx_workflow(&self) -> bool {
-        false
-    }
+    fn uses_opsx_workflow(&self) -> bool;
 
     /// The format's governance constitution beside `specs_dir`, auto-wired
     /// when `[governance] constitution` is unset.
-    fn constitution(&self, specs_dir: &Path) -> Option<PathBuf> {
-        let _ = specs_dir;
-        None
-    }
+    fn constitution(&self, specs_dir: &Path) -> Option<PathBuf>;
+
+    /// Whether the MCP spec-authoring tools (create, write, validate) can
+    /// author specs in this format.
+    fn supports_spec_authoring(&self) -> bool;
+}
+
+/// A single-file spec's artifacts: one artifact named after the entry,
+/// carrying the assembled entry prompt.
+pub(crate) fn single_file_artifacts(entry: &SpecEntry) -> Vec<SpecArtifact> {
+    vec![SpecArtifact {
+        name: entry.id.clone(),
+        content: entry.prompt.clone(),
+    }]
 }
 
 /// Parses a flat Markdown checkbox task list, tracking `## ` headings as
@@ -588,6 +576,40 @@ mod tests {
     }
 
     #[test]
+    fn single_file_formats_serve_the_entry_prompt_as_one_artifact() {
+        let entry = SpecEntry {
+            id: "fix-bug".to_string(),
+            backend: SpecBackendKind::Markdown,
+            branch: String::new(),
+            cli: None,
+            prompt: "# Fix the bug\n".to_string(),
+            owned_files: None,
+        };
+        for kind in [SpecBackendKind::Markdown, SpecBackendKind::Superpowers] {
+            let artifacts = kind.backend().artifacts(Path::new("unused"), &entry);
+            assert_eq!(
+                artifacts,
+                [SpecArtifact {
+                    name: "fix-bug".to_string(),
+                    content: "# Fix the bug\n".to_string(),
+                }],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_openspec_supports_spec_authoring() {
+        for kind in SpecBackendKind::ALL {
+            assert_eq!(
+                kind.backend().supports_spec_authoring(),
+                kind == SpecBackendKind::OpenSpec,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn every_backend_reports_its_own_kind() {
         for kind in SpecBackendKind::ALL {
             assert_eq!(kind.backend().kind(), kind);
@@ -755,7 +777,7 @@ mod tests {
     /// A configured type with no `dir` scans `specs` for every format; the
     /// conventional directory is supplied only on the `--specs-format` path.
     #[test]
-    fn configured_type_without_dir_scans_specs() {
+    fn configured_type_without_dir_resolves_to_specs_dir() {
         for kind in SpecBackendKind::ALL {
             let config = PawConfig {
                 specs: Some(SpecsConfig {
