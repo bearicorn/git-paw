@@ -290,31 +290,22 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
   in `src/broker/conflict.rs`, `src/broker/server.rs`, `src/broker/watcher.rs`,
   `src/dashboard.rs`.
 
-**`SpecBackendKind`** (spec-format changes):
-- Compile-forcing exhaustive matches:
-  - `src/skills.rs` — `render_spec_path_doctrine`.
-  - `src/task_prompts.rs` — `templates_for`, which names BOTH of a format's
-    bundled task-prompt templates: the prose, and the optional workflow
-    entry point the launch submits as its own composer line. This is the
-    only match for task-prompt purposes; three consumers read it rather
-    than keeping their own, so a new variant is decided once:
-    - `src/commands/launch.rs` — `build_task_prompt` renders both templates.
-    - `src/doctor.rs` — `instructed_workflow_command` delegates to
-      `task_prompts::workflow_command`, so the command the spec-workflow
-      check probes for reachability is by construction the command the
-      launch types. Do NOT reintroduce a per-backend match here.
-  - `src/mcp/query/specs.rs` — `backend_str`, `derive_title`, `get_spec`.
-  - `src/mcp/tools/project.rs` — `get_skill`'s backend-to-doctrine match.
-- Plus the dispatch (`backend_for_type`, `SpecBackendKind::parse`, and
-  `SpecBackendKind::type_str` in `src/specs/mod.rs`) and the `SpecsFormat`
-  CLI enum in `src/cli.rs`.
-- Non-compile-forcing string dispatches (derive their valid-set from
-  `SpecBackendKind::ALL`/`parse` rather than keeping a parallel list, so
-  they cannot reject a variant discovery already supports):
-  `src/mcp/server.rs` — `validate_startup_config`. This exact gap (a
-  hand-maintained three-value list predating the `Superpowers` variant)
-  is what made `git paw mcp` refuse to start in a Superpowers repository —
-  see `mcp-superpowers-support`.
+**`SpecBackendKind`** (spec-format changes): every per-format decision lives
+behind the `SpecBackend` trait (the Strategy), so a new format touches only:
+- `src/specs/mod.rs` — the enum variant, its entry in `ALL`, its wire name in
+  `as_str` (`FromStr` and every valid-set derive from `ALL`), and its arm in
+  `SpecBackendKind::backend()`, the one exhaustive kind-to-behaviour match.
+- A new `SpecBackend` impl under `src/specs/` with its bundled assets (path
+  doctrine, task-prompt templates). Every per-format method is required, so
+  the compiler makes the new format decide each one (shared helpers such as
+  `parse_checkbox_tasks` and `single_file_artifacts` cover the common answers).
+- `src/cli.rs` — the `SpecsFormat` clap variant and its
+  `From<SpecsFormat> for SpecBackendKind` arm.
+
+Code outside `src/specs/` never compares a spec-type string or matches on
+`SpecBackendKind`; `tests/source_audit.rs`
+(`spec_format_dispatch_happens_only_inside_specs`) enforces it. Do NOT add a
+per-format match at a call site — add a trait method instead.
 
 Grep the variant name across `src/` before finishing to catch every site — but
 the point is to list them in Impact so the work is *scoped*, not *discovered*.

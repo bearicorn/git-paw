@@ -154,8 +154,16 @@ impl SpecBackend for SpecKitBackend {
             .collect()
     }
 
+    fn uses_opsx_workflow(&self) -> bool {
+        false
+    }
+
     fn constitution(&self, specs_dir: &Path) -> Option<PathBuf> {
         detect_constitution(specs_dir)
+    }
+
+    fn supports_spec_authoring(&self) -> bool {
+        false
     }
 
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError> {

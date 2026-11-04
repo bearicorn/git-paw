@@ -224,7 +224,11 @@ opsx_guard: false
 constitution: false
 "#;
 
-/// `spec-providers`: "Per-format outputs are unchanged by the move".
+/// `spec-providers` scenarios "Per-format outputs are unchanged by the
+/// move", "opsx role gating follows the backend" (`opsx_regions`,
+/// `opsx_guard`), "Spec Kit governance discovery follows the backend"
+/// (`constitution`) and "MCP spec paths use the scan's directory" (`list`,
+/// `get_spec` paths under each fixture's configured `dir`).
 #[test]
 fn per_format_outputs_are_pinned() {
     for (kind, expected) in [

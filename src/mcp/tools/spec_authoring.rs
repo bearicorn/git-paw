@@ -109,11 +109,20 @@ fn openspec_dir(root: &Path, tool: &str) -> Result<String, ErrorData> {
             None,
         ));
     };
-    let openspec = SpecBackendKind::OpenSpec.as_str();
-    let spec_type = specs.spec_type.as_deref().unwrap_or(openspec);
-    if spec_type.parse::<SpecBackendKind>().ok() != Some(SpecBackendKind::OpenSpec) {
+    let default_type = SpecBackendKind::OpenSpec.as_str();
+    let spec_type = specs.spec_type.as_deref().unwrap_or(default_type);
+    let supported = spec_type
+        .parse::<SpecBackendKind>()
+        .is_ok_and(|k| k.backend().supports_spec_authoring());
+    if !supported {
+        let authorable = SpecBackendKind::ALL
+            .into_iter()
+            .filter(|k| k.backend().supports_spec_authoring())
+            .map(SpecBackendKind::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(ErrorData::invalid_params(
-            format!("`{tool}` is not supported for format {spec_type}; only {openspec} is"),
+            format!("`{tool}` is not supported for format {spec_type}; only {authorable} is"),
             None,
         ));
     }

@@ -114,6 +114,27 @@ to it, which is exactly how a git-paw-specific assumption once leaked into every
 session. See the `export-agnosticism` dev skill (`.agents/skills/export-agnosticism/`) for the
 full export-surface inventory.
 
+## Adding a spec format
+
+Every per-format decision sits behind the `SpecBackend` trait in `src/specs/`, reached through
+`SpecBackendKind::backend()`. To add a format:
+
+1. Add the variant to `SpecBackendKind` in `src/specs/mod.rs`, append it to `ALL`, give it a wire
+   name in `as_str` (parsing and every list of valid names derive from `ALL`), and add its arm in
+   `backend()`.
+2. Add a `SpecBackend` impl in a new `src/specs/<format>.rs`. Every per-format method is
+   required — the compiler makes the format decide its directory, scanning, doctrine, task
+   prompt, title artifact, artifacts, task parsing, opsx gating, governance discovery and
+   spec-authoring support. Reuse `parse_checkbox_tasks` and `single_file_artifacts` where they
+   fit. Put its path doctrine and task-prompt prose in bundled assets under
+   `assets/spec-path-doctrine/` and `assets/boot-task-prompts/`.
+3. Add the `SpecsFormat` variant and its `From<SpecsFormat> for SpecBackendKind` arm in
+   `src/cli.rs`.
+4. Add a fixture and expected row for the format to `src/specs/backend_pin_tests.rs`.
+
+Nothing else should change: code outside `src/specs/` never compares a spec-type string or
+matches on `SpecBackendKind`, and `tests/source_audit.rs` fails the build if it does.
+
 ## Commit Format
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/):

@@ -23,9 +23,9 @@ struct Discovery {
     entries: Vec<SpecEntry>,
 }
 
-/// Discovers specs for the repository, degrading to an empty set on any
-/// discovery error (no config, missing directory, etc.). Paths are reported
-/// under the directory the scan itself resolved.
+/// Discovers specs, degrading to an empty set on any error so the MCP tools
+/// still answer in a repo with no specs. Paths use the directory the scan
+/// resolved.
 fn discover(ctx: &RepoContext) -> Discovery {
     let repo_root = ctx.root.clone();
     let config = config::load_config(&repo_root, None).unwrap_or_default();

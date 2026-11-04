@@ -4,7 +4,10 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::PawError;
-use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry, parse_frontmatter};
+use crate::specs::{
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
+    parse_frontmatter, single_file_artifacts,
+};
 use crate::task_prompts::TaskPromptTemplates;
 
 const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/markdown.md");
@@ -20,6 +23,34 @@ pub(crate) struct MarkdownBackend;
 impl SpecBackend for MarkdownBackend {
     fn kind(&self) -> SpecBackendKind {
         SpecBackendKind::Markdown
+    }
+
+    fn default_dir(&self) -> &'static str {
+        "specs"
+    }
+
+    fn title_artifact(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn artifacts(&self, _spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact> {
+        single_file_artifacts(entry)
+    }
+
+    fn parse_tasks(&self, content: &str) -> Vec<SpecTask> {
+        parse_checkbox_tasks(content)
+    }
+
+    fn uses_opsx_workflow(&self) -> bool {
+        false
+    }
+
+    fn constitution(&self, _specs_dir: &Path) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    fn supports_spec_authoring(&self) -> bool {
+        false
     }
 
     fn path_doctrine(&self) -> &'static str {
