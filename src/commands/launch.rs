@@ -76,9 +76,10 @@ pub(crate) use crate::task_prompts::TaskPrompt;
 /// ([`SIDECAR_REL_PATH`](crate::agents::SIDECAR_REL_PATH)) — the combined
 /// view of the project's `AGENTS.md` plus the agent's assignment and
 /// coordination rules — rather than embedding any portion of the spec body,
-/// which would both duplicate content and risk the paste-buffer trap. Only
-/// the `OpenSpec` prose names an artifact directory; the other formats'
-/// sidecars already carry the full assignment inline.
+/// which would both duplicate content and risk the paste-buffer trap. No
+/// prose names an artifact directory: the `OpenSpec` workflow command finds
+/// its change itself, and the other formats' sidecars already carry the full
+/// assignment inline.
 ///
 /// **Prerequisite:** callers SHALL ensure `setup_worktree_agents_md` has run
 /// for the worktree before the resulting prompt is injected. The prompt's
@@ -524,9 +525,8 @@ mod tests {
         assert_eq!(
             build_task_prompt(Some(&mk(SpecBackendKind::Markdown))).prose,
             "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the \
-             project rules, your full spec, and your assignment. Additional artifacts \
-             (proposal, design, specs, tasks) live under openspec/changes/my-change/ — read \
-             them all before starting."
+             project rules and your full spec, embedded inline. The spec file is the whole \
+             contract; there is no other artifact directory to read."
         );
         assert_eq!(
             build_task_prompt(Some(&mk(SpecBackendKind::SpecKit))).prose,
@@ -689,7 +689,7 @@ mod tests {
 
     fn make_spec_entry(id: &str, prompt_body: &str) -> crate::specs::SpecEntry {
         // Default to the `Markdown` backend so the regression tests
-        // (`task_prompt_with_spec_points_at_sidecar_and_includes_id`,
+        // (`task_prompt_with_spec_points_at_sidecar`,
         // `task_prompt_does_not_include_spec_body_first_line`) keep exercising
         // the sidecar-pointer branch of `build_task_prompt`.
         // Tests that want the OpenSpec branch construct a `SpecEntry`
@@ -705,16 +705,12 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_with_spec_points_at_sidecar_and_includes_id() {
+    fn task_prompt_with_spec_points_at_sidecar() {
         let entry = make_spec_entry("my-change", "## 1. First section\n\nbody body body");
         let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
             prompt.contains(crate::agents::SIDECAR_REL_PATH),
             "spec-derived task prompt should point at the sidecar, got: {prompt}"
-        );
-        assert!(
-            prompt.contains("openspec/changes/my-change"),
-            "spec-derived task prompt should include the spec id directory, got: {prompt}"
         );
     }
 
@@ -769,6 +765,8 @@ mod tests {
         );
     }
 
+    /// Maps to `core-lang-agnostic` scenario "Markdown task prompt does not
+    /// reference the OpenSpec artifacts path".
     #[test]
     fn task_prompt_markdown_backend_uses_sidecar_pointer() {
         let entry = crate::specs::SpecEntry {
@@ -786,8 +784,12 @@ mod tests {
             "Markdown-backed task prompt should point at the sidecar, got: {prompt}"
         );
         assert!(
-            prompt.contains("openspec/changes/my-feature"),
-            "Markdown-backed task prompt should include the spec id directory, got: {prompt}"
+            !prompt.contains("openspec/changes/"),
+            "a Markdown spec has no OpenSpec artifacts directory, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("whole contract"),
+            "the prompt states the spec file is the whole contract, got: {prompt}"
         );
         assert!(
             !prompt.contains("/opsx:apply"),
@@ -864,11 +866,11 @@ mod tests {
         );
     }
 
-    // Maps to scenario "Spec-derived task prompt points at the sidecar and
-    // includes spec id" — fixes the named-test coverage gap from
-    // boot-prompt-full-body. (test-coverage-v0-5-0 task 2.1)
+    // Maps to scenario "Spec-derived task prompt points at the sidecar" —
+    // fixes the named-test coverage gap from boot-prompt-full-body.
+    // (test-coverage-v0-5-0 task 2.1)
     #[test]
-    fn build_task_prompt_spec_entry_contains_sidecar_and_spec_id() {
+    fn build_task_prompt_spec_entry_contains_sidecar() {
         let entry = make_spec_entry("governance-config", "## 1. Struct definitions\n\nBody.");
         let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
@@ -876,19 +878,38 @@ mod tests {
             "spec-derived prompt should point at the sidecar, got: {prompt}"
         );
         assert!(
-            prompt.contains("openspec/changes/governance-config"),
-            "spec-derived prompt should embed the spec id directory, got: {prompt}"
-        );
-        assert!(
             !prompt.contains("## 1. Struct definitions"),
             "spec body's first heading MUST NOT leak into the prompt, got: {prompt}"
         );
     }
 
-    // Maps to scenario "Spec Kit doctrine names the Spec Kit spec location"
-    // from speckit-spec-path-pointer: the SpecKit arm of `build_task_prompt`
-    // must not equate SpecKit with the OpenSpec artifact layout the way the
-    // Markdown arm does.
+    /// Maps to `core-lang-agnostic` scenario "No non-OpenSpec task prompt
+    /// names the OpenSpec artifacts path".
+    #[test]
+    fn no_non_openspec_task_prompt_names_the_openspec_artifacts_path() {
+        use crate::specs::{SpecBackendKind, SpecEntry};
+        for backend in SpecBackendKind::ALL {
+            if backend.backend().uses_opsx_workflow() {
+                continue;
+            }
+            let entry = SpecEntry {
+                id: "some-spec".to_string(),
+                backend,
+                branch: "feat/some-spec".to_string(),
+                cli: None,
+                prompt: String::new(),
+                owned_files: None,
+            };
+            let prompt = build_task_prompt(Some(&entry)).prose;
+            assert!(
+                !prompt.contains("openspec/changes/"),
+                "{backend:?} task prompt names openspec/changes/: {prompt}"
+            );
+        }
+    }
+
+    // Maps to `core-lang-agnostic` scenario "Spec Kit task prompt does not
+    // reference the OpenSpec artifacts path".
     #[test]
     fn build_task_prompt_speckit_does_not_reference_openspec_changes_path() {
         use crate::specs::{SpecBackendKind, SpecEntry};

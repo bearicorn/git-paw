@@ -1,10 +1,6 @@
-//! Pins every per-format output a spec backend decides, for one fixture spec
-//! of each format, through the entry points the rest of the crate calls.
-//!
-//! Guards `spec-providers`' "Per-format outputs are unchanged by the move":
-//! the outputs below are the ones produced before per-format behaviour moved
-//! into the `SpecBackend` trait, except the Markdown task prompt, which
-//! `core-lang-agnostic` changes on purpose.
+//! Pins each format's outputs so moving behaviour into `SpecBackend` keeps
+//! them byte-identical. The Markdown task prompt is the one output that
+//! changes on purpose.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,8 +11,6 @@ use crate::mcp::RepoContext;
 use crate::mcp::query::specs as mcp_specs;
 use crate::specs::{self, SpecBackendKind};
 
-/// One fixture repository per format: its `[specs]` config and the files
-/// the format scans.
 fn fixture(kind: SpecBackendKind, root: &Path) {
     let write = |rel: &str, body: &str| {
         let path = root.join(rel);
@@ -101,7 +95,6 @@ fn parse_tasks(kind: SpecBackendKind, content: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every per-format output for `kind`'s fixture, rendered as one snapshot.
 fn snapshot(kind: SpecBackendKind) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -150,9 +143,8 @@ fn snapshot(kind: SpecBackendKind) -> String {
         )
         .unwrap();
     }
-    // `get_tasks` finds a Spec Kit entry by its decomposed id, which never
-    // names a feature directory, so each format's parser is also pinned on a
-    // shared tasks sample directly.
+    // Spec Kit ids carry a decomposition suffix that names no directory, so
+    // `get_tasks` never reaches its parser; pin every parser directly.
     for t in parse_tasks(kind, TASKS_SAMPLE) {
         writeln!(out, "parse: {t}").unwrap();
     }
@@ -193,7 +185,7 @@ opsx_guard: true
 constitution: false
 "#;
 
-const MARKDOWN: &str = r#"prose: Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the project rules, your full spec, and your assignment. Additional artifacts (proposal, design, specs, tasks) live under openspec/changes/fix-bug/ — read them all before starting.
+const MARKDOWN: &str = r#"prose: Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the project rules and your full spec, embedded inline. The spec file is the whole contract; there is no other artifact directory to read.
 entry_point: None
 doctrine: Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; the format has no per-artifact workflow — the file itself is the contract.
 list: fix-bug markdown "Fix the bug" specs/fix-bug
