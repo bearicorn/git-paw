@@ -16,6 +16,7 @@ use super::{SpecBackend, SpecBackendKind, SpecEntry};
 use crate::error::PawError;
 use crate::specs::branch_segment_slug;
 use crate::static_regex::static_regex;
+use crate::task_prompts::TaskPromptTemplates;
 
 /// Default directory holding superpowers plan files.
 pub(crate) const PLANS_DIR: &str = "docs/superpowers/plans";
@@ -29,11 +30,33 @@ const YOUR_TASKS_HEADING: &str =
     include_str!("../../assets/task-prompts/superpowers/your-tasks-heading.md");
 const EXECUTION_SECTION: &str = include_str!("../../assets/task-prompts/superpowers/execution.md");
 
+const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/superpowers.md");
+const TASK_PROMPT: &str = include_str!("../../assets/boot-task-prompts/superpowers.md");
+
 /// Backend for the flat-file superpowers plan format.
 #[derive(Debug)]
 pub struct SuperpowersBackend;
 
 impl SpecBackend for SuperpowersBackend {
+    fn kind(&self) -> SpecBackendKind {
+        SpecBackendKind::Superpowers
+    }
+
+    fn default_dir(&self) -> &'static str {
+        PLANS_DIR
+    }
+
+    fn path_doctrine(&self) -> &'static str {
+        PATH_DOCTRINE
+    }
+
+    fn task_prompt_templates(&self) -> TaskPromptTemplates {
+        TaskPromptTemplates {
+            prose: TASK_PROMPT,
+            entry_point: None,
+        }
+    }
+
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError> {
         let read = fs::read_dir(dir).map_err(|e| {
             PawError::SpecError(format!("cannot read directory {}: {e}", dir.display()))

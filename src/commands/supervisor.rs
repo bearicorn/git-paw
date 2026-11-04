@@ -311,7 +311,7 @@ pub struct SupervisorOptions<'a> {
     /// picker / `--branches` flow).
     pub spec_mode: SpecMode,
     /// `--specs-format`.
-    pub specs_format: Option<String>,
+    pub specs_format: Option<crate::specs::SpecBackendKind>,
     /// `--dry-run`: print the plan, create nothing.
     pub dry_run: bool,
     /// `--no-rebase`.
@@ -363,7 +363,7 @@ pub fn supervisor(
     let cli_flag = cli.as_deref();
     let branches_flag = branches.as_deref();
     let spec_mode = &spec_mode;
-    let specs_format_override = specs_format.as_deref();
+    let specs_format_override = specs_format;
     // Reattach guard (GP-13): a supervisor-enabled repo's `git paw start`
     // dispatches straight here (see `resolve_dispatch_target`), bypassing
     // `start`'s own existing-session check entirely. Without this, a

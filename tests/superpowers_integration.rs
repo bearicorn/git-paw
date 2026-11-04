@@ -255,7 +255,8 @@ fn cli_override_superpowers_routes_and_supplies_default_dir() {
     // Config has no [specs] section. `--specs-format superpowers` selects the
     // Superpowers backend and supplies its `docs/superpowers/plans` default dir.
     let config = PawConfig::default();
-    let entries = scan_specs_with_override(&config, tmp.path(), Some("superpowers")).unwrap();
+    let entries =
+        scan_specs_with_override(&config, tmp.path(), Some(SpecBackendKind::Superpowers)).unwrap();
 
     assert_eq!(
         entries.len(),

@@ -61,30 +61,14 @@ pub enum LaunchOutcome {
     },
 }
 
-/// An agent's rendered task prompt: the prose its first message carries, and
-/// — when the spec format declares one — the workflow entry point submitted
-/// as its own composer line once the pane goes idle.
-///
-/// The entry point is deliberately NOT part of `prose`. A command embedded in
-/// a prose paragraph is a command a weaker model may narrate instead of
-/// invoke (GP-54); submitted alone it is what a paste-aware CLI parses as a
-/// slash-command invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TaskPrompt {
-    /// The assignment prose appended to the boot block.
-    pub(crate) prose: String,
-    /// The single command line to submit after `prose`, when declared.
-    pub(crate) entry_point: Option<String>,
-}
+pub(crate) use crate::task_prompts::TaskPrompt;
 
 /// Renders the task prompt for an agent's spec assignment (or the no-spec
 /// fallback when its branch has none).
 ///
-/// Pure: both templates come from
-/// [`crate::task_prompts::templates_for`] — the one exhaustive
-/// [`SpecBackendKind`](crate::specs::SpecBackendKind) match over the
-/// bundled per-backend assets — and this only substitutes
-/// `{{SIDECAR_REL_PATH}}` and `{{SPEC_ID}}` into them. No command name is
+/// Pure: the entry's backend renders its own bundled templates
+/// ([`SpecBackend::task_prompt`](crate::specs::SpecBackend::task_prompt)),
+/// substituting `{{SIDECAR_REL_PATH}}` and `{{SPEC_ID}}`. No command name is
 /// written here; a backend that declares no entry-point template yields
 /// `entry_point: None` and its launch types no second line.
 ///
@@ -92,27 +76,17 @@ pub(crate) struct TaskPrompt {
 /// ([`SIDECAR_REL_PATH`](crate::agents::SIDECAR_REL_PATH)) — the combined
 /// view of the project's `AGENTS.md` plus the agent's assignment and
 /// coordination rules — rather than embedding any portion of the spec body,
-/// which would both duplicate content and risk the paste-buffer trap. The
-/// `Markdown` template additionally names the sibling-artifact directory
-/// `openspec/changes/<id>/`; `SpecKit` and `Superpowers` name none, since
-/// their sidecar already carries the full assignment inline
-/// (speckit-spec-path-pointer).
+/// which would both duplicate content and risk the paste-buffer trap. Only
+/// the `OpenSpec` prose names an artifact directory; the other formats'
+/// sidecars already carry the full assignment inline.
 ///
 /// **Prerequisite:** callers SHALL ensure `setup_worktree_agents_md` has run
 /// for the worktree before the resulting prompt is injected. The prompt's
 /// guidance is non-actionable if the sidecar is missing.
 pub(crate) fn build_task_prompt(spec_entry: Option<&crate::specs::SpecEntry>) -> TaskPrompt {
-    use crate::agents::SIDECAR_REL_PATH;
-    let templates = crate::task_prompts::templates_for(spec_entry.map(|s| s.backend));
-    let spec_id = spec_entry.map_or("", |s| s.id.as_str());
-    let render = |template: &str| {
-        template
-            .replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH)
-            .replace("{{SPEC_ID}}", spec_id)
-    };
-    TaskPrompt {
-        prose: render(templates.prose),
-        entry_point: templates.entry_point.map(render),
+    match spec_entry {
+        Some(entry) => entry.backend.backend().task_prompt(entry),
+        None => crate::task_prompts::templates_for(None).render(""),
     }
 }
 

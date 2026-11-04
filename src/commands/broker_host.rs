@@ -241,8 +241,7 @@ pub fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(), PawErr
     // agent registered later through `/watch` is unmatched, which the guard
     // treats exactly as a matched coding worktree.
     {
-        let engine_is_openspec =
-            crate::specs::resolved_spec_type(&config, &repo_root).as_deref() == Some("openspec");
+        let engine_is_openspec = crate::specs::opsx_role_gating_applies(&config);
         let mut roster: Vec<(String, PathBuf)> = watch_targets
             .iter()
             .map(|t| (t.agent_id.clone(), t.worktree_path.clone()))

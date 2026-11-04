@@ -5,6 +5,10 @@ use std::path::Path;
 
 use crate::error::PawError;
 use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry, parse_frontmatter};
+use crate::task_prompts::TaskPromptTemplates;
+
+const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/markdown.md");
+const TASK_PROMPT: &str = include_str!("../../assets/boot-task-prompts/markdown.md");
 
 /// Backend for scanning Markdown files with YAML frontmatter.
 ///
@@ -14,6 +18,21 @@ use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry, parse_frontmatter};
 pub(crate) struct MarkdownBackend;
 
 impl SpecBackend for MarkdownBackend {
+    fn kind(&self) -> SpecBackendKind {
+        SpecBackendKind::Markdown
+    }
+
+    fn path_doctrine(&self) -> &'static str {
+        PATH_DOCTRINE
+    }
+
+    fn task_prompt_templates(&self) -> TaskPromptTemplates {
+        TaskPromptTemplates {
+            prose: TASK_PROMPT,
+            entry_point: None,
+        }
+    }
+
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError> {
         let mut entries = Vec::new();
 

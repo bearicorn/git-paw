@@ -313,12 +313,9 @@ pub fn export_skills(
 ) -> Result<Vec<(String, WriteOutcome)>, PawError> {
     let skill_err = |e: crate::skills::SkillError| PawError::InitError(e.to_string());
 
-    let backends: Vec<crate::specs::SpecBackendKind> =
-        crate::specs::resolved_spec_type(config, repo_root)
-            .as_deref()
-            .and_then(crate::specs::SpecBackendKind::parse)
-            .into_iter()
-            .collect();
+    let backends: Vec<crate::specs::SpecBackendKind> = crate::specs::resolved_spec_kind(config)
+        .into_iter()
+        .collect();
     let supervisor = config.supervisor.clone().unwrap_or_default();
     let orchestrator =
         crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL).map_err(skill_err)?;
@@ -746,14 +743,12 @@ fn write_config_if_missing(
     Ok(true)
 }
 
-/// The four spec systems git-paw can scan, and each one's conventional
-/// directory. Presented at init and written into `[specs]`.
-const SPEC_SYSTEMS: [(&str, &str); 4] = [
-    ("openspec", "specs"),
-    ("markdown", "specs"),
-    ("speckit", ".specify/specs"),
-    ("superpowers", "docs/superpowers/plans"),
-];
+/// The spec systems git-paw can scan, and each one's conventional
+/// directory, in [`SpecBackendKind::ALL`](crate::specs::SpecBackendKind::ALL)
+/// order. Presented at init and written into `[specs]`.
+fn spec_systems() -> [(&'static str, &'static str); 4] {
+    crate::specs::SpecBackendKind::ALL.map(|k| (k.as_str(), k.backend().default_dir()))
+}
 
 /// Commented `[specs]` template written by a non-interactive init, so the user
 /// can uncomment and fill it in. The config — never filesystem detection — is
@@ -773,7 +768,7 @@ fn prompt_specs_section() -> Result<String, PawError> {
         return Ok(COMMENTED_SPECS_TEMPLATE.to_string());
     }
 
-    let labels: Vec<&str> = SPEC_SYSTEMS.iter().map(|(name, _)| *name).collect();
+    let labels: Vec<&str> = spec_systems().iter().map(|(name, _)| *name).collect();
     let idx = Select::new()
         .with_prompt("Which spec system does this project use? (recorded in config; git-paw never auto-detects it)")
         .items(&labels)
@@ -784,11 +779,11 @@ fn prompt_specs_section() -> Result<String, PawError> {
 }
 
 /// Builds the active `[specs]` section for the spec system at `idx` in
-/// [`SPEC_SYSTEMS`]. Factored out of [`prompt_specs_section`] so the
+/// [`spec_systems`]. Factored out of [`prompt_specs_section`] so the
 /// index-to-section mapping is unit-testable without a TTY; `idx` always
-/// comes from `Select`, which is bounded to `0..SPEC_SYSTEMS.len()`.
+/// comes from `Select`, which is bounded to `0..spec_systems().len()`.
 fn specs_section_for(idx: usize) -> String {
-    let (spec_type, dir) = SPEC_SYSTEMS[idx];
+    let (spec_type, dir) = spec_systems()[idx];
     format!("\n[specs]\ntype = \"{spec_type}\"\ndir = \"{dir}\"\n")
 }
 
@@ -954,7 +949,7 @@ mod tests {
             section.contains("# [specs]"),
             "non-interactive init writes a COMMENTED template; got: {section}"
         );
-        for (name, _) in SPEC_SYSTEMS {
+        for (name, _) in spec_systems() {
             assert!(
                 section.contains(name),
                 "template lists {name}; got: {section}"
@@ -964,7 +959,7 @@ mod tests {
 
     #[test]
     fn spec_systems_cover_the_four_backends_in_order() {
-        let names: Vec<&str> = SPEC_SYSTEMS.iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = spec_systems().iter().map(|(n, _)| *n).collect();
         assert_eq!(names, ["openspec", "markdown", "speckit", "superpowers"]);
     }
 

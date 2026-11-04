@@ -179,18 +179,8 @@ impl GitPawMcpServer {
                     .broker_url
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:9119".to_string());
-                let backends = match specs::resolved_spec_type(&cfg, root)
-                    .as_deref()
-                    .and_then(SpecBackendKind::parse)
-                {
-                    Some(kind) => match kind {
-                        SpecBackendKind::OpenSpec => vec![SpecBackendKind::OpenSpec],
-                        SpecBackendKind::Markdown => vec![SpecBackendKind::Markdown],
-                        SpecBackendKind::SpecKit => vec![SpecBackendKind::SpecKit],
-                        SpecBackendKind::Superpowers => vec![SpecBackendKind::Superpowers],
-                    },
-                    None => Vec::new(),
-                };
+                let backends: Vec<SpecBackendKind> =
+                    specs::resolved_spec_kind(&cfg).into_iter().collect();
                 // Read-only render: gate commands are not wired here (the MCP
                 // view is a static skill preview, not a launch), so they render
                 // as "(not configured)".

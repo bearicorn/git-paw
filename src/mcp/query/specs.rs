@@ -11,19 +11,9 @@ use std::path::{Path, PathBuf};
 use rmcp::schemars;
 use serde::Serialize;
 
-use crate::config::{self, PawConfig};
+use crate::config;
 use crate::mcp::RepoContext;
-use crate::specs::{self, SpecBackendKind, SpecEntry};
-
-/// Maps a backend kind to its tool-facing string.
-fn backend_str(kind: SpecBackendKind) -> &'static str {
-    match kind {
-        SpecBackendKind::OpenSpec => "openspec",
-        SpecBackendKind::Markdown => "markdown",
-        SpecBackendKind::SpecKit => "speckit",
-        SpecBackendKind::Superpowers => "superpowers",
-    }
-}
+use crate::specs::{self, SpecArtifact, SpecEntry, SpecTask};
 
 /// Resolved spec discovery context.
 struct Discovery {
@@ -33,25 +23,16 @@ struct Discovery {
     entries: Vec<SpecEntry>,
 }
 
-/// Replicates `resolve_specs_config`'s directory choice (which is private):
-/// explicit `[specs].dir`, else Spec Kit auto-detection.
-fn resolve_dir(config: &PawConfig, repo_root: &Path) -> Option<String> {
-    if let Some(specs) = config.specs.as_ref() {
-        return Some(specs.dir.clone().unwrap_or_else(|| "specs".to_string()));
-    }
-    let specify = repo_root.join(".specify");
-    if specify.is_dir() && specify.join("specs").is_dir() {
-        return Some(".specify/specs".to_string());
-    }
-    None
-}
-
 /// Discovers specs for the repository, degrading to an empty set on any
-/// discovery error (no config, missing directory, etc.).
+/// discovery error (no config, missing directory, etc.). Paths are reported
+/// under the directory the scan itself resolved.
 fn discover(ctx: &RepoContext) -> Discovery {
     let repo_root = ctx.root.clone();
     let config = config::load_config(&repo_root, None).unwrap_or_default();
-    let dir = resolve_dir(&config, &repo_root).unwrap_or_else(|| "specs".to_string());
+    let dir = specs::resolve_specs_config(&config, None)
+        .ok()
+        .flatten()
+        .map_or_else(|| "specs".to_string(), |r| r.dir);
     let entries = specs::scan_specs(&config, &repo_root).unwrap_or_default();
     Discovery {
         repo_root,
@@ -67,16 +48,10 @@ fn first_heading(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Derives a human title for a spec: the first `# ` heading in its primary
-/// artifact (proposal.md for `OpenSpec`, spec.md for Spec Kit), else the entry
-/// prompt's heading, else the id.
+/// Derives a human title for a spec: the first `# ` heading in its backend's
+/// title artifact, else the entry prompt's heading, else the id.
 fn derive_title(spec_dir: &Path, entry: &SpecEntry) -> String {
-    let primary = match entry.backend {
-        SpecBackendKind::OpenSpec => "proposal.md",
-        SpecBackendKind::SpecKit => "spec.md",
-        SpecBackendKind::Markdown | SpecBackendKind::Superpowers => "",
-    };
-    if !primary.is_empty()
+    if let Some(primary) = entry.backend.backend().title_artifact()
         && let Ok(content) = std::fs::read_to_string(spec_dir.join(primary))
         && let Some(h) = first_heading(&content)
     {
@@ -110,7 +85,7 @@ pub fn list_specs(ctx: &RepoContext) -> Vec<SpecInfo> {
             let spec_dir = d.repo_root.join(&d.dir).join(&e.id);
             SpecInfo {
                 id: e.id.clone(),
-                backend: backend_str(e.backend).to_string(),
+                backend: e.backend.as_str().to_string(),
                 title: derive_title(&spec_dir, e),
                 status: "pending".to_string(),
                 path: format!("{}/{}", d.dir.trim_end_matches('/'), e.id),
@@ -141,12 +116,13 @@ pub struct SpecDetail {
     pub artifacts: Vec<Artifact>,
 }
 
-fn read_named(dir: &Path, file: &str) -> Option<Artifact> {
-    let content = std::fs::read_to_string(dir.join(file)).ok()?;
-    Some(Artifact {
-        name: file.trim_end_matches(".md").to_string(),
-        content,
-    })
+impl From<SpecArtifact> for Artifact {
+    fn from(a: SpecArtifact) -> Self {
+        Self {
+            name: a.name,
+            content: a.content,
+        }
+    }
 }
 
 /// Returns the full content of a named spec, or `None` when not found.
@@ -157,86 +133,20 @@ pub fn get_spec(ctx: &RepoContext, id: &str) -> Option<SpecDetail> {
     let spec_dir = d.repo_root.join(&d.dir).join(id);
     let rel_path = format!("{}/{}", d.dir.trim_end_matches('/'), id);
 
-    let mut artifacts = Vec::new();
-    match entry.backend {
-        SpecBackendKind::OpenSpec => {
-            for f in ["proposal.md", "design.md", "tasks.md"] {
-                if let Some(a) = read_named(&spec_dir, f) {
-                    artifacts.push(a);
-                }
-            }
-            // Capability spec files under specs/<cap>/spec.md.
-            let specs_sub = spec_dir.join("specs");
-            collect_spec_md(&specs_sub, &spec_dir, &mut artifacts);
-        }
-        SpecBackendKind::SpecKit => {
-            for f in ["spec.md", "plan.md", "tasks.md"] {
-                if let Some(a) = read_named(&spec_dir, f) {
-                    artifacts.push(a);
-                }
-            }
-            // Checklists: any other *.md in the feature dir.
-            if let Ok(rd) = std::fs::read_dir(&spec_dir) {
-                let mut extra: Vec<_> = rd
-                    .flatten()
-                    .filter_map(|e| {
-                        let p = e.path();
-                        let is_md = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("md"));
-                        let name = p.file_name()?.to_str()?.to_string();
-                        let lower = name.to_ascii_lowercase();
-                        if is_md && !["spec.md", "plan.md", "tasks.md"].contains(&lower.as_str()) {
-                            Some((name, std::fs::read_to_string(&p).ok()?))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                extra.sort_by(|a, b| a.0.cmp(&b.0));
-                for (name, content) in extra {
-                    artifacts.push(Artifact { name, content });
-                }
-            }
-        }
-        SpecBackendKind::Markdown | SpecBackendKind::Superpowers => {
-            // Single-file specs (a Markdown file or a superpowers plan); the
-            // entry prompt holds the assembled body.
-            artifacts.push(Artifact {
-                name: id.to_string(),
-                content: entry.prompt.clone(),
-            });
-        }
-    }
+    let artifacts = entry
+        .backend
+        .backend()
+        .artifacts(&spec_dir, entry)
+        .into_iter()
+        .map(Artifact::from)
+        .collect();
 
     Some(SpecDetail {
         id: id.to_string(),
-        backend: backend_str(entry.backend).to_string(),
+        backend: entry.backend.as_str().to_string(),
         path: rel_path,
         artifacts,
     })
-}
-
-/// Recursively collects `spec.md` files under `dir` into artifacts, naming each
-/// by its path relative to `base`.
-fn collect_spec_md(dir: &Path, base: &Path, out: &mut Vec<Artifact>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            collect_spec_md(&path, base, out);
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("spec.md")
-            && let Ok(content) = std::fs::read_to_string(&path)
-        {
-            let name = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            out.push(Artifact { name, content });
-        }
-    }
 }
 
 /// One task entry.
@@ -268,53 +178,25 @@ pub fn get_tasks(ctx: &RepoContext, spec: &str) -> Vec<TaskInfo> {
         return Vec::new();
     };
 
-    match entry.backend {
-        SpecBackendKind::SpecKit => specs::speckit::parse_tasks_md(&content)
-            .into_iter()
-            .flat_map(|phase| {
-                phase.tasks.into_iter().map(move |t| TaskInfo {
-                    id: t.id,
-                    phase: t.phase,
-                    parallel: t.p_marker,
-                    description: t.description,
-                    complete: t.complete,
-                })
-            })
-            .collect(),
-        // OpenSpec / Markdown tasks.md: flat checkbox list, phases from `## `.
-        _ => parse_checkbox_tasks(&content),
-    }
+    entry
+        .backend
+        .backend()
+        .parse_tasks(&content)
+        .into_iter()
+        .map(TaskInfo::from)
+        .collect()
 }
 
-/// Parses a flat Markdown checkbox task list, tracking `## ` headings as
-/// phases. Used for `OpenSpec` `tasks.md`.
-fn parse_checkbox_tasks(content: &str) -> Vec<TaskInfo> {
-    let mut phase = 0u32;
-    let mut seq = 0u32;
-    let mut out = Vec::new();
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with("## ") {
-            phase += 1;
-            continue;
+impl From<SpecTask> for TaskInfo {
+    fn from(t: SpecTask) -> Self {
+        Self {
+            id: t.id,
+            phase: t.phase,
+            parallel: t.parallel,
+            description: t.description,
+            complete: t.complete,
         }
-        let Some(rest) = t.strip_prefix("- [").or_else(|| t.strip_prefix("* [")) else {
-            continue;
-        };
-        let Some(mark) = rest.chars().next() else {
-            continue;
-        };
-        let desc = rest.get(2..).unwrap_or("").trim().to_string();
-        seq += 1;
-        out.push(TaskInfo {
-            id: format!("{seq}"),
-            phase,
-            parallel: false,
-            description: desc,
-            complete: mark == 'x' || mark == 'X',
-        });
     }
-    out
 }
 
 /// Spec dependency graph node.
@@ -377,7 +259,7 @@ pub fn dependency_graph(ctx: &RepoContext) -> DependencyGraph {
         .iter()
         .map(|e| GraphNode {
             id: e.id.clone(),
-            backend: backend_str(e.backend).to_string(),
+            backend: e.backend.as_str().to_string(),
         })
         .collect();
 

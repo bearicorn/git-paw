@@ -1,5 +1,5 @@
-//! Bundled per-backend task-prompt templates and the single exhaustive
-//! [`SpecBackendKind`] selector over them.
+//! Task-prompt templates: the shape every spec backend's templates share,
+//! their rendering, and the no-spec fallback.
 //!
 //! A spec format's task prompt is a pair of bundled assets: the **prose**
 //! template every backend has, and an optional **entry-point** template — one
@@ -7,18 +7,19 @@
 //! agent's pane goes idle (`boot-block`, "A declared workflow entry point is
 //! submitted as its own composer line").
 //!
-//! The selector lives here, in one place, because three consumers need the
-//! same answer and a second hand-maintained match would drift: the launch
-//! flow's `build_task_prompt`, which renders both templates; the doctor's
+//! Each format's templates are declared by its
+//! [`SpecBackend`](crate::specs::SpecBackend). Two consumers read them through
+//! [`templates_for`] so they cannot disagree: the launch flow's
+//! `build_task_prompt`, which renders both templates, and the doctor's
 //! spec-workflow check, which probes whether the workflow command a format's
-//! prompt names is reachable from a worktree; and the compiler, which rejects
-//! a new [`SpecBackendKind`] variant until it is given both templates here.
+//! prompt names is reachable from a worktree.
 //!
 //! No workflow command is written in Rust. The command text exists only in
 //! the backend's bundled entry-point template, so a format's apply invocation
 //! can change without touching compiled code — and a format that has no
 //! apply workflow simply declares no template.
 
+use crate::agents::SIDECAR_REL_PATH;
 use crate::specs::SpecBackendKind;
 
 /// The prose template every backend's task prompt carries, and the optional
@@ -33,46 +34,51 @@ pub struct TaskPromptTemplates {
     pub entry_point: Option<&'static str>,
 }
 
+impl TaskPromptTemplates {
+    /// Fills `{{SIDECAR_REL_PATH}}` and `{{SPEC_ID}}` into both templates.
+    #[must_use]
+    pub fn render(self, spec_id: &str) -> TaskPrompt {
+        let fill = |template: &str| {
+            template
+                .replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH)
+                .replace("{{SPEC_ID}}", spec_id)
+        };
+        TaskPrompt {
+            prose: fill(self.prose),
+            entry_point: self.entry_point.map(fill),
+        }
+    }
+}
+
+/// An agent's rendered task prompt: the prose its first message carries, and
+/// — when the spec format declares one — the workflow entry point submitted
+/// as its own composer line once the pane goes idle.
+///
+/// The entry point is deliberately NOT part of `prose`. A command embedded in
+/// a prose paragraph is a command a weaker model may narrate instead of
+/// invoke (GP-54); submitted alone it is what a paste-aware CLI parses as a
+/// slash-command invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPrompt {
+    /// The assignment prose appended to the boot block.
+    pub prose: String,
+    /// The single command line to submit after `prose`, when declared.
+    pub entry_point: Option<String>,
+}
+
 const TASK_PROMPT_NO_SPEC: &str = include_str!("../assets/boot-task-prompts/no-spec.md");
-const TASK_PROMPT_OPENSPEC: &str = include_str!("../assets/boot-task-prompts/openspec.md");
-const TASK_PROMPT_OPENSPEC_ENTRY: &str =
-    include_str!("../assets/boot-task-prompts/openspec.entry.md");
-const TASK_PROMPT_MARKDOWN: &str = include_str!("../assets/boot-task-prompts/markdown.md");
-const TASK_PROMPT_SPECKIT: &str = include_str!("../assets/boot-task-prompts/speckit.md");
-const TASK_PROMPT_SUPERPOWERS: &str = include_str!("../assets/boot-task-prompts/superpowers.md");
 
 /// The templates for `backend`, or — for `None` — the no-spec fallback used
 /// when no spec is associated with the agent's branch.
-///
-/// The `Some` arm is the one exhaustive match over [`SpecBackendKind`] in the
-/// codebase for task-prompt purposes: adding a variant fails to compile here
-/// until both of its templates are named.
 #[must_use]
 pub fn templates_for(backend: Option<SpecBackendKind>) -> TaskPromptTemplates {
-    let Some(backend) = backend else {
-        return TaskPromptTemplates {
+    backend.map_or(
+        TaskPromptTemplates {
             prose: TASK_PROMPT_NO_SPEC,
             entry_point: None,
-        };
-    };
-    match backend {
-        SpecBackendKind::OpenSpec => TaskPromptTemplates {
-            prose: TASK_PROMPT_OPENSPEC,
-            entry_point: Some(TASK_PROMPT_OPENSPEC_ENTRY),
         },
-        SpecBackendKind::Markdown => TaskPromptTemplates {
-            prose: TASK_PROMPT_MARKDOWN,
-            entry_point: None,
-        },
-        SpecBackendKind::SpecKit => TaskPromptTemplates {
-            prose: TASK_PROMPT_SPECKIT,
-            entry_point: None,
-        },
-        SpecBackendKind::Superpowers => TaskPromptTemplates {
-            prose: TASK_PROMPT_SUPERPOWERS,
-            entry_point: None,
-        },
-    }
+        |kind| kind.backend().task_prompt_templates(),
+    )
 }
 
 /// The bare command word of `backend`'s declared entry point — the leading
