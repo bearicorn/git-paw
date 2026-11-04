@@ -55,14 +55,6 @@ const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch
 /// writes into an agent CLI's own settings file.
 const CLI_SETUP_DEFAULT: &str = include_str!("../assets/agent-skills/cli-setup.md");
 
-/// Per-backend `{{SPEC_PATH_DOCTRINE}}` sentences, compiled into the binary.
-/// See [`render_spec_path_doctrine`] for the assembly (dedupe + multi-backend
-/// join) that stays compiled around these.
-const SPEC_DOCTRINE_OPENSPEC: &str = include_str!("../assets/spec-path-doctrine/openspec.md");
-const SPEC_DOCTRINE_SPECKIT: &str = include_str!("../assets/spec-path-doctrine/speckit.md");
-const SPEC_DOCTRINE_MARKDOWN: &str = include_str!("../assets/spec-path-doctrine/markdown.md");
-const SPEC_DOCTRINE_SUPERPOWERS: &str = include_str!("../assets/spec-path-doctrine/superpowers.md");
-
 /// The governance section heading + intro sentence, compiled into the
 /// binary. See [`governance_section_paths`] for the bullet-list assembly
 /// that stays compiled around this.
@@ -751,9 +743,7 @@ fn render_for_agent_id(
     // for the session, stripped entirely otherwise (speckit/markdown/none). The
     // region markers themselves are always removed. See the `opsx-role-gating`
     // spec, "Role-gating is scoped to the OpenSpec spec engine".
-    let opsx_active = backends
-        .iter()
-        .any(|b| matches!(b, crate::specs::SpecBackendKind::OpenSpec));
+    let opsx_active = backends.iter().any(|b| b.backend().uses_opsx_workflow());
     output = render_opsx_regions(&output, opsx_active, OPSX_REGION_BEGIN, OPSX_REGION_END);
 
     // Warn about any remaining {{...}} placeholders that were not consumed,
@@ -873,14 +863,7 @@ pub fn render_spec_path_doctrine(backends: &[crate::specs::SpecBackendKind]) -> 
         return SPEC_DOCTRINE_NO_BACKEND_SENTINEL.to_string();
     }
 
-    let per_backend = |kind: SpecBackendKind| -> &'static str {
-        match kind {
-            SpecBackendKind::OpenSpec => SPEC_DOCTRINE_OPENSPEC,
-            SpecBackendKind::SpecKit => SPEC_DOCTRINE_SPECKIT,
-            SpecBackendKind::Markdown => SPEC_DOCTRINE_MARKDOWN,
-            SpecBackendKind::Superpowers => SPEC_DOCTRINE_SUPERPOWERS,
-        }
-    };
+    let per_backend = |kind: SpecBackendKind| kind.backend().path_doctrine();
 
     if seen.len() == 1 {
         per_backend(seen[0]).to_string()
@@ -2482,7 +2465,14 @@ mod tests {
     #[test]
     fn standardized_skill_renders_without_session_values() {
         let md = standardized_for(&[crate::specs::SpecBackendKind::OpenSpec]);
-        assert!(md.contains(SPEC_DOCTRINE_OPENSPEC.trim()));
+        assert!(
+            md.contains(
+                crate::specs::SpecBackendKind::OpenSpec
+                    .backend()
+                    .path_doctrine()
+                    .trim()
+            )
+        );
         assert!(!md.contains("{{GIT_PAW_BROKER_URL}}"));
         assert!(!md.contains("http://"));
         assert!(!md.contains("paw-"));

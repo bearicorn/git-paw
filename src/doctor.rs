@@ -1803,10 +1803,7 @@ fn probe_spec_workflow(
     spec_cli: &SpecCliProbe,
 ) -> SpecWorkflowProbe {
     let resolved_format = crate::specs::resolved_spec_type(config, repo_root);
-    let command = resolved_format
-        .as_deref()
-        .and_then(crate::specs::SpecBackendKind::parse)
-        .and_then(instructed_workflow_command);
+    let command = crate::specs::resolved_spec_kind(config).and_then(instructed_workflow_command);
     let Some(command) = command else {
         return SpecWorkflowProbe {
             resolved_format,

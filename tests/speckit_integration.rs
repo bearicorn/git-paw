@@ -12,8 +12,8 @@
 use std::fs;
 
 use git_paw::config::{PawConfig, SpecsConfig};
-use git_paw::specs::scan_specs_with_override;
 use git_paw::specs::speckit::detect_constitution;
+use git_paw::specs::{SpecBackendKind, scan_specs_with_override};
 
 /// Builds the fixture tree rooted at `root` and returns the `.specify/specs/`
 /// path.
@@ -228,7 +228,8 @@ fn cli_override_speckit_routes_and_supplies_default_dir() {
     // needs an explicit source: `--specs-format speckit` selects the SpecKit
     // backend and supplies its ".specify/specs" default dir.
     let config = PawConfig::default();
-    let entries = scan_specs_with_override(&config, tmp.path(), Some("speckit")).unwrap();
+    let entries =
+        scan_specs_with_override(&config, tmp.path(), Some(SpecBackendKind::SpecKit)).unwrap();
     assert!(
         !entries.is_empty(),
         "speckit override should produce entries"

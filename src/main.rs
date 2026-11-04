@@ -89,7 +89,7 @@ fn run(command: Command) -> Result<(), PawError> {
             let supervisor_enabled =
                 resolve_supervisor_mode_from_cwd(no_supervisor, supervisor || unattended, dry_run)?;
             let spec_mode = SpecMode::from_flags(from_all_specs, specs.as_deref());
-            let specs_format = specs_format.map(|f| f.as_str().to_string());
+            let specs_format = specs_format.map(git_paw::specs::SpecBackendKind::from);
             let prompter = &interactive::TerminalPrompter;
             let out = &mut CliOutput;
             let outcome = match resolve_dispatch_target(&spec_mode, supervisor_enabled) {

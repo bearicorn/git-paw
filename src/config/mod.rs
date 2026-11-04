@@ -931,13 +931,14 @@ pub fn load_repo_config(repo_root: &Path) -> Result<PawConfig, PawError> {
     Ok(config)
 }
 
-/// Populates `config.governance.constitution` from
-/// `git_paw::specs::speckit::detect_constitution` when:
+/// Populates `config.governance.constitution` from the configured spec
+/// format's [`SpecBackend::constitution`](crate::specs::SpecBackend::constitution)
+/// discovery when:
 ///
 /// 1. The user has not set `governance.constitution` explicitly
 ///    (i.e. it is `None` after TOML deserialisation), AND
-/// 2. A `[specs]` section is present, AND
-/// 3. `specs.type == "speckit"`.
+/// 2. A `[specs]` section with a known `type` is present, AND
+/// 3. That format discovers a constitution (only Spec Kit does).
 ///
 /// Explicit user values always win — even if the explicit value points
 /// at a path that does not exist. The check is `is_some()`, not
@@ -945,9 +946,7 @@ pub fn load_repo_config(repo_root: &Path) -> Result<PawConfig, PawError> {
 /// still suppresses auto-wiring. This lets users disable the auto-wiring
 /// without deleting the constitution slot.
 ///
-/// This function is intentionally a no-op when the `SpecKit` backend
-/// is not active. It is also a no-op when the configured `specs.dir`'s
-/// parent does not contain `memory/constitution.md`.
+/// An untyped or unknown `[specs] type` never auto-wires.
 fn auto_wire_governance(config: &mut PawConfig, repo_root: &Path) {
     if config.governance.constitution.is_some() {
         return;
@@ -955,15 +954,16 @@ fn auto_wire_governance(config: &mut PawConfig, repo_root: &Path) {
     let Some(specs_cfg) = config.specs.as_ref() else {
         return;
     };
-    let Some(spec_type) = specs_cfg.spec_type.as_deref() else {
+    let Some(Ok(kind)) = specs_cfg
+        .spec_type
+        .as_deref()
+        .map(str::parse::<crate::specs::SpecBackendKind>)
+    else {
         return;
     };
-    if spec_type != "speckit" {
-        return;
-    }
     let dir = specs_cfg.dir.as_deref().unwrap_or("specs");
     let specs_dir = repo_root.join(dir);
-    if let Some(detected) = crate::specs::speckit::detect_constitution(&specs_dir) {
+    if let Some(detected) = kind.backend().constitution(&specs_dir) {
         config.governance.constitution = Some(detected);
     }
 }

@@ -29,6 +29,7 @@ use crate::config;
 use crate::error::PawError;
 use crate::mcp::server::GitPawMcpServer;
 use crate::mcp::{logging, repo_write};
+use crate::specs::SpecBackendKind;
 use crate::specs::openspec::{self, ChangeFinding};
 
 /// Parameters for [`GitPawMcpServer::create_spec`].
@@ -108,10 +109,11 @@ fn openspec_dir(root: &Path, tool: &str) -> Result<String, ErrorData> {
             None,
         ));
     };
-    let spec_type = specs.spec_type.as_deref().unwrap_or("openspec");
-    if spec_type != "openspec" {
+    let openspec = SpecBackendKind::OpenSpec.as_str();
+    let spec_type = specs.spec_type.as_deref().unwrap_or(openspec);
+    if spec_type.parse::<SpecBackendKind>().ok() != Some(SpecBackendKind::OpenSpec) {
         return Err(ErrorData::invalid_params(
-            format!("`{tool}` is not supported for format {spec_type}; only openspec is"),
+            format!("`{tool}` is not supported for format {spec_type}; only {openspec} is"),
             None,
         ));
     }

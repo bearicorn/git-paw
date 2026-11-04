@@ -545,7 +545,7 @@ pub struct StartWithSpecsOptions<'a> {
     /// Which discovered specs to launch.
     pub spec_mode: SpecMode,
     /// `--specs-format`.
-    pub specs_format: Option<String>,
+    pub specs_format: Option<crate::specs::SpecBackendKind>,
     /// `--dry-run`: print the plan, create nothing.
     pub dry_run: bool,
     /// `--force`: launch despite uncommitted spec changes.
@@ -583,7 +583,7 @@ pub fn start_with_specs(
     } = opts;
     let cli_flag = cli.as_deref();
     let spec_mode = &spec_mode;
-    let specs_format_override = specs_format.as_deref();
+    let specs_format_override = specs_format;
     let repo_root = ctx.repo_root().to_path_buf();
 
     // Check for existing session (skip reattach/recovery during dry-run).

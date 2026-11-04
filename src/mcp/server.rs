@@ -161,13 +161,9 @@ fn validate_startup_config(ctx: &RepoContext) -> Result<(), PawError> {
     let config = crate::config::load_config(&ctx.root, None)?;
     if let Some(specs) = config.specs.as_ref()
         && let Some(spec_type) = specs.spec_type.as_deref()
-        && SpecBackendKind::parse(spec_type).is_none()
+        && spec_type.parse::<SpecBackendKind>().is_err()
     {
-        let valid = SpecBackendKind::ALL
-            .iter()
-            .map(|k| k.type_str())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let valid = SpecBackendKind::ALL.map(SpecBackendKind::as_str).join(", ");
         return Err(PawError::McpError(format!(
             "invalid [specs].type = \"{spec_type}\" in .git-paw/config.toml. \
              Valid values: {valid}."
@@ -314,7 +310,7 @@ mod tests {
             std::fs::create_dir(&git_paw_dir).unwrap();
             std::fs::write(
                 git_paw_dir.join("config.toml"),
-                format!("[specs]\ntype = \"{}\"\n", kind.type_str()),
+                format!("[specs]\ntype = \"{}\"\n", kind.as_str()),
             )
             .unwrap();
             let ctx = RepoContext {
@@ -329,7 +325,7 @@ mod tests {
             assert!(
                 validate_startup_config(&ctx).is_ok(),
                 "{kind:?} ({}) should be accepted by startup validation",
-                kind.type_str()
+                kind.as_str()
             );
         }
     }
@@ -357,9 +353,9 @@ mod tests {
         assert!(err.contains("unrecognised"), "got: {err}");
         for kind in SpecBackendKind::ALL {
             assert!(
-                err.contains(kind.type_str()),
+                err.contains(kind.as_str()),
                 "error should list {} as a valid value; got: {err}",
-                kind.type_str()
+                kind.as_str()
             );
         }
     }

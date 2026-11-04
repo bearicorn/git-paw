@@ -12,7 +12,12 @@ use rmcp::schemars;
 use serde::Serialize;
 
 use crate::error::PawError;
-use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
+use crate::specs::{SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, read_named_artifact};
+use crate::task_prompts::TaskPromptTemplates;
+
+const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/openspec.md");
+const TASK_PROMPT: &str = include_str!("../../assets/boot-task-prompts/openspec.md");
+const TASK_PROMPT_ENTRY: &str = include_str!("../../assets/boot-task-prompts/openspec.entry.md");
 
 /// Backend for the `OpenSpec` directory-based spec format.
 ///
@@ -23,6 +28,40 @@ use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
 pub struct OpenSpecBackend;
 
 impl SpecBackend for OpenSpecBackend {
+    fn kind(&self) -> SpecBackendKind {
+        SpecBackendKind::OpenSpec
+    }
+
+    fn path_doctrine(&self) -> &'static str {
+        PATH_DOCTRINE
+    }
+
+    fn task_prompt_templates(&self) -> TaskPromptTemplates {
+        TaskPromptTemplates {
+            prose: TASK_PROMPT,
+            entry_point: Some(TASK_PROMPT_ENTRY),
+        }
+    }
+
+    fn title_artifact(&self) -> Option<&'static str> {
+        Some("proposal.md")
+    }
+
+    /// The proposal, design and tasks, then every capability
+    /// `specs/**/spec.md` named by its path inside the change.
+    fn artifacts(&self, spec_dir: &Path, _entry: &SpecEntry) -> Vec<SpecArtifact> {
+        let mut artifacts: Vec<SpecArtifact> = ["proposal.md", "design.md", "tasks.md"]
+            .into_iter()
+            .filter_map(|f| read_named_artifact(spec_dir, f))
+            .collect();
+        collect_spec_md(&spec_dir.join("specs"), spec_dir, &mut artifacts);
+        artifacts
+    }
+
+    fn uses_opsx_workflow(&self) -> bool {
+        true
+    }
+
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError> {
         let entries = fs::read_dir(dir).map_err(|e| {
             PawError::SpecError(format!("cannot read directory {}: {e}", dir.display()))
@@ -100,6 +139,30 @@ impl SpecBackend for OpenSpecBackend {
         }
 
         Ok(specs)
+    }
+}
+
+/// Recursively collects `spec.md` files under `dir` into artifacts, naming each
+/// by its path relative to `base`.
+fn collect_spec_md(dir: &Path, base: &Path, out: &mut Vec<SpecArtifact>) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_spec_md(&path, base, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("spec.md")
+            && let Ok(content) = fs::read_to_string(&path)
+        {
+            let name = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            out.push(SpecArtifact { name, content });
+        }
     }
 }
 

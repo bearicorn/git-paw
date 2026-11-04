@@ -21,8 +21,11 @@ use regex::Regex;
 
 use crate::error::PawError;
 use crate::specs::branch_segment_slug;
-use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
+use crate::specs::{
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, read_named_artifact,
+};
 use crate::static_regex::static_regex;
+use crate::task_prompts::TaskPromptTemplates;
 
 /// Phase number assigned to tasks that appear before any `## Phase N` heading.
 pub(crate) const IMPLICIT_PHASE_NUMBER: u32 = 0;
@@ -71,11 +74,90 @@ pub struct Feature {
     pub checklists: Vec<(String, String)>,
 }
 
+const PATH_DOCTRINE: &str = include_str!("../../assets/spec-path-doctrine/speckit.md");
+const TASK_PROMPT: &str = include_str!("../../assets/boot-task-prompts/speckit.md");
+
+/// The three named Spec Kit artifacts, in the order they are served.
+const NAMED_ARTIFACTS: [&str; 3] = ["spec.md", "plan.md", "tasks.md"];
+
 /// Backend for the Spec Kit (`.specify/`) artefact format.
 #[derive(Debug)]
 pub struct SpecKitBackend;
 
 impl SpecBackend for SpecKitBackend {
+    fn kind(&self) -> SpecBackendKind {
+        SpecBackendKind::SpecKit
+    }
+
+    fn default_dir(&self) -> &'static str {
+        ".specify/specs"
+    }
+
+    fn path_doctrine(&self) -> &'static str {
+        PATH_DOCTRINE
+    }
+
+    fn task_prompt_templates(&self) -> TaskPromptTemplates {
+        TaskPromptTemplates {
+            prose: TASK_PROMPT,
+            entry_point: None,
+        }
+    }
+
+    fn title_artifact(&self) -> Option<&'static str> {
+        Some("spec.md")
+    }
+
+    /// The spec, plan and tasks, then every other `*.md` (the checklists)
+    /// sorted by filename.
+    fn artifacts(&self, spec_dir: &Path, _entry: &SpecEntry) -> Vec<SpecArtifact> {
+        let mut artifacts: Vec<SpecArtifact> = NAMED_ARTIFACTS
+            .into_iter()
+            .filter_map(|f| read_named_artifact(spec_dir, f))
+            .collect();
+        if let Ok(rd) = fs::read_dir(spec_dir) {
+            let mut extra: Vec<_> = rd
+                .flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    let is_md = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("md"));
+                    let name = p.file_name()?.to_str()?.to_string();
+                    let lower = name.to_ascii_lowercase();
+                    if is_md && !NAMED_ARTIFACTS.contains(&lower.as_str()) {
+                        Some((name, fs::read_to_string(&p).ok()?))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            extra.sort_by(|a, b| a.0.cmp(&b.0));
+            artifacts.extend(
+                extra
+                    .into_iter()
+                    .map(|(name, content)| SpecArtifact { name, content }),
+            );
+        }
+        artifacts
+    }
+
+    fn parse_tasks(&self, content: &str) -> Vec<SpecTask> {
+        parse_tasks_md(content)
+            .into_iter()
+            .flat_map(|phase| phase.tasks)
+            .map(|t| SpecTask {
+                id: t.id,
+                phase: t.phase,
+                parallel: t.p_marker,
+                description: t.description,
+                complete: t.complete,
+            })
+            .collect()
+    }
+
+    fn constitution(&self, specs_dir: &Path) -> Option<PathBuf> {
+        detect_constitution(specs_dir)
+    }
+
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError> {
         let read = fs::read_dir(dir).map_err(|e| {
             PawError::SpecError(format!("cannot read directory {}: {e}", dir.display()))

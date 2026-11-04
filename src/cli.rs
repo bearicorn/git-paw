@@ -6,6 +6,8 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use crate::specs::SpecBackendKind;
+
 /// Spec format selector for the `--specs-format` flag.
 ///
 /// Four formats are supported:
@@ -27,14 +29,20 @@ pub enum SpecsFormat {
 }
 
 impl SpecsFormat {
-    /// Returns the backend-dispatch string for this format.
+    /// Returns the format's wire name (the `[specs] type` value).
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Openspec => "openspec",
-            Self::Markdown => "markdown",
-            Self::Speckit => "speckit",
-            Self::Superpowers => "superpowers",
+        SpecBackendKind::from(self).as_str()
+    }
+}
+
+impl From<SpecsFormat> for SpecBackendKind {
+    fn from(format: SpecsFormat) -> Self {
+        match format {
+            SpecsFormat::Openspec => Self::OpenSpec,
+            SpecsFormat::Markdown => Self::Markdown,
+            SpecsFormat::Speckit => Self::SpecKit,
+            SpecsFormat::Superpowers => Self::Superpowers,
         }
     }
 }

@@ -445,6 +445,50 @@ fn no_broker_message_variant_is_dedicated_to_permission_prompts() {
 // layer.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// spec-providers: "Per-format behaviour is reached only through the backend".
+// ---------------------------------------------------------------------------
+
+/// The non-test part of `body`: everything before its first `#[cfg(test)]`
+/// (git-paw keeps unit tests in a trailing `mod tests`).
+fn production_part(body: &str) -> &str {
+    body.find("#[cfg(test)]").map_or(body, |i| &body[..i])
+}
+
+/// Outside `src/specs/`, no production code compares a spec-type string or
+/// matches on `SpecBackendKind`: per-format behaviour is reached through
+/// `SpecBackendKind::backend()`, so a new format cannot be silently missed by
+/// a hand-maintained list (the gap that left Superpowers unsupported by the
+/// MCP server).
+#[test]
+fn spec_format_dispatch_happens_only_inside_specs() {
+    let string_compare = regex::Regex::new(
+        r#"(==|!=)\s*(Some\()?"(openspec|markdown|speckit|superpowers)"|"(openspec|markdown|speckit|superpowers)"\s*(=>|==|!=|\|)"#,
+    )
+    .unwrap();
+    let kind_match =
+        regex::Regex::new(r"SpecBackendKind::\w+\s*(\||=>|\{)|matches!\([^)]*SpecBackendKind::")
+            .unwrap();
+    let specs_dir = std::path::Path::new("src").join("specs");
+    let mut offenders = Vec::new();
+    for (path, body) in source_files() {
+        if std::path::Path::new(&path).starts_with(&specs_dir) || path.ends_with("_tests.rs") {
+            continue;
+        }
+        for (n, line) in production_part(&body).lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            if string_compare.is_match(code) || kind_match.is_match(code) {
+                offenders.push(format!("{path}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "spec-format dispatch outside src/specs/ — go through SpecBackendKind::backend():\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// Every file in `src/` that could call into the setup writers, with its
 /// repo-relative path.
 fn source_files() -> Vec<(String, String)> {
