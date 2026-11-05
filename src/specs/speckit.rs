@@ -21,8 +21,10 @@ use regex::Regex;
 
 use crate::error::PawError;
 use crate::specs::branch_segment_slug;
+use crate::specs::resolve::feature_id_of;
 use crate::specs::{
-    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, read_named_artifact,
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecLocation, SpecTask,
+    read_named_artifact,
 };
 use crate::static_regex::static_regex;
 use crate::task_prompts::TaskPromptTemplates;
@@ -104,8 +106,13 @@ impl SpecBackend for SpecKitBackend {
         }
     }
 
-    fn title_artifact(&self) -> Option<&'static str> {
-        Some("spec.md")
+    /// Strip only the whole trailing suffix, so features whose names prefix
+    /// each other stay apart.
+    fn spec_location(&self, specs_dir: &Path, entry: &SpecEntry) -> Option<SpecLocation> {
+        let feature = specs_dir.join(feature_id_of(&entry.id));
+        feature
+            .is_dir()
+            .then(|| SpecLocation::directory(feature, "tasks.md", "spec.md"))
     }
 
     /// The spec, plan and tasks, then every other `*.md` (the checklists)

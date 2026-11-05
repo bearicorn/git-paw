@@ -124,7 +124,7 @@ Every per-format decision sits behind the `SpecBackend` trait in `src/specs/`, r
    `backend()`.
 2. Add a `SpecBackend` impl in a new `src/specs/<format>.rs`. Every per-format method is
    required — the compiler makes the format decide its directory, scanning, doctrine, task
-   prompt, title artifact, artifacts, task parsing, opsx gating, governance discovery and
+   prompt, spec location (directory or file, tasks file, title file), artifacts, task parsing, opsx gating, governance discovery and
    spec-authoring support. Reuse `parse_checkbox_tasks` and `single_file_artifacts` where they
    fit. Put its path doctrine and task-prompt prose in bundled assets under
    `assets/spec-path-doctrine/` and `assets/boot-task-prompts/`.

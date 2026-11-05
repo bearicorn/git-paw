@@ -55,6 +55,37 @@ pub struct SpecArtifact {
     pub content: String,
 }
 
+/// Where a spec lives on disk, as its format's backend decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecLocation {
+    /// The spec itself: a directory, or a single `.md` file.
+    pub path: PathBuf,
+    /// The file the spec's task list is parsed from.
+    pub tasks_file: PathBuf,
+    /// The file whose first `# ` heading titles the spec.
+    pub title_file: PathBuf,
+}
+
+impl SpecLocation {
+    /// A directory spec whose tasks and title come from files inside it.
+    pub(crate) fn directory(dir: PathBuf, tasks: &str, title: &str) -> Self {
+        Self {
+            tasks_file: dir.join(tasks),
+            title_file: dir.join(title),
+            path: dir,
+        }
+    }
+
+    /// A single-file spec: the file is its own tasks and title source.
+    pub(crate) fn file(file: PathBuf) -> Self {
+        Self {
+            tasks_file: file.clone(),
+            title_file: file.clone(),
+            path: file,
+        }
+    }
+}
+
 /// One task parsed from a spec's task list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecTask {
@@ -97,12 +128,28 @@ pub trait SpecBackend: fmt::Debug {
         self.task_prompt_templates().render(&entry.id)
     }
 
-    /// The file inside a spec's directory whose first `# ` heading titles the
-    /// spec, if the format has one.
-    fn title_artifact(&self) -> Option<&'static str>;
+    /// Where `entry`, scanned from `specs_dir`, lives: its directory or file,
+    /// and the files its tasks and title are read from. `None` when the spec
+    /// is no longer on disk.
+    fn spec_location(&self, specs_dir: &Path, entry: &SpecEntry) -> Option<SpecLocation>;
 
-    /// The artifacts served for `entry`, whose directory is `spec_dir`.
-    fn artifacts(&self, spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact>;
+    /// [`SpecBackend::spec_location`] for every entry, keyed by entry id; an
+    /// entry that cannot be located is absent. A format whose lookup reads
+    /// the specs directory overrides this to read it once.
+    fn spec_locations(
+        &self,
+        specs_dir: &Path,
+        entries: &[SpecEntry],
+    ) -> HashMap<String, SpecLocation> {
+        entries
+            .iter()
+            .filter_map(|e| Some((e.id.clone(), self.spec_location(specs_dir, e)?)))
+            .collect()
+    }
+
+    /// The artifacts served for `entry`, located at `spec_path` (its
+    /// [`SpecLocation::path`]).
+    fn artifacts(&self, spec_path: &Path, entry: &SpecEntry) -> Vec<SpecArtifact>;
 
     /// Parses a spec's task list.
     fn parse_tasks(&self, content: &str) -> Vec<SpecTask>;
@@ -452,6 +499,24 @@ pub fn opsx_role_gating_applies(config: &PawConfig) -> bool {
     resolved_spec_kind(config).is_some_and(|k| k.backend().uses_opsx_workflow())
 }
 
+/// Locates scanned `entries` under `specs_dir`, each through its own format's
+/// backend, keyed by entry id. An entry that cannot be located is absent.
+#[must_use]
+pub fn locate_specs(specs_dir: &Path, entries: &[SpecEntry]) -> HashMap<String, SpecLocation> {
+    let mut locations = HashMap::new();
+    for kind in SpecBackendKind::ALL {
+        let of_kind: Vec<SpecEntry> = entries
+            .iter()
+            .filter(|e| e.backend == kind)
+            .cloned()
+            .collect();
+        if !of_kind.is_empty() {
+            locations.extend(kind.backend().spec_locations(specs_dir, &of_kind));
+        }
+    }
+    locations
+}
+
 /// Scans for pending specs using the configuration from `[specs]`.
 ///
 /// Reads the spec directory and format type from `config`, selects the
@@ -595,6 +660,163 @@ mod tests {
                 }],
                 "{kind:?}"
             );
+        }
+    }
+
+    fn write_file(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    fn locate(kind: SpecBackendKind, specs_dir: &Path, id: &str) -> Option<SpecLocation> {
+        let backend = kind.backend();
+        let entries = backend.scan(specs_dir).unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("no entry {id} in {entries:?}"));
+        backend.spec_location(specs_dir, entry)
+    }
+
+    /// `spec-providers`: "Directory formats locate a directory".
+    #[test]
+    fn directory_formats_locate_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let changes = tmp.path().join("openspec/changes");
+        write_file(&changes.join("add-auth/proposal.md"), "# Add auth\n");
+        write_file(&changes.join("add-auth/tasks.md"), "- [ ] 1.1 do\n");
+        let specs = tmp.path().join("specs");
+        write_file(&specs.join("001-login/spec.md"), "# Login\n");
+        write_file(
+            &specs.join("001-login/tasks.md"),
+            "## Phase 1: Setup\n- [x] T001 init\n- [ ] T002 [P] add form\n",
+        );
+
+        let openspec = locate(SpecBackendKind::OpenSpec, &changes, "add-auth").unwrap();
+        assert_eq!(openspec.path, changes.join("add-auth"));
+        assert_eq!(openspec.tasks_file, changes.join("add-auth/tasks.md"));
+        assert_eq!(openspec.title_file, changes.join("add-auth/proposal.md"));
+
+        let speckit = locate(SpecBackendKind::SpecKit, &specs, "001-login-T002").unwrap();
+        assert_eq!(speckit.path, specs.join("001-login"));
+        assert_eq!(speckit.tasks_file, specs.join("001-login/tasks.md"));
+        assert_eq!(speckit.title_file, specs.join("001-login/spec.md"));
+    }
+
+    /// `spec-providers`: "Single-file formats locate the file".
+    #[test]
+    fn single_file_formats_locate_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let specs = tmp.path().join("specs");
+        let spec = specs.join("fix-bug.md");
+        write_file(
+            &spec,
+            "---\npaw_status: pending\n---\n# Fix the bug\n\n- [ ] reproduce\n",
+        );
+        let plans = tmp.path().join("plans");
+        let plan = plans.join("2026-07-20-add-auth.md");
+        write_file(
+            &plan,
+            "# Add auth Implementation Plan\n\n### Task 1: Validation\n\n- [ ] **Step 1: test**\n",
+        );
+
+        for (kind, dir, id, file) in [
+            (SpecBackendKind::Markdown, &specs, "fix-bug", &spec),
+            (
+                SpecBackendKind::Superpowers,
+                &plans,
+                "2026-07-20-add-auth",
+                &plan,
+            ),
+        ] {
+            let loc = locate(kind, dir, id).unwrap();
+            assert_eq!(&loc.path, file, "{kind:?}");
+            assert_eq!(&loc.tasks_file, file, "{kind:?}");
+            assert_eq!(&loc.title_file, file, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn markdown_paw_branch_id_locates_its_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = tmp.path().join("whatever.md");
+        write_file(
+            &spec,
+            "---\npaw_status: pending\npaw_branch: add-auth\n---\n# Auth\n",
+        );
+        write_file(
+            &tmp.path().join("add-auth.md"),
+            "---\npaw_status: done\n---\n# Old\n",
+        );
+        let loc = locate(SpecBackendKind::Markdown, tmp.path(), "add-auth").unwrap();
+        assert_eq!(loc.path, spec);
+    }
+
+    /// `spec-providers`: "A Spec Kit phase entry locates its feature".
+    #[test]
+    fn speckit_phase_entry_locates_its_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(
+            &tmp.path().join("001-login/tasks.md"),
+            "## Phase 1: Setup\n- [x] T001 init\n## Phase 2: Core\n- [ ] T003 wire\n",
+        );
+        let loc = locate(SpecBackendKind::SpecKit, tmp.path(), "001-login-phase-2").unwrap();
+        assert_eq!(loc.path, tmp.path().join("001-login"));
+    }
+
+    /// Two Spec Kit features whose names prefix each other each keep their
+    /// own entries.
+    #[test]
+    fn speckit_prefix_feature_names_locate_their_own_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        for feature in ["001-login", "001-login-t"] {
+            write_file(
+                &tmp.path().join(feature).join("tasks.md"),
+                "## Phase 1: Setup\n- [ ] T002 [P] add form\n- [ ] T003 [P] other\n",
+            );
+        }
+        for (id, feature) in [
+            ("001-login-T002", "001-login"),
+            ("001-login-t-T002", "001-login-t"),
+        ] {
+            let loc = locate(SpecBackendKind::SpecKit, tmp.path(), id).unwrap();
+            assert_eq!(loc.path, tmp.path().join(feature), "{id}");
+        }
+    }
+
+    #[test]
+    fn markdown_duplicate_ids_locate_the_first_file_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["b.md", "a.md"] {
+            write_file(
+                &tmp.path().join(name),
+                "---\npaw_status: pending\npaw_branch: same\n---\n# Spec\n",
+            );
+        }
+        let entries = SpecBackendKind::Markdown
+            .backend()
+            .scan(tmp.path())
+            .unwrap();
+        let locations = SpecBackendKind::Markdown
+            .backend()
+            .spec_locations(tmp.path(), &entries);
+        assert_eq!(locations["same"].path, tmp.path().join("a.md"));
+    }
+
+    #[test]
+    fn an_entry_whose_files_are_gone_is_not_located() {
+        let tmp = tempfile::tempdir().unwrap();
+        for kind in SpecBackendKind::ALL {
+            let ghost = SpecEntry {
+                id: "001-ghost-T001".to_string(),
+                backend: kind,
+                branch: String::new(),
+                cli: None,
+                prompt: String::new(),
+                owned_files: None,
+            };
+            let located = kind.backend().spec_locations(tmp.path(), &[ghost]);
+            assert!(located.is_empty(), "{kind:?}: {located:?}");
         }
     }
 
