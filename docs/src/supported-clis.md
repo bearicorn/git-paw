@@ -87,6 +87,10 @@ Any override on the entry (`approval_args`, `session_id_args`, `resume_args`,
 `headless_args`, `mcp`) still wins over the family's row. An unknown `family`
 value fails the config load and lists the accepted values.
 
+A CLI identity with trailing flags resolves its base CLI's record: the id is
+the identity's first word, so `--cli "claude --model x"` is `claude` and gets
+`claude`'s approval flags and session ids, appended after `--model x`.
+
 ### Migrating from PATH shims
 
 Before v0.17.0 git-paw launched a custom entry by its key, so each entry
@@ -166,6 +170,9 @@ git paw add-cli my-agent /usr/local/bin/my-agent
 # Register by binary name (resolved via PATH)
 git paw add-cli my-agent my-agent --display-name "My Agent"
 ```
+
+`git paw add-cli` sets `command` and `display_name` only; set `family` and
+`args` in the `[clis.<name>]` entry of the config file.
 
 Custom CLIs appear alongside detected ones in the selection prompt. See [Configuration](configuration/README.md) for more details.
 

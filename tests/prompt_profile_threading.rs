@@ -168,8 +168,10 @@ fn load_with_mycli_pattern(
     load_with_mycli_profile(&format!("{field} = '{pattern}'"))
 }
 
-/// An empty or whitespace-only marker would match every line under the
-/// helper's `grep -E`, so it fails the load in every marker field.
+/// Spec scenarios "An empty marker fails the load" and "A whitespace-only
+/// broad-grant marker fails the load": an empty or whitespace-only marker
+/// would match every line under the helper's `grep -E`, so it fails the load
+/// in every marker field.
 #[test]
 fn an_empty_marker_fails_the_load_naming_the_field() {
     for field in [
@@ -201,8 +203,10 @@ fn an_empty_marker_fails_the_load_naming_the_field() {
     );
 }
 
-/// A pattern the helper also matches with `grep -E` must stay within the
-/// subset both engines run; one that only Rust understands fails the load.
+/// Spec scenarios "A Rust-only construct fails the load", "Inline flags and
+/// lazy quantifiers fail the load" and "A Rust-only field keeps the full
+/// syntax": a pattern the helper also matches with `grep -E` must stay within
+/// the subset both engines run; one that only Rust understands fails the load.
 #[test]
 fn a_shell_matched_pattern_outside_grep_e_fails_the_load() {
     for (field, pattern) in [
@@ -212,11 +216,16 @@ fn a_shell_matched_pattern_outside_grep_e_fails_the_load() {
     ] {
         let err = load_with_mycli_pattern(field, pattern).expect_err(field);
         assert!(err.contains("grep -E"), "{field}: {err}");
+        assert!(
+            err.contains(&format!("[clis.mycli].prompt_profile.{field}")),
+            "{field}: {err}"
+        );
     }
     // file_prompt_pattern is matched only in Rust, so the full syntax stays.
     load_with_mycli_pattern("file_prompt_pattern", r"(?i)write to\s+(.+)$").expect("loads");
 }
 
+/// Spec scenario "An invalid config makes the helper command fail":
 /// `__prompt-profile` exits non-zero on a config that fails to load, rather
 /// than printing the defaults as if they were the configured profile.
 #[test]

@@ -169,7 +169,10 @@ pub enum Command {
         specs_format: Option<SpecsFormat>,
 
         /// Preview the session plan without executing.
-        #[arg(long, help = "Preview the session plan without executing")]
+        #[arg(
+            long,
+            help = "Preview the session plan without executing; each worker's `runs:` line is its exact pane command"
+        )]
         dry_run: bool,
 
         /// Use a named preset from config.

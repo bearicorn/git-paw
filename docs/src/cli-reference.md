@@ -108,7 +108,7 @@ Options:
       --from-all-specs               Launch from every discovered spec across all configured formats
       --specs [<SPECS>...]           Comma-separated spec names; bare flag opens picker (TTY required)
       --specs-format <SPECS_FORMAT>  Override spec format (openspec, markdown, speckit, superpowers) [possible values: openspec, markdown, speckit, superpowers]
-      --dry-run                      Preview the session plan without executing
+      --dry-run                      Preview the session plan without executing; each worker's `runs:` line is its exact pane command
       --preset <PRESET>              Use a named preset from config
       --supervisor                   Enable supervisor mode for this session
       --no-supervisor                Disable supervisor for this session, overriding any [supervisor] enabled = true in config

@@ -193,6 +193,20 @@ fn a_custom_entry_resolves_its_record() {
     assert_eq!(profile.executable_in(Some(&OsString::new())), Some(command));
 }
 
+/// Scenario "The launch command's leading token is never the id".
+#[test]
+fn the_launch_commands_leading_token_is_never_the_id() {
+    let (_dir, bin) = bin_dir(&["claude"]);
+    let map = clis(&[("foo", entry("claude"))]);
+    let profile = CliProfile::resolve("foo", &map);
+    assert_eq!(profile.id(), "foo");
+    assert_eq!(profile.family(), CliFamily::Generic);
+    assert_eq!(
+        profile.executable_in(Some(bin.as_os_str())),
+        Some(bin.join("claude"))
+    );
+}
+
 /// Scenario "Overrides resolve by id when the executable differs".
 #[test]
 fn overrides_resolve_by_id_when_the_executable_differs() {

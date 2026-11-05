@@ -595,6 +595,9 @@ pub fn supervisor(
         for branch in &branches {
             let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
             let cli = effective_agent_cli(branch);
+            // Refuse before printing anything for this worker, so the plan
+            // never shows a command the launch would refuse to run.
+            let runs = dry_run_launch_line(&cli, *agent_approval, &config.clis)?;
             let flags = config::resolve_approval_flags(&cli, agent_approval, &config.clis);
             let cmd = if flags.is_empty() {
                 cli
@@ -602,11 +605,7 @@ pub fn supervisor(
                 format!("{cli} {flags}")
             };
             out.line(&format!("  {branch} \u{2192} {cmd} ({wt})"));
-            out.line(&dry_run_launch_line(
-                &effective_agent_cli(branch),
-                *agent_approval,
-                &config.clis,
-            )?);
+            out.line(&runs);
         }
         return Ok(LaunchOutcome::Done);
     }
