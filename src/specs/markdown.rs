@@ -1,12 +1,13 @@
 //! Markdown-format backend for spec scanning.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::PawError;
 use crate::specs::{
-    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
-    parse_frontmatter, single_file_artifacts,
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecLocation, SpecTask,
+    parse_checkbox_tasks, parse_frontmatter, single_file_artifacts,
 };
 use crate::task_prompts::TaskPromptTemplates;
 
@@ -29,8 +30,27 @@ impl SpecBackend for MarkdownBackend {
         "specs"
     }
 
-    fn title_artifact(&self) -> Option<&'static str> {
-        None
+    /// The pending file whose derived id is the entry's, found the way the
+    /// scan finds it, since a `paw_branch` id is not the file stem.
+    fn spec_location(&self, specs_dir: &Path, entry: &SpecEntry) -> Option<SpecLocation> {
+        pending_files_by_id(specs_dir)
+            .remove(&entry.id)
+            .map(SpecLocation::file)
+    }
+
+    fn spec_locations(
+        &self,
+        specs_dir: &Path,
+        entries: &[SpecEntry],
+    ) -> HashMap<String, SpecLocation> {
+        let files = pending_files_by_id(specs_dir);
+        entries
+            .iter()
+            .filter_map(|e| {
+                let file = files.get(&e.id)?.clone();
+                Some((e.id.clone(), SpecLocation::file(file)))
+            })
+            .collect()
     }
 
     fn artifacts(&self, _spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact> {
@@ -75,41 +95,22 @@ impl SpecBackend for MarkdownBackend {
 
             let path = entry.path();
 
-            // Skip directories and non-.md files
-            if path.is_dir() {
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            if !is_md_file(&path) {
                 continue;
             }
 
             let content = fs::read_to_string(&path)
                 .map_err(|e| PawError::SpecError(format!("read {}: {e}", path.display())))?;
 
-            let (frontmatter, body) = parse_frontmatter(&content);
-
-            let Some(fields) = frontmatter else {
+            let Some(id) = pending_spec_id(&path, &content) else {
                 continue;
             };
-
-            // Must have paw_status = "pending"
-            match fields.get("paw_status").map(String::as_str) {
-                Some("pending") => {}
-                _ => continue,
-            }
-
-            let id = fields
-                .get("paw_branch")
+            let (frontmatter, body) = parse_frontmatter(&content);
+            let cli = frontmatter
+                .as_ref()
+                .and_then(|fields| fields.get("paw_cli"))
                 .filter(|s| !s.is_empty())
-                .cloned()
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                });
-
-            let cli = fields.get("paw_cli").filter(|s| !s.is_empty()).cloned();
+                .cloned();
 
             entries.push(SpecEntry {
                 id,
@@ -123,6 +124,56 @@ impl SpecBackend for MarkdownBackend {
 
         Ok(entries)
     }
+}
+
+/// Every pending spec file in `dir`, keyed by its entry id. When two files
+/// derive the same id, the first by path wins, so the choice is stable.
+fn pending_files_by_id(dir: &Path) -> HashMap<String, PathBuf> {
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return HashMap::new();
+    };
+    let mut paths: Vec<PathBuf> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_md_file(p))
+        .collect();
+    paths.sort();
+    let mut by_id = HashMap::new();
+    for path in paths {
+        if let Some(id) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| pending_spec_id(&path, &content))
+        {
+            by_id.entry(id).or_insert(path);
+        }
+    }
+    by_id
+}
+
+fn is_md_file(path: &Path) -> bool {
+    !path.is_dir() && path.extension().and_then(|e| e.to_str()) == Some("md")
+}
+
+/// The entry id of a `paw_status: pending` spec file: its `paw_branch`, else
+/// its file stem. `None` when the file is not a pending spec.
+fn pending_spec_id(path: &Path, content: &str) -> Option<String> {
+    let (frontmatter, _) = parse_frontmatter(content);
+    let fields = frontmatter?;
+    if fields.get("paw_status").map(String::as_str) != Some("pending") {
+        return None;
+    }
+    Some(
+        fields
+            .get("paw_branch")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            }),
+    )
 }
 
 #[cfg(test)]

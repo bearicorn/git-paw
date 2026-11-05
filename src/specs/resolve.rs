@@ -167,7 +167,7 @@ fn collect_feature_ids_with_prefix(entries: &[SpecEntry], prefix: &str) -> Vec<S
 /// - `003-user-list-phase-2` → `003-user-list`
 /// - `add-auth` → `add-auth`
 /// - `003a-experiment-T001` → `003a-experiment`
-fn feature_id_of(id: &str) -> String {
+pub(crate) fn feature_id_of(id: &str) -> String {
     if let Some((before, after)) = id.rsplit_once("-phase-")
         && !after.is_empty()
         && after.chars().all(|c| c.is_ascii_digit())

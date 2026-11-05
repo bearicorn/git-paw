@@ -1,6 +1,8 @@
 //! Pins each format's outputs so moving behaviour into `SpecBackend` keeps
-//! them byte-identical. The Markdown task prompt is the one output that
-//! changes on purpose.
+//! them byte-identical. Outputs changed on purpose: the Markdown task prompt
+//! (`spec-backend-strategy`), and the Spec Kit, Markdown and Superpowers MCP
+//! `list:`, `get_spec:` and `task:` lines, which `mcp-spec-artifacts-per-format`
+//! corrected to each format's own files.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -120,6 +122,11 @@ fn snapshot(kind: SpecBackendKind) -> String {
     writeln!(out, "entry_point: {:?}", prompt.entry_point).unwrap();
     writeln!(out, "doctrine: {}", doctrine.trim_end()).unwrap();
     for info in mcp_specs::list_specs(&ctx) {
+        assert!(
+            root.join(&info.path).exists(),
+            "{kind:?}: reported path {} does not exist",
+            info.path
+        );
         writeln!(
             out,
             "list: {} {} {:?} {}",
@@ -128,6 +135,11 @@ fn snapshot(kind: SpecBackendKind) -> String {
         .unwrap();
     }
     let detail = mcp_specs::get_spec(&ctx, &entry.id).expect("spec found");
+    assert!(
+        root.join(&detail.path).exists(),
+        "{kind:?}: get_spec path {} does not exist",
+        detail.path
+    );
     let names: Vec<&str> = detail.artifacts.iter().map(|a| a.name.as_str()).collect();
     writeln!(
         out,
@@ -143,8 +155,8 @@ fn snapshot(kind: SpecBackendKind) -> String {
         )
         .unwrap();
     }
-    // Spec Kit ids carry a decomposition suffix that names no directory, so
-    // `get_tasks` never reaches its parser; pin every parser directly.
+    // Pin every parser over one shared sample too, independent of the
+    // fixture's own task list.
     for t in parse_tasks(kind, TASKS_SAMPLE) {
         writeln!(out, "parse: {t}").unwrap();
     }
@@ -188,8 +200,9 @@ constitution: false
 const MARKDOWN: &str = r#"prose: Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the project rules and your full spec, embedded inline. The spec file is the whole contract; there is no other artifact directory to read.
 entry_point: None
 doctrine: Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; the format has no per-artifact workflow — the file itself is the contract.
-list: fix-bug markdown "Fix the bug" specs/fix-bug
-get_spec: markdown specs/fix-bug ["fix-bug"]
+list: fix-bug markdown "Fix the bug" specs/fix-bug.md
+get_spec: markdown specs/fix-bug.md ["fix-bug"]
+task: 1 0 false "reproduce" false
 parse: 1 1 false "T001 init" true
 parse: 2 1 false "T002 [P] add form" false
 parse: 3 2 false "T003 wire" false
@@ -201,8 +214,11 @@ constitution: false
 const SPECKIT: &str = r#"prose: Begin your assigned task. Read .git-paw/AGENTS.local.md first — it already carries the project rules and your full Spec Kit assignment (feature spec, implementation plan, and task phase) embedded inline; no other artifact directory is needed to start.
 entry_point: None
 doctrine: Spec Kit specs live under `.specify/specs/<feature>/{spec,plan,tasks}.md` and use the Spec Kit checklist convention; mark `- [ ]` tasks complete as each one lands.
-list: 001-login-T002 speckit "Login feature" specs/001-login-T002
-get_spec: speckit specs/001-login-T002 []
+list: 001-login-T002 speckit "Login feature" specs/001-login
+get_spec: speckit specs/001-login ["spec", "plan", "tasks", "checklist.md"]
+task: T001 1 false "init" true
+task: T002 1 true "add form" false
+task: T003 2 false "wire" false
 parse: T001 1 false "init" true
 parse: T002 1 true "add form" false
 parse: T003 2 false "wire" false
@@ -214,8 +230,10 @@ constitution: true
 const SUPERPOWERS: &str = r#"prose: Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the project rules and your full superpowers plan (goal, tasks, exact file paths, and per-step verification commands). Work the steps in order and flip `- [ ]` to `- [x]` in the plan as each one lands.
 entry_point: None
 doctrine: Superpowers plans are flat files under `docs/superpowers/plans/*.md` (obra/superpowers writing-plans documents); work each plan's `### Task N` steps in order and flip `- [ ]` to `- [x]` in the plan file as each step lands.
-list: 2026-07-20-add-auth superpowers "2026-07-20-add-auth" plans/2026-07-20-add-auth
-get_spec: superpowers plans/2026-07-20-add-auth ["2026-07-20-add-auth"]
+list: 2026-07-20-add-auth superpowers "Add auth Implementation Plan" plans/2026-07-20-add-auth.md
+get_spec: superpowers plans/2026-07-20-add-auth.md ["2026-07-20-add-auth"]
+task: 1 0 false "**Step 1: test**" false
+task: 2 0 false "**Step 2: scaffold**" true
 parse: 1 1 false "T001 init" true
 parse: 2 1 false "T002 [P] add form" false
 parse: 3 2 false "T003 wire" false
@@ -228,7 +246,8 @@ constitution: false
 /// move", "opsx role gating follows the backend" (`opsx_regions`,
 /// `opsx_guard`), "Spec Kit governance discovery follows the backend"
 /// (`constitution`) and "MCP spec paths use the scan's directory" (`list`,
-/// `get_spec` paths under each fixture's configured `dir`).
+/// `get_spec` paths under each fixture's configured `dir`, each naming an
+/// existing file or directory, as `mcp-spec-artifacts-per-format` tightened).
 #[test]
 fn per_format_outputs_are_pinned() {
     for (kind, expected) in [

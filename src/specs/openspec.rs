@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use crate::error::PawError;
 use crate::specs::{
-    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
-    read_named_artifact,
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecLocation, SpecTask,
+    parse_checkbox_tasks, read_named_artifact,
 };
 use crate::task_prompts::TaskPromptTemplates;
 
@@ -62,8 +62,10 @@ impl SpecBackend for OpenSpecBackend {
         }
     }
 
-    fn title_artifact(&self) -> Option<&'static str> {
-        Some("proposal.md")
+    fn spec_location(&self, specs_dir: &Path, entry: &SpecEntry) -> Option<SpecLocation> {
+        let dir = specs_dir.join(&entry.id);
+        dir.is_dir()
+            .then(|| SpecLocation::directory(dir, "tasks.md", "proposal.md"))
     }
 
     /// The proposal, design and tasks, then every capability

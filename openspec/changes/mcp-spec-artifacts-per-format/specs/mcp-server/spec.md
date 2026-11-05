@@ -2,7 +2,13 @@
 
 ### Requirement: Spec read tools serve each format's own files
 
-The spec read tools SHALL read each spec from the location its format's backend reports. `get_specs` and `get_spec` SHALL report that location as `path`, relative to the repository root. `get_spec` SHALL return the artifacts found there. `get_tasks` SHALL parse the format's own tasks file. `title` SHALL be the first `# ` heading of the format's title file, falling back to the entry id.
+The spec read tools SHALL read each spec from the location its format's backend reports. `get_specs` and `get_spec` SHALL report that location as `path`, relative to the repository root. `get_spec` SHALL return the artifacts found there. `get_tasks` SHALL parse the format's own tasks file. `title` SHALL be the first `# ` heading of the title file, else of the entry prompt, else the entry id. An entry its backend cannot locate SHALL NOT be served.
+
+#### Scenario: A title falls back to the prompt heading, then the id
+
+- **GIVEN** `[specs] type = "openspec"`, a change `add-auth` whose `proposal.md` starts with `## Why` and whose `tasks.md` starts with `# Add auth tasks`, and a change `bare` with no `# ` heading in either file
+- **WHEN** the MCP client calls `get_specs()`
+- **THEN** the `add-auth` title SHALL be `Add auth tasks` and the `bare` title SHALL be `bare`
 
 #### Scenario: A Spec Kit task entry is served from its feature directory
 

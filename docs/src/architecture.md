@@ -186,8 +186,9 @@ spec format: every `SpecEntry` carries it, and it parses from and renders to
 the wire name used by `[specs] type`, `--specs-format` and the MCP `backend`
 field. `SpecBackend` is the Strategy that carries everything a format decides:
 its conventional directory, scanning, the path-doctrine sentence, the task
-prompt, the artifact whose heading titles a spec, the artifacts and task list
-the MCP server serves, whether the opsx role-gating applies, and governance
+prompt, a spec's location (its directory or single file, and the files its
+tasks and title are read from), the artifacts and task list the MCP server
+serves, whether the opsx role-gating applies, and governance
 discovery (Spec Kit's constitution). `SpecBackendKind::backend()` is the only
 exhaustive match from a kind to its behaviour; skills, the launch, the MCP
 server, config loading, `init` and `doctor` all ask the kind for its backend

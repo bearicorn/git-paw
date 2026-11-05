@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use super::{
-    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecTask, parse_checkbox_tasks,
-    single_file_artifacts,
+    SpecArtifact, SpecBackend, SpecBackendKind, SpecEntry, SpecLocation, SpecTask,
+    parse_checkbox_tasks, single_file_artifacts,
 };
 use crate::error::PawError;
 use crate::specs::branch_segment_slug;
@@ -49,8 +49,9 @@ impl SpecBackend for SuperpowersBackend {
         PLANS_DIR
     }
 
-    fn title_artifact(&self) -> Option<&'static str> {
-        None
+    fn spec_location(&self, specs_dir: &Path, entry: &SpecEntry) -> Option<SpecLocation> {
+        let file = specs_dir.join(format!("{}.md", entry.id));
+        file.is_file().then(|| SpecLocation::file(file))
     }
 
     fn artifacts(&self, _spec_dir: &Path, entry: &SpecEntry) -> Vec<SpecArtifact> {

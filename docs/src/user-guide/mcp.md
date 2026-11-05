@@ -315,6 +315,20 @@ error. The orchestrator skill is served under the name `orchestrator`
 (`supervisor` is an alias returning the same content) — the same procedure
 `git paw init` exports to `.git-paw/skills/orchestrator/SKILL.md`.
 
+Each spec format decides where its spec lives. `path` is relative to the
+repository root and always names an existing file or directory (a spec whose
+files vanished after the scan is not served); `title` is the first `# `
+heading of the title file, else of the spec's prompt, else the spec id;
+`get_tasks` parses the format's own task list; `get_dependency_graph` reads
+`[[ref]]` links from every artifact `get_spec` returns:
+
+| Format | `path` | `get_spec` artifacts | Title from | `get_tasks` reads |
+|--------|--------|----------------------|------------|-------------------|
+| OpenSpec | the change directory, e.g. `openspec/changes/add-auth` | `proposal`, `design`, `tasks`, each delta `specs/**/spec.md` | `proposal.md` | `tasks.md` |
+| Spec Kit | the feature directory, e.g. `specs/001-login`, for every entry decomposed from it (`001-login-T002`, `001-login-phase-2`) | `spec`, `plan`, `tasks`, then the feature's other `*.md` files (checklists) | `spec.md` | `tasks.md` (ids, phases, `[P]` markers) |
+| Markdown | the spec file, e.g. `specs/fix-bug.md` | one artifact named after the spec id | the spec file | the spec file's `- [ ]` / `- [x]` lines |
+| Superpowers | the plan file, e.g. `docs/superpowers/plans/2026-07-20-add-auth.md` | one artifact named after the plan stem | the plan file | the plan's `- [ ]` / `- [x]` steps |
+
 ### Session state
 
 | Tool | Input | Result |
