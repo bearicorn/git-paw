@@ -157,3 +157,40 @@ fn a_native_sandbox_disabled_by_full_auto_refuses_the_launch_with_nothing_create
         "no worktree, so no pane, may be created:\n{listed}"
     );
 }
+
+/// Scenario "A dry run reports the refusal instead of a command": the plan
+/// names the refusal for the refused worker and shows no command for it — no
+/// `runs:` line and no approval flags that would switch its sandbox off —
+/// whether or not the session is supervised.
+#[test]
+fn a_dry_run_reports_the_native_sandbox_refusal_instead_of_a_command() {
+    for supervisor in ["", "enabled = true\ncli = \"codex\"\n"] {
+        let tr = setup_test_repo();
+        write_config(
+            tr.path(),
+            &format!(
+                "[supervisor]\n{supervisor}agent_approval = \"full-auto\"\n\n\
+                 [clis.codex]\ncommand = \"echo\"\nsandbox = \"native\"\n"
+            ),
+        );
+
+        let out = dry_run(tr.path(), "codex");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for needle in ["codex", "full-auto", "[clis.codex].approval_args"] {
+            assert!(output.contains(needle), "should name {needle}:\n{output}");
+        }
+        assert!(
+            !output.contains("runs:"),
+            "no runs: line for the refused worker:\n{output}"
+        );
+        assert!(
+            !output.contains("echo --dangerously-bypass-approvals-and-sandbox")
+                && !output.contains("codex --dangerously-bypass-approvals-and-sandbox"),
+            "the plan must not show the refused command:\n{output}"
+        );
+    }
+}

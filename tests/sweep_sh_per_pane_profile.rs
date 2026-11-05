@@ -167,6 +167,48 @@ fn the_helper_and_the_loop_read_each_pane_approval_markers_the_same_way() {
     );
 }
 
+/// Spec scenario "A pane with no recorded CLI resolves the session CLI in the
+/// helper": with `mycli` as the session's configured CLI and a roster entry
+/// that records no CLI, the helper reads that pane with `mycli`'s override
+/// while the compiled loop reads it with the `generic` profile.
+#[test]
+fn a_pane_with_no_recorded_cli_resolves_the_session_cli_in_the_helper() {
+    let (repo, sweep) = two_cli_repo();
+    let root = repo.path();
+    fs::write(
+        root.join(".git-paw/config.toml"),
+        format!("default_cli = \"mycli\"\n\n{MYCLI_PROFILE}"),
+    )
+    .expect("config");
+    let roster = serde_json::json!({
+        "session_name": SESSION,
+        "agents": [
+            { "branch_id": "feat-unrecorded", "worktree_path": root.join("wt-1"),
+              "pane_index": 1 },
+        ],
+    });
+    fs::write(
+        root.join(format!(".git-paw/sessions/{SESSION}.json")),
+        serde_json::to_string_pretty(&roster).expect("roster json"),
+    )
+    .expect("write roster");
+    let capture = "mycli is waiting for go-ahead on: make deploy";
+
+    let generic = CliProfile::resolve("", &mycli_clis())
+        .compiled_prompt_profile()
+        .expect("compiles");
+    assert!(
+        !has_approval_marker(capture, &generic),
+        "the loop reads an unrecorded pane with the generic profile"
+    );
+
+    let out = detect_stuck(root, &sweep, capture);
+    assert!(
+        out.contains("not-stuck: feat-unrecorded (fresh heartbeat"),
+        "the helper reads the unrecorded pane with the session CLI's override: {out}"
+    );
+}
+
 /// Runs `sweep.sh approve <pane>` against `capture`, returning the helper
 /// output and the keystrokes it sent.
 fn approve(repo: &Path, sweep: &Path, capture: &str, pane: &str) -> (String, Vec<String>) {

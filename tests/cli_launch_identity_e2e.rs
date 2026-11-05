@@ -709,3 +709,72 @@ fn mcp_opt_in_reaches_worker_boot_prompt() {
         "the helper-script publish form must NOT be delivered to an opted-in CLI; log:\n{log}"
     );
 }
+
+/// Scenario "A declared family reaches the worker's boot prompt end to end":
+/// `[clis.paw-stub] family = "claude"` with no `mcp` key takes the family's
+/// MCP default on the real `git paw start` path.
+#[test]
+#[serial]
+fn declared_family_reaches_worker_boot_prompt() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+    let project = unique_project_name("family");
+    let repo = rename_repo_basename(&tr, &project);
+    let st = stub();
+    let broker_port = find_free_port();
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!(
+            "[broker]\nenabled = true\nport = {broker_port}\n\n\
+             [clis.paw-stub]\ncommand = \"{STUB_BIN}\"\nfamily = \"claude\"\n"
+        ),
+    )
+    .expect("write config");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start = cmd();
+    tmux_env.apply_assert(&mut start);
+    let out = start
+        .current_dir(&repo)
+        .env("HOME", home.path())
+        .env("PATH", &st.path_env)
+        .env_remove("XDG_DATA_HOME")
+        .args([
+            "start",
+            "--no-supervisor",
+            "--cli",
+            "paw-stub",
+            "--branches",
+            "a",
+        ])
+        .timeout(Duration::from_secs(25))
+        .output()
+        .expect("run start");
+    assert!(
+        out.status.success(),
+        "start failed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let session_name = format!("paw-{project}");
+    let log = wait_for_log(&st.log, "publish_status", Duration::from_secs(20));
+    kill_session(&tmux_env, &session_name);
+
+    assert!(
+        log.contains("publish_status"),
+        "a family = \"claude\" CLI must receive the MCP tool form of the boot block; log:\n{log}"
+    );
+    assert!(
+        !log.contains("broker.sh --agent a status booting"),
+        "the helper-script publish form must NOT be delivered to a claude-family CLI; log:\n{log}"
+    );
+}

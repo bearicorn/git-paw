@@ -55,6 +55,11 @@ publishes in its `agent.status`: an agent cannot pick the profile its own
 pane is read with. An agent whose record names no CLI is read with the
 `generic` family's profile, which is the embedded default.
 
+Swapping a worker's CLI on a kept worktree (`git paw remove <branch>
+--keep-worktree`, then `git paw add <branch> --cli <other>`) rewrites that
+launch record, so the drive loop and `sweep.sh` both read the pane with the
+new CLI's profile from then on.
+
 ### Patterns are validated when the configuration loads
 
 Every field you set is checked when the configuration loads, and a bad one
@@ -79,6 +84,12 @@ fails the load with an error naming the field:
   alternative matches every line.
 
 A detector therefore never meets an invalid pattern at run time.
+
+> **Breaking since v0.19:** a configuration that sets an empty or
+> whitespace-only marker, or uses a construct outside the `grep -E` subset
+> in `option_line_pattern`, `context_bloat_pattern` or
+> `paste_buffer_pattern`, no longer loads. Remove the empty marker, or
+> rewrite the pattern in POSIX ERE (for example `[0-9]` for `\d`).
 
 ## Fields
 
@@ -172,5 +183,10 @@ The helper resolves per pane too. Before it inspects a pane, it looks up the
 CLI the session roster records for that pane and resolves each field with
 `git paw __prompt-profile --cli <name>` — once per distinct CLI per run. That
 covers `sweep.sh approve`'s live-prompt re-confirm and its option-1 guard, so
-the guard checks the target pane's own `broad_grant_marker`. A pane whose
-roster entry records no CLI uses the session CLI's profile, as before.
+the guard checks the target pane's own `broad_grant_marker`.
+
+A pane whose roster entry records no CLI is the one case where the helper and
+the drive loop differ: the helper runs `git paw __prompt-profile --field
+<field>` without `--cli`, which resolves the session's configured CLI
+(`[supervisor].cli`, else `default_cli`), while the drive loop reads that
+pane with the `generic` profile.

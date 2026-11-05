@@ -1119,6 +1119,8 @@ mod tests {
         assert_eq!(r.notice(), "headless hand-off: stub --once");
     }
 
+    /// Scenario "The entry's args precede the approval flags and the
+    /// headless form".
     #[test]
     fn the_entry_args_precede_the_approval_flags_and_headless_form() {
         let r = resolve(&config(
@@ -1135,6 +1137,15 @@ mod tests {
                 "-p"
             ]
         );
+    }
+
+    /// Scenario "A CLI without args keeps its headless form".
+    #[test]
+    fn a_cli_without_args_keeps_its_headless_form() {
+        let r = resolve(&config(
+            "[supervisor]\ncli = \"claude\"\napproval = \"manual\"\n",
+        ));
+        assert_eq!(argv(&r), ["claude", "-p"]);
     }
 
     /// Scenario "The headless hand-off keeps a native sandbox on".

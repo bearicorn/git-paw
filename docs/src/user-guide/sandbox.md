@@ -93,8 +93,11 @@ the level, the flag and `[clis.<name>].approval_args`, when they:
   `--sandbox workspace-write`. Two values would reach the CLI and it would
   pick one.
 
-No pane runs the refused CLI. To run it prompt-free, give that level flags that
-keep the sandbox on:
+No pane runs the refused CLI. `git paw start --dry-run` reports the same
+refusal in place of that worker's command: the plan shows no `runs:` line and
+no flags for it, so it never shows a command that would not run.
+
+To run it prompt-free, give that level flags that keep the sandbox on:
 
 ```toml
 [clis.codex]

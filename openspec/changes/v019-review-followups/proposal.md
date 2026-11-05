@@ -40,7 +40,7 @@ None.
 ## Impact
 
 - **Code**:
-  - `src/commands/launch.rs`: `dry_run_launch_line` applies the native-sandbox refusal before formatting a `runs:` line.
+  - `src/commands/supervisor.rs`: the supervised dry-run plan computes each worker's `runs:` line, and so the native-sandbox refusal, before printing that worker's header with its approval flags. `dry_run_launch_line` in `src/commands/launch.rs` already refuses before formatting, and the `start` plan headers carry no flags.
   - `src/cli.rs`: the `start --dry-run` help string.
   - `src/supervisor/escalation.rs`: no behaviour change; the headless-args test gains its scenario reference.
 - **Tests**:
