@@ -548,6 +548,67 @@ fn start_session_never_prompts_and_a_dry_run_creates_nothing() {
     root.shutdown();
 }
 
+/// `git-operations` "MCP `start_session` reports the skip as a warning": a
+/// surviving worktree with uncommitted changes launches on its current HEAD,
+/// the skip notice comes back in `warnings`, and stdout stays protocol-only
+/// (every line `request` reads must parse as JSON-RPC).
+#[test]
+fn start_session_reports_a_skipped_rebase_as_a_warning() {
+    if !tmux_available() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let repo = sb.repo.path();
+    let wt = repo.parent().expect("sandbox").join("repo-feat-x");
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/x",
+            wt.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.join("main2.txt"), "main\n").unwrap();
+    git(repo, &["add", "main2.txt"]);
+    git(repo, &["commit", "-q", "-m", "main moves on"]);
+    fs::write(wt.join("README.md"), "# edited, not committed\n").unwrap();
+    let head_before = git(repo, &["rev-parse", "feat/x"]);
+
+    let mut root = sb.mcp(repo);
+    let started = root.ok(
+        "start_session",
+        json!({ "branches": ["feat/x"], "cli": "cat" }),
+    );
+    assert_eq!(started["outcome"], "launched", "{started}");
+    let skip: Vec<&str> = started["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|s| s.contains("rebase skipped for 'feat/x'"))
+        .collect();
+    assert_eq!(
+        skip.len(),
+        1,
+        "warnings must carry one skip notice: {started}"
+    );
+    assert!(
+        skip[0].contains("its worktree has uncommitted changes"),
+        "the notice gives the reason: {started}"
+    );
+    assert!(
+        !skip[0].contains("--no-rebase"),
+        "start_session has no --no-rebase, so the notice must not name it: {started}"
+    );
+    assert_eq!(git(repo, &["rev-parse", "feat/x"]), head_before);
+
+    root.ok("stop_session", json!({}));
+    root.shutdown();
+}
+
 /// Review finding: root detection must describe the directory the server
 /// serves, not a repository an inherited git environment points at. A server
 /// started in an agent's worktree with `GIT_DIR` / `GIT_COMMON_DIR` naming the

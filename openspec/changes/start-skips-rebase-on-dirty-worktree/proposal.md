@@ -11,10 +11,11 @@ The user's choice is one rule everywhere: never rebase over uncommitted work. A 
 
 ## What Changes
 
-- `create_worktree`'s creation-time rebase checks the tree the rebase would run in before rebasing: the branch's own worktree, or the main checkout when the branch has none. It uses the detection `add` uses (`git::uncommitted_files` + `agents::is_managed_path`; a failed status check counts as dirty).
-- On a dirty or unreadable tree the rebase is skipped. The worktree is created or reused on the branch's current HEAD, and the skip reason is returned to the caller. Nothing is stashed, committed, reset or discarded.
+- `create_worktree`'s creation-time rebase runs only inside the branch's own worktree, never in the main checkout. A branch with no worktree gets its worktree first and is rebased there; if that rebase fails, the new worktree is removed and the error returned as before.
+- A worktree that already holds the branch is checked before rebasing, with the detection `add` uses (`git::uncommitted_files` + `agents::is_managed_path`; a failed status check counts as dirty).
+- On a dirty or unreadable worktree the rebase is skipped. The worktree is created or reused on the branch's current HEAD, and the skip reason is returned to the caller. Nothing is stashed, committed, reset or discarded.
 - Recovering a stopped or crashed session (`src/commands/recover.rs`) does not call `create_worktree` and never rebases, so it is unaffected. The brief listed it; reading the code shows it is not a failing path.
-- Every caller reports the skip: `start` (plain, supervised, spec-driven) prints one stderr notice naming the branch and `--no-rebase`, and the MCP `start_session` returns it in its `warnings`. `add` keeps its existing notice text and drops its private pre-check in favour of the shared one.
+- Every caller reports the skip: `start` (plain, supervised, spec-driven) prints one stderr notice naming the branch and `--no-rebase`, and the MCP `start_session` returns it in its `warnings` without the `--no-rebase` hint (the tool has no such parameter). `add` keeps its existing notice text and its pre-check, which now calls the shared check, so its notice prints even when worktree creation later fails.
 - A clean tree is still rebased, and a rebase that fails for another reason (a conflict) still fails as today.
 - `--no-rebase` skips the check and prints no notice, as in `add`.
 
@@ -32,7 +33,7 @@ None.
 
 ## Impact
 
-- **Code**: `src/git.rs` (`create_worktree_with` gains the check before `rebase_branch_onto_default_with`; `WorktreeCreation` gains the skip reason), `src/commands/start.rs` (the two `create_worktree` call sites, lines ~281 and ~780), `src/commands/launch.rs` (~230), `src/commands/add.rs` (drop `rebase_skip_reason` and use the returned reason with its existing notice text), `src/mcp/tools/session.rs` (nothing to change: the notice reaches `warnings` through `CaptureOutput`; verify it).
+- **Code**: `src/git.rs` (`create_worktree_with` gains the check before `rebase_branch_onto_default_with`; `WorktreeCreation` gains the skip reason), `src/commands/start.rs` (the two `create_worktree` call sites, lines ~281 and ~780), `src/commands/launch.rs` (~230), `src/commands/add.rs` (`rebase_skip_reason` moves to `src/git.rs`; `add` keeps its pre-check through it, with its existing notice text), `src/commands/supervisor.rs` (prints the skip `attach_agent` returns), `src/mcp/tools/session.rs` (strips the `--no-rebase` hint from the notice it collects into `warnings`).
 - **Struct-literal ripple (`WorktreeCreation`)**: the three constructions in `create_worktree_with` (`src/git.rs` ~885, ~905, ~925) and two test literals compared with `assert_eq!` (`src/git.rs` ~1472, ~1559). `src/` and `tests/` have no other `WorktreeCreation {` literal.
 - **Not touched**: `rebase_branch_onto_default` / `rebase_branch_onto_default_with` keep their contract. The supervisor's mid-session branch refresh (`supervisor-branch-refresh`) has its own clean-tree precondition and must keep reporting its own skip. See design.md.
 - **No enum ripple**.

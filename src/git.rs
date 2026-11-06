@@ -268,12 +268,16 @@ pub struct WorktreeCreation {
     pub path: PathBuf,
     /// Whether git-paw created the branch (true) or it already existed (false).
     pub branch_created: bool,
+    /// Why the creation-time rebase was skipped, or `None` when it ran or was
+    /// not requested. Set when the tree the rebase would run in has
+    /// uncommitted work or could not be checked; callers report it.
+    pub rebase_skipped: Option<String>,
 }
 
 /// Returns the path of the worktree (main repo or any sibling worktree) that
 /// currently has `branch` checked out, if any.
 ///
-/// Reached from [`rebase_branch_onto_default_with`] and from `git paw add`'s
+/// Reached from [`rebase_branch_onto_default_with`] and from the creation-time
 /// uncommitted-work check, both of which pass a runner — so unlike the public
 /// entry points there is no no-runner wrapper.
 pub(crate) fn find_worktree_for_branch_with(
@@ -802,6 +806,13 @@ fn resolve_worktree_path(
 /// left at its pre-rebase HEAD. When `rebase_onto_main` is `false` or the
 /// branch does not yet exist locally, the rebase step is skipped.
 ///
+/// The rebase always runs inside the branch's own worktree, never in the main
+/// checkout: a branch no worktree holds gets its worktree first and is rebased
+/// there, and that worktree is removed again if the rebase fails. A worktree
+/// that already holds the branch and has uncommitted work, or cannot be
+/// checked, is not rebased; nothing is stashed or discarded and the reason is
+/// returned in [`WorktreeCreation::rebase_skipped`].
+///
 /// `placement` selects where the worktree directory is created (see
 /// [`WorktreePlacement`]). [`WorktreePlacement::Child`] resolves to
 /// `<repo_root>/.git-paw/worktrees/<branch-slug>` (creating
@@ -824,6 +835,137 @@ pub fn create_worktree(
     )
 }
 
+/// Why the creation-time rebase of `branch` must not run, or `None` when it
+/// may.
+///
+/// A failed status check counts as dirty. Skipping a rebase loses nothing;
+/// rebasing over unseen work might.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] when `git worktree list` cannot run.
+pub(crate) fn rebase_skip_reason(
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Option<String>, PawError> {
+    rebase_skip_reason_with(&RealCommandRunner, repo_root, branch)
+}
+
+/// [`rebase_skip_reason`] against an injected runner. A branch no worktree
+/// holds has nothing to check: its rebase runs in the worktree created for it.
+fn rebase_skip_reason_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Option<String>, PawError> {
+    // A branch held by the main checkout is refused by `create_worktree`
+    // itself, so there is no skip to report for it here.
+    Ok(find_worktree_for_branch_with(runner, repo_root, branch)?
+        .filter(|worktree| !same_path(worktree, repo_root))
+        .and_then(|worktree| worktree_skip_reason(runner, &worktree)))
+}
+
+/// Whether `a` and `b` name the same directory, comparing canonical paths
+/// when both resolve.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Why `worktree` must not be rebased, or `None` when it is clean.
+fn worktree_skip_reason(runner: &dyn CommandRunner, worktree: &Path) -> Option<String> {
+    match uncommitted_files_with(runner, worktree) {
+        Ok(files)
+            if files
+                .iter()
+                .any(|f| !crate::agents::is_managed_path(worktree, f)) =>
+        {
+            Some("its worktree has uncommitted changes, which are left untouched".to_string())
+        }
+        Ok(_) => rebase_in_progress_reason(runner, worktree),
+        Err(e) => Some(format!(
+            "could not check its worktree for uncommitted changes ({})",
+            e.to_string().trim_end()
+        )),
+    }
+}
+
+/// Why `worktree` must not be rebased because a rebase already stopped in it
+/// (at an `edit` or `break`, with a clean status), or `None`. A new rebase
+/// would fail there, and its `git rebase --abort` would discard that rebase.
+fn rebase_in_progress_reason(runner: &dyn CommandRunner, worktree: &Path) -> Option<String> {
+    let git_dir = match worktree_git_dir(runner, worktree) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return None,
+        Err(e) => {
+            return Some(format!(
+                "could not check its worktree for a rebase in progress ({e})"
+            ));
+        }
+    };
+    REBASE_STATE_DIRS
+        .iter()
+        .any(|state| git_dir.join(state).exists())
+        .then(|| {
+            "a rebase is already in progress in its worktree, which is left untouched".to_string()
+        })
+}
+
+/// The directories git keeps a stopped rebase's state in, inside a
+/// worktree's git dir.
+const REBASE_STATE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
+
+/// `worktree`'s git dir, or `None` when git reports none.
+fn worktree_git_dir(
+    runner: &dyn CommandRunner,
+    worktree: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let cwd = worktree.to_string_lossy();
+    match runner.run("git", &["-C", &cwd, "rev-parse", "--git-dir"]) {
+        Ok(out) if out.success => {
+            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok((!dir.is_empty()).then(|| worktree.join(dir)))
+        }
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim_end().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The branch ref a rebase stopped in `worktree` is rebasing, if any. Such a
+/// worktree has a detached HEAD, so `git worktree list` does not name it.
+fn rebasing_branch_ref(runner: &dyn CommandRunner, worktree: &Path) -> Option<String> {
+    let git_dir = worktree_git_dir(runner, worktree).ok().flatten()?;
+    REBASE_STATE_DIRS.iter().find_map(|state| {
+        std::fs::read_to_string(git_dir.join(state).join("head-name"))
+            .ok()
+            .map(|name| name.trim().to_string())
+    })
+}
+
+/// Rebases the branch checked out in `workdir` onto the default branch, inside
+/// `workdir` only. On failure the rebase is aborted and a [`REBASE_FAILED`]
+/// error returned, leaving the branch at its pre-rebase HEAD.
+fn rebase_in_worktree_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    workdir: &Path,
+) -> Result<(), PawError> {
+    let default = default_branch_with(runner, repo_root)?;
+    let cwd = workdir.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "rebase", &default])
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git rebase: {e}")))?;
+    if !output.success {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let _ = runner.run("git", &["-C", &cwd, "rebase", "--abort"]);
+        return Err(PawError::WorktreeError(format!(
+            "{REBASE_FAILED}: {stderr}"
+        )));
+    }
+    Ok(())
+}
+
 /// [`create_worktree`] against an injected runner.
 pub(crate) fn create_worktree_with(
     runner: &dyn CommandRunner,
@@ -842,15 +984,74 @@ pub(crate) fn create_worktree_with(
     // commits behind main and every subsequent commit chains from a stale
     // baseline. Order matters: rebasing before the idempotency check means a
     // surviving worktree's branch ref is updated transparently on resume.
+    // Never rebase over uncommitted work: a dirty worktree keeps the branch on
+    // its current HEAD and the reason goes back to the caller. A branch no
+    // worktree holds is rebased in the fresh (clean) worktree created for it,
+    // never in the main checkout.
+    let mut rebase_skipped = None;
+    let mut rebase_after_create = false;
     if rebase_onto_main {
         let branch_ref = format!("refs/heads/{branch}");
         let branch_exists = runner
             .run("git", &["-C", &cwd, "rev-parse", "--verify", &branch_ref])
             .is_ok_and(|o| o.success);
         if branch_exists {
-            rebase_branch_onto_default_with(runner, repo_root, branch)?;
+            match find_worktree_for_branch_with(runner, repo_root, branch)? {
+                Some(worktree) if same_path(&worktree, repo_root) => {
+                    return Err(PawError::WorktreeError(format!(
+                        "branch '{branch}' is checked out in the main checkout, which git-paw \
+                         never rebases and git cannot also check out in a worktree; switch the \
+                         main checkout to another branch, then retry"
+                    )));
+                }
+                Some(worktree) => {
+                    rebase_skipped = worktree_skip_reason(runner, &worktree);
+                    if rebase_skipped.is_none() {
+                        rebase_in_worktree_with(runner, repo_root, &worktree)?;
+                    }
+                }
+                None => rebase_after_create = true,
+            }
         }
     }
+
+    let (path, branch_created, reused) =
+        add_or_reuse_worktree(runner, repo_root, branch, worktree_path)?;
+    if rebase_after_create && reused {
+        // Reused although no worktree listed the branch: a rebase stopped in
+        // it (detached HEAD). Judge it like any held worktree.
+        rebase_skipped = worktree_skip_reason(runner, &path);
+        if rebase_skipped.is_none() {
+            rebase_in_worktree_with(runner, repo_root, &path)?;
+        }
+    } else if rebase_after_create && let Err(e) = rebase_in_worktree_with(runner, repo_root, &path)
+    {
+        // The worktree was created just now for this rebase and holds nothing
+        // else, so removing it leaves the repo as it was.
+        let target = path.to_string_lossy();
+        let _ = runner.run(
+            "git",
+            &["-C", &cwd, "worktree", "remove", "--force", &target],
+        );
+        return Err(e);
+    }
+    Ok(WorktreeCreation {
+        path,
+        branch_created,
+        rebase_skipped,
+    })
+}
+
+/// Reuses the worktree registered for `branch` at `worktree_path`, or adds
+/// one, returning its path, whether the branch was created and whether an
+/// existing worktree was reused.
+fn add_or_reuse_worktree(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    worktree_path: PathBuf,
+) -> Result<(PathBuf, bool, bool), PawError> {
+    let cwd = repo_root.to_string_lossy();
 
     // If a worktree already exists at this path AND is registered with git for
     // the same branch, treat it as a successful (idempotent) creation. This is
@@ -876,17 +1077,27 @@ pub(crate) fn create_worktree_with(
             for line in listing.lines() {
                 if let Some(rest) = line.strip_prefix("worktree ") {
                     current_path = std::fs::canonicalize(PathBuf::from(rest)).ok();
-                } else if let Some(rest) = line.strip_prefix("branch ") {
-                    let path_matches = match (&current_path, &expected_canonical) {
-                        (Some(p), Some(e)) => p == e,
-                        _ => false,
-                    };
-                    if path_matches && rest == expected_branch_ref {
-                        return Ok(WorktreeCreation {
-                            path: worktree_path,
-                            branch_created: false,
-                        });
-                    }
+                    continue;
+                }
+                let path_matches = match (&current_path, &expected_canonical) {
+                    (Some(p), Some(e)) => p == e,
+                    _ => false,
+                };
+                if !path_matches {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("branch ")
+                    && rest == expected_branch_ref
+                {
+                    return Ok((worktree_path, false, true));
+                }
+                // A rebase stopped in the worktree detaches its HEAD; it still
+                // belongs to `branch` when that rebase is rebasing it.
+                if line == "detached"
+                    && rebasing_branch_ref(runner, &worktree_path).as_deref()
+                        == Some(expected_branch_ref.as_str())
+                {
+                    return Ok((worktree_path, false, true));
                 }
             }
         }
@@ -902,10 +1113,7 @@ pub(crate) fn create_worktree_with(
         .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree add: {e}")))?;
 
     if output.success {
-        return Ok(WorktreeCreation {
-            path: worktree_path,
-            branch_created: false,
-        });
+        return Ok((worktree_path, false, false));
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -922,10 +1130,7 @@ pub(crate) fn create_worktree_with(
             })?;
 
         if output.success {
-            return Ok(WorktreeCreation {
-                path: worktree_path,
-                branch_created: true,
-            });
+            return Ok((worktree_path, true, false));
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1531,6 +1736,78 @@ mod tests {
         assert!(
             !git_dir.join("rebase-apply").exists(),
             "rebase-apply dir must not survive abort"
+        );
+
+        // The worktree created for the rebase is removed, and the main
+        // checkout never left its own branch.
+        let listing = capture_git(r.path(), &["worktree", "list", "--porcelain"]);
+        assert!(
+            !listing.contains("refs/heads/feat/example"),
+            "no worktree may survive a failed rebase:\n{listing}"
+        );
+        assert_eq!(capture_git(r.path(), &["branch", "--show-current"]), "main");
+    }
+
+    #[test]
+    fn create_worktree_refuses_a_branch_checked_out_in_the_main_checkout() {
+        let r = setup_rebase_repo();
+        advance_main(r.path(), 1);
+        run_git(r.path(), &["checkout", "feat/example"]);
+        let before = head_sha(r.path(), "feat/example");
+
+        let err = create_worktree(r.path(), "feat/example", true, WorktreePlacement::Sibling)
+            .expect_err("the main checkout's branch is refused");
+        assert!(
+            matches!(&err, PawError::WorktreeError(m)
+                if m.contains("checked out in the main checkout") && m.contains("another branch")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(head_sha(r.path(), "feat/example"), before, "not rebased");
+        assert_eq!(
+            capture_git(r.path(), &["branch", "--show-current"]),
+            "feat/example",
+            "the main checkout stays on its branch"
+        );
+        assert!(
+            !capture_git(r.path(), &["worktree", "list", "--porcelain"]).contains("feat-example"),
+            "no worktree is created"
+        );
+    }
+
+    #[test]
+    fn create_worktree_never_aborts_a_rebase_already_in_progress() {
+        let r = setup_rebase_repo();
+        let wt = create_worktree(r.path(), "feat/example", false, WorktreePlacement::Sibling)
+            .expect("worktree created")
+            .path;
+        std::fs::write(wt.join("work.txt"), "work\n").unwrap();
+        run_git(&wt, &["add", "work.txt"]);
+        run_git(&wt, &["commit", "-m", "agent work"]);
+        // Stop a rebase part-way with a clean tree: `--exec false` halts it
+        // after replaying the commit.
+        let stopped = Command::new("git")
+            .current_dir(&wt)
+            .args(["rebase", "--force-rebase", "--exec", "false", "HEAD~1"])
+            .output()
+            .expect("run git rebase");
+        assert!(!stopped.status.success(), "the rebase must stop");
+        let git_dir = PathBuf::from(capture_git(&wt, &["rev-parse", "--absolute-git-dir"]));
+        assert!(
+            git_dir.join("rebase-merge").exists(),
+            "a rebase is in progress"
+        );
+        advance_main(r.path(), 1);
+
+        let created = create_worktree(r.path(), "feat/example", true, WorktreePlacement::Sibling)
+            .expect("the worktree is reused");
+        let reason = created.rebase_skipped.expect("the skip is reported");
+        assert!(
+            reason.contains("rebase is already in progress"),
+            "reason: {reason}"
+        );
+        assert!(
+            git_dir.join("rebase-merge").exists(),
+            "the rebase in progress must not be aborted"
         );
     }
 
@@ -2883,6 +3160,303 @@ mod tests {
                 vec!["-C", &cwd, "worktree", "add", &target, "feat/new"],
             ];
             assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        /// A fake repo where `feat/x` exists, is held by `holder` (or by no
+        /// worktree until `git worktree add` creates one), and whose
+        /// `git status` answers `status`. `rebase_ok` decides whether a
+        /// `git rebase` succeeds.
+        fn dirty_check_fake(
+            repo: &Path,
+            holder: Option<&'static str>,
+            status: Result<&'static str, &'static str>,
+            rebase_ok: bool,
+        ) -> FakeCommandRunner {
+            let main = repo.to_string_lossy().into_owned();
+            let created = std::rc::Rc::new(std::cell::Cell::new(false));
+            FakeCommandRunner::scripted(move |_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                [.., "worktree", "list", "--porcelain"] => {
+                    let held = match holder {
+                        Some(wt) => format!("worktree {wt}\nbranch refs/heads/feat/x\n\n"),
+                        None if created.get() => format!(
+                            "worktree {main}/.git-paw/worktrees/feat-x\nbranch refs/heads/feat/x\n\n"
+                        ),
+                        None => String::new(),
+                    };
+                    Ok(ok_with(&format!(
+                        "worktree {main}\nbranch refs/heads/main\n\n{held}"
+                    )))
+                }
+                [.., "worktree", "add", _, "feat/x"] => {
+                    created.set(true);
+                    Ok(ok_with(""))
+                }
+                [.., "status", "--porcelain", "-z"] => match status {
+                    Ok(out) => Ok(ok_with(out)),
+                    Err(err) => Ok(fail_with(128, err)),
+                },
+                [.., "symbolic-ref", "--short", "HEAD"] => Ok(ok_with("main\n")),
+                [.., "rebase", "main"] | [.., "rebase", "main", "feat/x"] if !rebase_ok => {
+                    Ok(fail_with(1, "CONFLICT (content): Merge conflict in a.txt"))
+                }
+                _ => Ok(ok_with("")),
+            })
+        }
+
+        fn ran_rebase(fake: &FakeCommandRunner) -> bool {
+            argv_sequence(fake)
+                .iter()
+                .any(|argv| argv.iter().any(|a| a == "rebase"))
+        }
+
+        fn status_cwds(fake: &FakeCommandRunner) -> Vec<String> {
+            argv_sequence(fake)
+                .into_iter()
+                .filter(|argv| argv.iter().any(|a| a == "status"))
+                .map(|argv| argv[1].clone())
+                .collect()
+        }
+
+        fn create_feat_x(
+            fake: &FakeCommandRunner,
+            repo: &Path,
+        ) -> Result<super::super::WorktreeCreation, PawError> {
+            super::super::create_worktree_with(fake, repo, "feat/x", true, WorktreePlacement::Child)
+        }
+
+        #[test]
+        fn create_worktree_skips_the_rebase_over_a_dirty_worktree() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(
+                sandbox.path(),
+                Some("/wt/feat-x"),
+                Ok(" M src/a.rs\0?? notes.txt\0"),
+                true,
+            );
+            let created = create_feat_x(&fake, sandbox.path()).expect("creation proceeds");
+
+            assert!(!ran_rebase(&fake), "no rebase over uncommitted work");
+            assert_eq!(
+                status_cwds(&fake),
+                ["/wt/feat-x"],
+                "the holding worktree is checked"
+            );
+            let reason = created.rebase_skipped.expect("the skip is reported");
+            assert!(reason.contains("uncommitted changes"), "reason: {reason}");
+        }
+
+        /// The rebase commands the fake saw, each as its `-C` directory.
+        fn rebase_cwds(fake: &FakeCommandRunner) -> Vec<String> {
+            argv_sequence(fake)
+                .into_iter()
+                .filter(|argv| argv.get(2).is_some_and(|a| a == "rebase"))
+                .map(|argv| argv[1].clone())
+                .collect()
+        }
+
+        #[test]
+        fn create_worktree_rebases_a_branch_without_a_worktree_in_its_new_worktree() {
+            let sandbox = TempDir::new().expect("tempdir");
+            // A dirty main checkout must not matter: it is never checked.
+            let fake = dirty_check_fake(sandbox.path(), None, Ok(" M a.txt\0"), true);
+            let created = create_feat_x(&fake, sandbox.path()).expect("creation proceeds");
+
+            let new_worktree = format!("{}/.git-paw/worktrees/feat-x", sandbox.path().display());
+            assert_eq!(
+                rebase_cwds(&fake),
+                [new_worktree],
+                "rebased in the new worktree"
+            );
+            assert!(
+                status_cwds(&fake).is_empty(),
+                "the main checkout is never checked"
+            );
+            assert!(
+                !argv_sequence(&fake)
+                    .iter()
+                    .any(|argv| argv.iter().any(|a| a == "checkout"
+                        || a == "symbolic-ref" && argv.contains(&"--short".to_string()))),
+                "the main checkout's branch is never switched"
+            );
+            assert_eq!(created.rebase_skipped, None);
+        }
+
+        #[test]
+        fn create_worktree_removes_a_fresh_worktree_whose_rebase_fails() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(sandbox.path(), None, Ok(""), false);
+            let err = create_feat_x(&fake, sandbox.path()).expect_err("a conflict still fails");
+
+            assert!(
+                matches!(&err, PawError::WorktreeError(m) if m.starts_with(super::super::REBASE_FAILED)),
+                "unexpected error: {err:?}"
+            );
+            let new_worktree = format!("{}/.git-paw/worktrees/feat-x", sandbox.path().display());
+            let cwd = sandbox.path().to_string_lossy().into_owned();
+            assert!(
+                argv_sequence(&fake).contains(&vec![
+                    "-C".to_string(),
+                    cwd,
+                    "worktree".to_string(),
+                    "remove".to_string(),
+                    "--force".to_string(),
+                    new_worktree,
+                ]),
+                "the worktree created for the rebase is removed again"
+            );
+        }
+
+        #[test]
+        fn create_worktree_rebases_when_only_managed_entries_are_dirty() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(
+                sandbox.path(),
+                Some("/wt/feat-x"),
+                Ok("?? .git-paw/AGENTS.local.md\0"),
+                true,
+            );
+            let created = create_feat_x(&fake, sandbox.path()).expect("creation proceeds");
+
+            assert!(
+                ran_rebase(&fake),
+                "git-paw-managed entries alone count as clean"
+            );
+            assert_eq!(created.rebase_skipped, None);
+        }
+
+        #[test]
+        fn create_worktree_skips_the_rebase_when_status_fails() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(
+                sandbox.path(),
+                Some("/wt/feat-x"),
+                Err("fatal: not a git repository"),
+                true,
+            );
+            let created =
+                create_feat_x(&fake, sandbox.path()).expect("an unreadable tree is not an error");
+
+            assert!(
+                !ran_rebase(&fake),
+                "no rebase over a tree we could not check"
+            );
+            let reason = created.rebase_skipped.expect("the skip is reported");
+            assert!(reason.contains("could not check"), "reason: {reason}");
+        }
+
+        #[test]
+        fn create_worktree_still_rebases_a_clean_worktree() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(sandbox.path(), Some("/wt/feat-x"), Ok(""), true);
+            let created = create_feat_x(&fake, sandbox.path()).expect("creation proceeds");
+
+            assert!(
+                argv_sequence(&fake).contains(&vec![
+                    "-C".to_string(),
+                    "/wt/feat-x".to_string(),
+                    "rebase".to_string(),
+                    "main".to_string(),
+                ]),
+                "a clean tree is rebased in its worktree"
+            );
+            assert_eq!(
+                created.rebase_skipped, None,
+                "no skip notice for a clean tree"
+            );
+        }
+
+        #[test]
+        fn create_worktree_conflict_on_a_clean_tree_still_fails() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = dirty_check_fake(sandbox.path(), Some("/wt/feat-x"), Ok(""), false);
+            let err = create_feat_x(&fake, sandbox.path()).expect_err("a conflict still fails");
+
+            assert!(
+                matches!(&err, PawError::WorktreeError(m) if m.starts_with(super::super::REBASE_FAILED)),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn create_worktree_errors_when_the_worktree_list_cannot_run() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "worktree", "list", "--porcelain"] => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "git missing",
+                )),
+                _ => Ok(ok_with("")),
+            });
+            let err = create_feat_x(&fake, sandbox.path()).expect_err("no tree to check");
+
+            assert!(
+                matches!(&err, PawError::WorktreeError(m) if m.contains("git worktree list")),
+                "unexpected error: {err:?}"
+            );
+            assert!(!ran_rebase(&fake), "no rebase without a dirty-tree check");
+        }
+
+        #[test]
+        fn create_worktree_rebases_a_new_worktree_even_when_listing_later_fails() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let main = sandbox.path().to_string_lossy().into_owned();
+            let listed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let fake = FakeCommandRunner::scripted(move |_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                // The first listing says no worktree holds the branch; any
+                // later listing fails.
+                [.., "worktree", "list", "--porcelain"] if listed.replace(true) => {
+                    Err(std::io::Error::other("listing failed"))
+                }
+                [.., "worktree", "list", "--porcelain"] => Ok(ok_with(&format!(
+                    "worktree {main}\nbranch refs/heads/main\n\n"
+                ))),
+                _ => Ok(ok_with("")),
+            });
+            create_feat_x(&fake, sandbox.path()).expect("creation and rebase succeed");
+
+            let new_worktree = format!("{}/.git-paw/worktrees/feat-x", sandbox.path().display());
+            assert_eq!(
+                rebase_cwds(&fake),
+                [new_worktree],
+                "rebased in the new worktree"
+            );
+            assert!(
+                !argv_sequence(&fake)
+                    .iter()
+                    .any(|argv| argv.iter().any(|a| a == "checkout" || a == "--short")),
+                "the main checkout is never switched"
+            );
+        }
+
+        #[test]
+        fn create_worktree_skips_a_worktree_whose_status_is_clean_but_a_rebase_is_stopped() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let git_dir = sandbox.path().join("wt-git-dir");
+            std::fs::create_dir_all(git_dir.join("rebase-merge")).unwrap();
+            let git_dir_out = format!("{}\n", git_dir.display());
+            let main = sandbox.path().to_string_lossy().into_owned();
+            let fake = FakeCommandRunner::scripted(move |_, args| match args {
+                [.., "worktree", "list", "--porcelain"] => Ok(ok_with(&format!(
+                    "worktree {main}\nbranch refs/heads/main\n\n\
+                     worktree /wt/feat-x\nbranch refs/heads/feat/x\n\n"
+                ))),
+                [.., "rev-parse", "--git-dir"] => Ok(ok_with(&git_dir_out)),
+                _ => Ok(ok_with("")),
+            });
+            let created = create_feat_x(&fake, sandbox.path()).expect("creation proceeds");
+
+            assert!(!ran_rebase(&fake), "neither a new rebase nor an abort runs");
+            let reason = created.rebase_skipped.expect("the skip is reported");
+            assert!(
+                reason.contains("rebase is already in progress"),
+                "reason: {reason}"
+            );
         }
     }
 }

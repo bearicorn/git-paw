@@ -178,6 +178,18 @@ pub(crate) struct AttachedAgent {
     pub(crate) entry_point: Option<String>,
     /// Session-JSON worktree record for `status` / `stop` / `purge`.
     pub(crate) entry: WorktreeEntry,
+    /// Reason the creation-time rebase was skipped. Each caller words its own
+    /// notice.
+    pub(crate) rebase_skipped: Option<String>,
+}
+
+/// The CLI hint ending a launch's rebase-skip notice. MCP `start_session`
+/// has no `--no-rebase`, so it strips this from its warnings.
+pub(crate) const REBASE_SKIP_CLI_HINT: &str = " Pass --no-rebase to launch without a rebase.";
+
+/// The stderr notice a launch prints when `branch`'s rebase was skipped.
+pub(crate) fn rebase_skip_notice(branch: &str, reason: &str) -> String {
+    format!("notice: rebase skipped for '{branch}': {reason}.{REBASE_SKIP_CLI_HINT}")
 }
 
 /// Performs the per-worktree setup `git paw start` (supervisor mode) does for a
@@ -299,6 +311,7 @@ pub(crate) fn attach_agent(
     let (prompt, entry_point) = compose_agent_launch(ctx, branch, spec_entry, &wt.path);
 
     Ok(AttachedAgent {
+        rebase_skipped: wt.rebase_skipped.clone(),
         pane: crate::terminal::SurfaceSpec {
             label: branch.to_string(),
             owner: wt.path.clone(),

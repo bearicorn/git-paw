@@ -2,12 +2,8 @@
 //! grid session (bare or supervised), through the same attach primitives
 //! ([`super::launch`]) a start-time agent uses.
 
-use std::path::Path;
-
 use crate::agent_cli::CliProfile;
-use crate::agents;
 use crate::broker;
-use crate::command_runner::RealCommandRunner;
 use crate::config::SupervisorConfig;
 use crate::detect;
 use crate::error::PawError;
@@ -225,16 +221,15 @@ pub fn add(
 
     // Never rebase over uncommitted work: a dirty reused worktree attaches on
     // its current HEAD instead, exactly as if --no-rebase had been passed.
+    // Checked here rather than left to create_worktree so the notice prints
+    // even when the worktree creation that follows fails.
     let skip_reason = if no_rebase {
         None
     } else {
-        rebase_skip_reason(&repo_root, &branch)?
+        git::rebase_skip_reason(&repo_root, &branch)?
     };
     let no_rebase = if let Some(reason) = skip_reason {
-        out.warn(&format!(
-            "notice: rebase skipped for '{branch}': {reason}. \
-             Pass --no-rebase to attach without a rebase."
-        ));
+        out.warn(&add_rebase_skip_notice(&branch, &reason));
         true
     } else {
         no_rebase
@@ -303,6 +298,7 @@ pub fn add(
         prompt,
         entry_point,
         mut entry,
+        rebase_skipped,
     } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot, out).map_err(
         |e| match e {
             PawError::WorktreeError(msg) if msg.starts_with(git::REBASE_FAILED) => {
@@ -314,6 +310,10 @@ pub fn add(
             other => other,
         },
     )?;
+    // The worktree went dirty between the pre-check and the creation.
+    if let Some(reason) = rebase_skipped {
+        out.warn(&add_rebase_skip_notice(&branch, &reason));
+    }
     // Capture the new worktree's path before `entry` is moved into the
     // session, so we can register it as a live broker watch target below.
     let new_worktree_path = entry.worktree_path.clone();
@@ -471,25 +471,10 @@ pub fn add(
     })
 }
 
-/// Why `add` must not rebase `branch`, or `None` when the rebase may run.
-///
-/// The worktree holding the branch is judged as `remove` judges it, so
-/// git-paw-managed entries alone count as clean. Unlike `remove`, a failed
-/// status check counts as dirty: skipping a rebase loses nothing, while
-/// rebasing over work we could not see might.
-fn rebase_skip_reason(repo_root: &Path, branch: &str) -> Result<Option<String>, PawError> {
-    let Some(worktree) = git::find_worktree_for_branch_with(&RealCommandRunner, repo_root, branch)?
-    else {
-        return Ok(None);
-    };
-    match git::uncommitted_files(&worktree) {
-        Ok(files) if files.iter().any(|f| !agents::is_managed_path(&worktree, f)) => Ok(Some(
-            "its worktree has uncommitted changes, which are left untouched".to_string(),
-        )),
-        Ok(_) => Ok(None),
-        Err(e) => Ok(Some(format!(
-            "could not check its worktree for uncommitted changes ({})",
-            e.to_string().trim_end()
-        ))),
-    }
+/// The stderr notice `add` prints when `branch`'s rebase was skipped.
+fn add_rebase_skip_notice(branch: &str, reason: &str) -> String {
+    format!(
+        "notice: rebase skipped for '{branch}': {reason}. \
+         Pass --no-rebase to attach without a rebase."
+    )
 }

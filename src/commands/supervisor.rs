@@ -733,6 +733,9 @@ pub fn supervisor(
         // peer, so the port blocks in this session never overlap.
         let slot = crate::worktree_provision::allocate_slot(&worktree_entries);
         let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch), slot, out)?;
+        if let Some(reason) = &attached.rebase_skipped {
+            out.warn(&super::launch::rebase_skip_notice(branch, reason));
+        }
         agent_panes.push(attached.pane);
         agent_prompts.push(attached.prompt);
         agent_entry_points.push(attached.entry_point);

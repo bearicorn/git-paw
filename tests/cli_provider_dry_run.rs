@@ -51,7 +51,15 @@ fn a_dry_run_shows_the_command_and_args_the_pane_would_run() {
         stdout.contains("runs: echo --model sonnet"),
         "plan should show the pane command; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains(WORKER_HEADER),
+        "an accepted plan prints the worker header; got:\n{stdout}"
+    );
 }
+
+/// The worker header a dry run prints for `feat-a`; a refused dry run must
+/// print none.
+const WORKER_HEADER: &str = "feat-a \u{2192}";
 
 /// Scenarios "An ambiguous shim is refused" (dry run) and "Doctor flags an
 /// ambiguous shim". `git` is always on PATH and is not a known agent CLI, so
@@ -65,6 +73,10 @@ fn an_ambiguous_shim_fails_the_dry_run_and_doctor() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "the dry run must refuse");
     assert!(stderr.contains("[clis.git] is ambiguous"), "{stderr}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains(WORKER_HEADER),
+        "the refusal comes before any worker header"
+    );
 
     let home = tempfile::TempDir::new().expect("home tempdir");
     let doctor = cmd()
@@ -128,10 +140,15 @@ fn a_native_sandbox_disabled_by_full_auto_refuses_the_launch_with_nothing_create
 
     let out = dry_run(tr.path(), "codex");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "the dry run must refuse");
     for needle in ["codex", "full-auto", "[clis.codex].approval_args"] {
         assert!(stderr.contains(needle), "should name {needle}: {stderr}");
     }
+    assert!(
+        !stdout.contains(WORKER_HEADER),
+        "the refusal comes before any worker header:\n{stdout}"
+    );
 
     let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
