@@ -13,11 +13,7 @@ can declare its family to inherit that CLI's behaviour.
 
 ### Requirement: Each agent CLI resolves into one record
 
-The system SHALL resolve each agent CLI, once per agent, into a single record carrying its id (the
-`[clis.<name>]` key or known binary name), display name, launch command, launch arguments, provider
-family, and per-CLI facets: approval flags, session-id, resume and headless templates, MCP
-capability, and prompt-shape profile. Consumers SHALL read these values from the record and SHALL
-NOT re-derive them from a launch-command string or its leading token.
+The system SHALL resolve each agent CLI, once per agent, into one record: its id, display name, launch command and arguments, provider family, and facets (approval flags, session-id, resume and headless templates, MCP capability, prompt-shape profile). The id SHALL be the leading whitespace-delimited token of the CLI identity (a `[clis.<name>]` key, or a name passed as `--cli`). Consumers SHALL read facets from the record, never re-derive them from the launch command.
 
 #### Scenario: A known CLI resolves its record
 
@@ -47,6 +43,12 @@ NOT re-derive them from a launch-command string or its leading token.
 - **WHEN** a pane for `fast` is launched and its settle delay and profile are resolved
 - **THEN** both SHALL come from `[clis.fast]`, although the launch command begins with
   `/opt/tools/agent`
+
+#### Scenario: The launch command's leading token is never the id
+
+- **GIVEN** `[clis.foo] command = "claude"` with no `family` key
+- **WHEN** its record is resolved
+- **THEN** its id SHALL be `foo` and its family `generic`, although its launch command begins with `claude`
 
 ### Requirement: Provider families are compiled in-tree with a generic fallback
 
@@ -242,6 +244,12 @@ not). It SHALL never come from matching the CLI id against a list of names.
 - **THEN** the `claude-oss` worker's boot block SHALL use the `broker.sh` helper form
 - **AND** the `my-agent` worker's boot block SHALL use the MCP publish-tool form
 
+#### Scenario: A declared family reaches the worker's boot prompt end to end
+
+- **GIVEN** a broker-enabled config with `[clis.paw-stub] family = "claude"` and no `mcp` key, selected for a worker
+- **WHEN** the session is launched with `git paw start`
+- **THEN** the boot prompt delivered to that worker's pane SHALL contain the MCP publish-tool form, not the `broker.sh` helper invocations
+
 ### Requirement: The detection roster is part of the provider records
 
 The set of binary names auto-detected on PATH SHALL be defined once, as part of the provider
@@ -338,7 +346,7 @@ Each provider SHALL name the flags that disable the CLI's own sandbox; for `code
 `--dangerously-bypass-approvals-and-sandbox`. A `native` CLI SHALL be refused, naming the CLI, the
 level and `[clis.<name>].approval_args`, before any pane runs it, when its effective approval flags
 (built-in row or override) contain such a flag, or set the first word of its sandbox arguments to
-another value.
+another value. A dry-run plan SHALL report the refusal in place of that worker's command.
 
 #### Scenario: Codex full-auto under a native sandbox is refused
 
@@ -374,6 +382,13 @@ another value.
 - **WHEN** a worker using `sbx` is launched
 - **THEN** its pane command SHALL contain `--dangerously-skip-permissions`
 
+#### Scenario: A dry run reports the refusal instead of a command
+
+- **GIVEN** `[clis.codex] sandbox = "native"` and `agent_approval = "full-auto"` with no override
+- **WHEN** `git paw start --dry-run --cli codex` plans a worker
+- **THEN** the output SHALL contain the refusal naming `codex`, `full-auto` and `[clis.codex].approval_args`
+- **AND** it SHALL NOT contain a `runs:` line for that worker
+
 ### Requirement: An unsandboxed full-auto launch warns
 
 A worker launch at `full-auto` on a CLI that declares no sandbox SHALL print a warning naming the CLI
@@ -403,3 +418,19 @@ orchestrator's approval level would be refused.
 - **GIVEN** `[supervisor] cli = "codex"`, `approval = "full-auto"` and `[clis.codex] sandbox = "native"`
 - **WHEN** the hand-off is resolved
 - **THEN** it SHALL be unavailable, naming `[clis.codex].approval_args`
+
+### Requirement: The headless hand-off carries the CLI's launch arguments
+
+The headless orchestrator invocation SHALL build its argv as: the executable, the CLI's `args` split on whitespace, the native sandbox arguments when the CLI declares `sandbox = "native"`, the approval flags for `[supervisor].approval`, then the headless arguments. `args` SHALL be split on whitespace only, with no shell quoting, so an argument containing a space cannot be passed through `args`.
+
+#### Scenario: The entry's args precede the approval flags and the headless form
+
+- **GIVEN** `[supervisor] cli = "opus"`, `approval = "full-auto"` and `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`
+- **WHEN** the headless hand-off is resolved
+- **THEN** its argv SHALL be `claude`, `--model`, `opus`, `--dangerously-skip-permissions`, `-p`
+
+#### Scenario: A CLI without args keeps its headless form
+
+- **GIVEN** `[supervisor] cli = "claude"`, `approval = "manual"` and no `[clis.claude]` entry
+- **WHEN** the headless hand-off is resolved
+- **THEN** its argv SHALL be `claude`, `-p`
