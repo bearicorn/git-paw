@@ -430,7 +430,18 @@ fn start_session_blocking(
         session_name,
         orchestrator_context,
         output: out.lines,
-        warnings: out.warnings,
+        // The tool has no `--no-rebase`: keep a skipped rebase's reason, drop
+        // the CLI flag hint.
+        warnings: out
+            .warnings
+            .into_iter()
+            .map(
+                |w| match w.strip_suffix(crate::commands::launch::REBASE_SKIP_CLI_HINT) {
+                    Some(reason_only) => reason_only.to_string(),
+                    None => w,
+                },
+            )
+            .collect(),
     })
 }
 

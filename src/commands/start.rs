@@ -211,10 +211,17 @@ pub fn start(
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
         let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
-        for (branch, cli) in &selection.mappings {
+        // Resolve all launch lines first, so a refusal is reported before any
+        // worker header is printed.
+        let launch_lines = selection
+            .mappings
+            .iter()
+            .map(|(_, cli)| dry_run_launch_line(cli, approval, &config.clis))
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((branch, cli), launch_line) in selection.mappings.iter().zip(&launch_lines) {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
             out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
-            out.line(&dry_run_launch_line(cli, approval, &config.clis)?);
+            out.line(launch_line);
         }
         return Ok(LaunchOutcome::Done);
     }
@@ -279,6 +286,9 @@ pub fn start(
 
     for ((branch, cli), profile) in selection.mappings.iter().zip(&profiles) {
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
+        if let Some(reason) = &wt.rebase_skipped {
+            out.warn(&super::launch::rebase_skip_notice(branch, reason));
+        }
 
         // Provision runtime state (declared env copies, this agent's port
         // block, the `on_create` hook) after the worktree exists and before its
@@ -663,10 +673,14 @@ pub fn start_with_specs(
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
         let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
-        for (branch, cli) in &mappings {
+        let launch_lines = mappings
+            .iter()
+            .map(|(_, cli)| dry_run_launch_line(cli, approval, &config.clis))
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((branch, cli), launch_line) in mappings.iter().zip(&launch_lines) {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
             out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
-            out.line(&dry_run_launch_line(cli, approval, &config.clis)?);
+            out.line(launch_line);
         }
         return Ok(LaunchOutcome::Done);
     }
@@ -778,6 +792,9 @@ fn launch_spec_session(
 
     for ((branch, cli), profile) in mappings.iter().zip(&profiles) {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
+        if let Some(reason) = &wt.rebase_skipped {
+            out.warn(&super::launch::rebase_skip_notice(branch, reason));
+        }
 
         // Same seam as `start`: provision after create, before the pane is
         // built, taking the lowest slot no already-created peer holds.

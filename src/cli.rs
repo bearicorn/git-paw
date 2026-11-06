@@ -100,7 +100,10 @@ pub enum Command {
                       (useful when you have local pinned SHAs or are deliberately working off a \
                       stale baseline). If the rebase hits a conflict, the affected branch is \
                       left at its pre-rebase HEAD and `git paw start` exits with an error \
-                      listing the conflicting files.\n\n\
+                      listing the conflicting files. The rebase runs inside the branch's own \
+                      worktree, never in the main checkout, and never over uncommitted work: \
+                      when that worktree has uncommitted changes, the rebase is skipped with a \
+                      notice on stderr and the changes are left untouched.\n\n\
                       Examples:\n  \
                       git paw start\n  \
                       git paw start --cli claude\n  \
@@ -216,7 +219,10 @@ pub enum Command {
         /// worktree, so agents always start from current `main`. Pass
         /// `--no-rebase` to skip the rebase step entirely and reproduce the
         /// pre-v0.6 behaviour. Newly created branches (no prior commits) are
-        /// not rebased regardless of this flag.
+        /// not rebased regardless of this flag. Without it, the rebase runs in
+        /// the branch's own worktree, never in the main checkout, and a
+        /// worktree with uncommitted changes is not rebased; a notice on
+        /// stderr says so.
         #[arg(
             long,
             default_value_t = false,
@@ -305,7 +311,8 @@ pub enum Command {
                       by an earlier git-paw with the tiled layout is refused: stop it and run \
                       `git paw start` to relaunch it in the grid layout.\n\n\
                       An existing branch is rebased onto the default branch first, as `start` \
-                      does; --no-rebase skips that. When the branch's worktree has uncommitted \
+                      does, inside the branch's own worktree and never in the main checkout; \
+                      --no-rebase skips that. When the branch's worktree has uncommitted \
                       changes, the rebase is skipped automatically (with a notice on stderr) and \
                       the changes are left untouched.\n\n\
                       Examples:\n  \

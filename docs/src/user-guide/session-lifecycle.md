@@ -56,10 +56,32 @@ Rebases that **don't** happen:
   default-branch tip by construction.
 - `git paw add --no-rebase` attaches an existing branch at its current
   HEAD, with the same meaning as `start --no-rebase`.
-- `git paw add` onto a branch whose worktree has uncommitted changes
-  (anything besides git-paw's own `.git-paw/` files) skips the rebase on
-  its own, prints a notice on stderr naming `--no-rebase`, and leaves the
-  changes untouched — nothing is stashed, committed or reset.
+- No launch path ever rebases over uncommitted work. `git paw start`
+  (plain, `--supervisor` and spec-driven), `git paw add` and the MCP
+  `start_session` tool first check the worktree that holds the branch.
+  If it has uncommitted changes (anything besides git-paw's own
+  `.git-paw/` files), or git cannot report its status, the rebase is
+  skipped: the branch launches on its current HEAD, the changes are left
+  untouched (nothing is stashed, committed or reset), and one notice
+  naming the branch and `--no-rebase` goes to stderr. `start_session`
+  returns the notice in `warnings`, without the `--no-rebase` hint the
+  tool does not accept. A clean worktree is still rebased.
+
+### The rebase never touches the main checkout
+
+Every creation-time rebase runs inside the branch's own worktree. A branch
+that no worktree holds gets its worktree first and is rebased there, so
+uncommitted work in the main checkout (modified or untracked files) never
+blocks the rebase, and the main checkout's branch, HEAD and files are never
+changed. If that rebase fails, the new worktree is removed again and the
+launch fails as described under [Rebase conflicts](#rebase-conflicts).
+
+A branch you have checked out in the main checkout itself cannot also get a
+worktree, so the launch stops with an error asking you to switch the main
+checkout to another branch first. A worktree with a rebase stopped part-way
+in it (for example at an `edit` step) is reused as it is: git-paw neither
+starts a new rebase there nor aborts yours, and the notice says a rebase is
+already in progress.
 
 ### Resolving the default branch without `origin/HEAD`
 
@@ -136,9 +158,9 @@ launch time.
   remote-sync decision.
 - It does not leave a surviving worktree's files behind its branch.
   The rebase runs inside the worktree that has the branch checked out,
-  so on resume that worktree's files move with the rebased HEAD. If git
-  refuses the rebase there (for example, the worktree has uncommitted
-  changes), it fails like a conflict — see above.
+  so on resume that worktree's files move with the rebased HEAD. A
+  worktree with uncommitted changes is not rebased at all (see above);
+  any other refusal from git fails like a conflict.
 - It does not rebase one agent branch onto another agent branch. Only
   `feat/<change>` onto the repository's default branch.
 - It does not loop or retry on failure. One attempt, abort on
@@ -237,8 +259,8 @@ What it does:
    `start` uses.
 4. Creates the worktree (same naming and idempotent-create behaviour as
    `start`; re-adding an existing worktree reuses it). An existing branch
-   is rebased onto the default branch first unless you pass `--no-rebase`
-   or its worktree has uncommitted changes (see
+   is rebased onto the default branch inside its own worktree unless you
+   pass `--no-rebase` or that worktree has uncommitted changes (see
    [Rebase on start](#rebase-on-start)); a failed rebase stops `add` before
    any pane is created, with an error naming `--no-rebase`. It then attaches the
    agent through the **same** boot pipeline a start-time agent uses — the
