@@ -322,6 +322,57 @@ impl CliProfile {
             .unwrap_or(crate::DEFAULT_SUBMIT_DELAY_MS)
     }
 
+    /// The token usage of the session `session_id` running in `worktree`, as
+    /// the family's usage source reports it. A session without an assigned id
+    /// is unknown.
+    #[must_use]
+    pub fn usage(&self, session_id: Option<&str>, worktree: &Path) -> super::UsageReport {
+        self.usage_cached(session_id, worktree, None)
+    }
+
+    /// [`Self::usage`], parsing only what was appended to the report since
+    /// the last read through `cache`.
+    #[must_use]
+    pub fn usage_cached(
+        &self,
+        session_id: Option<&str>,
+        worktree: &Path,
+        cache: Option<&super::UsageCache>,
+    ) -> super::UsageReport {
+        let Some(session_id) = session_id else {
+            return super::UsageReport::Unknown(format!(
+                "{} session has no git-paw-assigned id",
+                self.id
+            ));
+        };
+        let config_dir = self
+            .entry
+            .as_ref()
+            .and_then(|e| e.settings_path.as_deref())
+            .map(|p| match p.strip_prefix("~/") {
+                Some(rest) => {
+                    crate::dirs::home_dir().map_or_else(|| PathBuf::from(p), |h| h.join(rest))
+                }
+                None => PathBuf::from(p),
+            })
+            // A relative path would resolve against git-paw's own cwd.
+            .filter(|p| p.is_absolute())
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        self.family.provider().usage(&super::UsageQuery {
+            cli_id: &self.id,
+            session_id,
+            worktree_path: worktree,
+            config_dir: config_dir.as_deref(),
+            cache,
+        })
+    }
+
+    /// Whether this CLI reports cost, which a `budget_max_cost` cap needs.
+    #[must_use]
+    pub fn reports_cost(&self) -> bool {
+        self.family.provider().reports_cost()
+    }
+
     /// The pane command for one launch: the executable, the CLI's `args`,
     /// [`Self::launch_sandbox_args`], the approval flags for `level`, then
     /// the session-id arguments (fresh launch) or resume arguments

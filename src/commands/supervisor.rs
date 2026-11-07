@@ -1281,6 +1281,7 @@ pub fn unattended_drive_run(
             &loaded_config.clis,
         ),
         handoff_timeout: std::time::Duration::from_secs(supervisor_cfg.escalation.timeout_seconds),
+        budget: crate::supervisor::drive::BudgetCaps::from_config(supervisor_cfg),
     };
 
     UnattendedRun {

@@ -502,7 +502,13 @@ pub enum Command {
                       Pass --json for machine-readable output (the `status` field is one of \
                       active/paused/stopped/stale; a `wave` object carrying \
                       last_progress_unix_secs, idle_seconds, stall_threshold_seconds and \
-                      stalled is included whenever this session's broker is reachable).\n\n\
+                      stalled is included whenever this session's broker is reachable). Each \
+                      worktree carries `usage` (its attributed token usage, or null when \
+                      unknown), and `usage_total` sums the known usage of the workers \
+                      currently in the session, with `tokens` (every token kind, the same \
+                      formula as budget_max_tokens; the drive loop's cap also keeps removed \
+                      and headless spend) and an `unknown_workers` count. Each call reads \
+                      every worker's transcripts in full.\n\n\
                       Examples:\n  git paw status\n  git paw status --json"
     )]
     Status {

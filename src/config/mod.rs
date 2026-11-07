@@ -37,9 +37,9 @@ pub use prompt_profile::{
 pub(crate) use prompt_profile::{default_compiled_prompt_profile, merge_prompt_profile};
 pub use specs::SpecsConfig;
 pub use supervisor::{
-    ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,
-    ConflictConfig, CorrectionConfig, EscalationConfig, LearningsConfig, OnExhausted,
-    SESSION_ID_PLACEHOLDER, SupervisorConfig, TellConfig, TellMode, approval_flags,
+    ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, BudgetCost,
+    CommonDevAllowlistConfig, ConflictConfig, CorrectionConfig, EscalationConfig, LearningsConfig,
+    OnExhausted, SESSION_ID_PLACEHOLDER, SupervisorConfig, TellConfig, TellMode, approval_flags,
     resolve_approval_flags, resolve_resume_args, resolve_session_id_args,
 };
 
@@ -1201,6 +1201,16 @@ worktree_placement = "child"
 # no_progress_window_seconds = 1500           # flag no-progress after ~25 min with no checkbox/commit movement
 # context_bloat_threshold_k = 250             # flag context-bloat when the CLI hints at clearing >= this many k tokens
 # blocked_on_supervisor_window_seconds = 900  # flag a supervisor-targeted block unanswered past ~15 min
+#
+# Budget caps for the --unattended drive loop, over the usage of the sessions
+# git-paw launched (never your own session). On a breach the loop escalates
+# once and stops the work it starts itself (correction, hand-offs, branch refreshes); it
+# never stops a worker. The cost cap needs an agent CLI that reports cost.
+# Omit for no cap. Cache reads dominate real usage: one worker's task can read
+# tens of millions of cached tokens.
+# budget_max_tokens = 300000000  # input + output + cache-read + cache-write tokens
+# budget_max_cost = 25.0         # in the currency the agent CLI reports
+# budget_on_exhausted = "escalate"  # or "abandon": end the run on a breach
 #
 # Routing through the orchestrator (the /tell and /agents commands). The user
 # types them in the orchestrator's own agent session and the orchestrator

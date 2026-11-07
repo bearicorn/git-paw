@@ -603,6 +603,30 @@ Every judgment call stays on the broker until it is answered, so nothing is
 lost while you are busy — re-read the broker state each cycle and pick up
 whatever is still open.
 
+### Budget guardrail
+
+Before you open a new wave or dispatch new work, read the session's attributed
+usage from `git paw status --json`: each worktree's `usage` and the session's
+`usage_total`. Compare `usage_total.tokens` plus your running total of removed
+workers (every token kind, cache reads included) with `budget_max_tokens`, and
+any reported cost with `budget_max_cost`, from the project's `[supervisor]`
+config.
+
+- **Keep a running total.** `usage_total` covers only the workers currently in
+  the session; a worker you remove takes its spend out of it. Before
+  `git paw remove`, note that worker's `usage` and add it to a running total
+  you keep. Your own session is never included.
+- **On a breach, stop dispatching.** When a configured cap is reached, open no
+  new wave and dispatch no new work. Report the totals and the cap to the
+  operator, and let them decide what happens next.
+- **Unknown is not zero.** A `usage` of `null`, or a non-zero
+  `usage_total.unknown_workers`, means that worker's spend cannot be read. The
+  real total is higher than the known one; say so when you report, and never
+  count unknown usage as zero.
+- **Never stop a worker for the budget.** Do not interrupt, signal or kill a
+  worker on account of the budget. A worker already running finishes its task;
+  the budget only decides what you start next.
+
 ### Who decides a permission prompt
 
 You do not. Three parties decide, in this order:

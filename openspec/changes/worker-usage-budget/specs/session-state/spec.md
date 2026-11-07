@@ -2,18 +2,18 @@
 
 ### Requirement: Status JSON exposes attributed usage
 
-`git paw status --json` SHALL include, on each worktree object, a `usage` object carrying the
-worker's token totals (and `cost` when the CLI reports one) or `null` when its usage is unknown, and
-a top-level `usage_total` summing the known figures with a count of workers whose usage is unknown.
-The fields SHALL be additive: every existing field SHALL keep its name and value. The human-readable
-`git paw status` output SHALL be unchanged. The usage SHALL exclude any session git-paw did not
-launch.
+`git paw status --json` SHALL include, on each worktree object, a `usage` object with the worker's
+token totals (and `cost` when the CLI reports one) or `null` when unknown, and a top-level
+`usage_total` summing the known figures of the workers currently in the session, with `tokens`
+(all four kinds summed, the cap's formula) and the count of unknown workers. Existing fields and the human-readable
+output SHALL be unchanged. Sessions git-paw did not launch SHALL be excluded.
 
 #### Scenario: A worker with a usage report shows figures
 
 - **GIVEN** an active session whose `feat/x` worker has a parseable usage report
 - **WHEN** `git paw status --json` is run
 - **THEN** the `feat/x` worktree object SHALL contain a `usage` object with its token totals
+- **AND** `usage_total.tokens` SHALL equal its input, output, cache-read and cache-write tokens summed
 
 #### Scenario: Unknown usage is null and counted
 

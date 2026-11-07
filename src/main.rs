@@ -596,13 +596,23 @@ fn drive_existing(
 }
 
 /// Drives `run` to an exit condition in the foreground, printing its summary.
+///
+/// A run that ended on a budget cap under `budget_on_exhausted = "abandon"` exits
+/// non-zero; every worker is left running.
 fn run_drive_loop(run: commands::supervisor::UnattendedRun) -> Result<(), PawError> {
-    git_paw::supervisor::drive::run_drive_loop(
+    let summary = git_paw::supervisor::drive::run_drive_loop(
         &run.session_name,
         &run.repo_root,
         &run.agents,
         run.options,
     )?;
+    if summary.outcome == git_paw::supervisor::drive::DriveOutcome::BudgetExhausted {
+        return Err(PawError::SessionError(
+            "the unattended run ended on a budget cap (budget-exhausted); the agents are \
+             still running"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 

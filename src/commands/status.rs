@@ -1,6 +1,7 @@
 //! `git paw status` — shows session state for the current repo (human or
 //! `--json`).
 
+use crate::agent_cli::{CliProfile, UsageReport, UsageSummary, UsageTotals};
 use crate::broker;
 use crate::error::PawError;
 use crate::session;
@@ -40,28 +41,52 @@ pub enum StatusOutcome {
 /// [`status`]), so the key is simply absent otherwise rather than a
 /// zeroed object a script could mistake for "idle since the epoch".
 fn status_json(
+    ctx: &CommandContext,
     existing: &session::Session,
     display: session::DisplayStatus,
     tmux_running: bool,
     wave: Option<broker::WaveStatus>,
 ) -> serde_json::Value {
+    let usage = &worker_usage(ctx, existing);
     let worktrees: Vec<_> = existing
         .worktrees
         .iter()
-        .map(|e| {
+        .zip(usage)
+        .map(|(e, usage)| {
             serde_json::json!({
                 "branch": e.branch,
                 "cli": e.cli,
                 "worktree_path": e.worktree_path,
                 "cli_session_id": e.cli_session_id,
+                "usage": usage.known().map_or(serde_json::Value::Null, usage_json),
             })
         })
         .collect();
+    let summary = UsageSummary::from_reports(
+        existing
+            .worktrees
+            .iter()
+            .zip(usage)
+            .map(|(e, u)| (e.cli.as_str(), e.branch.as_str(), u)),
+    );
+    let mut usage_total = usage_json(&summary.total);
+    if let Some(map) = usage_total.as_object_mut() {
+        // Exactly the figure `budget_max_tokens` caps.
+        map.insert(
+            "tokens".to_string(),
+            serde_json::json!(summary.total.tokens()),
+        );
+        map.insert(
+            "unknown_workers".to_string(),
+            serde_json::json!(summary.unknown.len()),
+        );
+    }
     let mut obj = serde_json::json!({
         "session": existing.session_name,
         "status": display.as_str(),
         "tmux_running": tmux_running,
         "worktrees": worktrees,
+        "usage_total": usage_total,
     });
     if let Some(wave) = wave
         && let Some(map) = obj.as_object_mut()
@@ -69,6 +94,33 @@ fn status_json(
         map.insert("wave".to_string(), serde_json::json!(wave));
     }
     obj
+}
+
+/// Scripts parse this output: keep the key names and order stable.
+fn usage_json(t: &UsageTotals) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "input_tokens": t.input,
+        "output_tokens": t.output,
+        "cache_read_tokens": t.cache_read,
+        "cache_write_tokens": t.cache_write,
+    });
+    if let (Some(cost), Some(map)) = (t.cost, v.as_object_mut()) {
+        map.insert("cost".to_string(), serde_json::json!(cost));
+    }
+    v
+}
+
+/// Read only for `--json`. An unreadable config resolves every CLI without
+/// its entry.
+fn worker_usage(ctx: &CommandContext, existing: &session::Session) -> Vec<UsageReport> {
+    let clis = ctx.config().map(|c| c.clis.clone()).unwrap_or_default();
+    existing
+        .worktrees
+        .iter()
+        .map(|e| {
+            CliProfile::resolve(&e.cli, &clis).usage(e.cli_session_id.as_deref(), &e.worktree_path)
+        })
+        .collect()
 }
 
 /// What `git paw status` knows about the session's broker: the
@@ -223,7 +275,7 @@ pub fn status(
     let wave = broker_status.as_ref().and_then(|st| st.wave);
 
     if json {
-        out.line(&status_json(&existing, display, tmux_running, wave).to_string());
+        out.line(&status_json(ctx, &existing, display, tmux_running, wave).to_string());
         return Ok(StatusOutcome::Session {
             session_name: existing.session_name,
             status: display,
@@ -403,5 +455,25 @@ mod tests {
         let line = broker_line(URL, &view, session::DisplayStatus::Active);
         assert!(line.contains("another repository"), "got {line}");
         assert!(!line.contains("running"), "got {line}");
+    }
+
+    #[test]
+    fn usage_json_bytes_are_pinned() {
+        let mut t = UsageTotals {
+            input: 5,
+            output: 150,
+            cache_read: 2500,
+            cache_write: 520,
+            cost: None,
+        };
+        assert_eq!(
+            usage_json(&t).to_string(),
+            r#"{"input_tokens":5,"output_tokens":150,"cache_read_tokens":2500,"cache_write_tokens":520}"#
+        );
+        t.cost = Some(1.25);
+        assert_eq!(
+            usage_json(&t).to_string(),
+            r#"{"input_tokens":5,"output_tokens":150,"cache_read_tokens":2500,"cache_write_tokens":520,"cost":1.25}"#
+        );
     }
 }

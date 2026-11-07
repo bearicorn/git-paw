@@ -412,6 +412,9 @@ pub struct SupervisorProbe {
     pub gates: Vec<GateCommandProbe>,
     /// Whether `.git-paw/scripts/sweep.sh` is installed.
     pub sweep_installed: bool,
+    /// Whether `budget_max_cost` is set while not every configured worker CLI
+    /// reports cost, so the cap can never fire.
+    pub unenforceable_cost_cap: bool,
 }
 
 /// Repository-hygiene facts.
@@ -1225,6 +1228,16 @@ pub fn check_supervisor(probe: &SupervisorProbe) -> Vec<CheckResult> {
             "run `git paw init` to install it",
         )
     });
+
+    if probe.unenforceable_cost_cap {
+        checks.push(CheckResult::warn(
+            GROUP_SUPERVISOR,
+            "budget_max_cost",
+            "budget_max_cost is set, but not every configured worker CLI reports cost — the cap \
+             can never be reached",
+            "cap the run with `budget_max_tokens` instead, or remove `budget_max_cost`",
+        ));
+    }
 
     checks
 }
@@ -2058,6 +2071,17 @@ fn probe_broker(config: &PawConfig, repo_root: &Path) -> BrokerProbe {
     }
 }
 
+/// The worker CLI ids the config names: `default_cli`, `default_spec_cli`
+/// and each preset's CLI.
+fn configured_worker_clis(config: &PawConfig) -> impl Iterator<Item = &str> {
+    config
+        .default_cli
+        .iter()
+        .chain(&config.default_spec_cli)
+        .chain(config.presets.values().map(|p| &p.cli))
+        .filter_map(|identity| identity.split_whitespace().next())
+}
+
 /// Resolves the supervisor's configured gate commands to the binaries they
 /// invoke and looks each one up on `PATH`.
 fn probe_supervisor(config: &PawConfig, repo_root: &Path) -> SupervisorProbe {
@@ -2093,6 +2117,15 @@ fn probe_supervisor(config: &PawConfig, repo_root: &Path) -> SupervisorProbe {
         sweep_installed: is_executable(
             &repo_root.join(".git-paw").join("scripts").join("sweep.sh"),
         ),
+        // Same condition as the drive loop: not every worker CLI reports cost.
+        // With no worker CLI configured nothing is known, so no warning.
+        unenforceable_cost_cap: supervisor.budget_max_cost.is_some() && {
+            let mut clis = configured_worker_clis(config).peekable();
+            clis.peek().is_some()
+                && !clis.all(|id| {
+                    crate::agent_cli::CliProfile::resolve(id, &config.clis).reports_cost()
+                })
+        },
     }
 }
 

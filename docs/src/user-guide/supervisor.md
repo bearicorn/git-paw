@@ -208,9 +208,11 @@ The loop keeps polling until one of:
    below).
 
 On exit it prints a summary: the outcome (`completed` /
-`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down`), each
+`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down` /
+`budget-exhausted`), each
 agent's **resolved** final state and its merged/unmerged status, the deduped
-list of prompts escalated for human review, a line stating that the
+list of prompts escalated for human review, a usage section (see
+[Usage and the budget guardrail](#usage-and-the-budget-guardrail)), a line stating that the
 orchestrator runs outside the session and its CLI is not monitored by the
 loop, and pointers to the broker log and captured learnings. Because there
 is no human to hand-write findings, the loop self-captures qualitative
@@ -685,6 +687,86 @@ When `[supervisor] learnings = true`, exhausting a branch's budget also appends
 a `correction_exhausted` learning carrying the branch, the worker CLI, and the
 cycle count — the tiered-model tuning signal that tells you a worker's model is
 under-powered for a class of task. With learnings off, nothing is recorded.
+
+### Usage and the budget guardrail
+
+git-paw attributes token usage to the sessions it launched, as each agent CLI
+reports it:
+
+- **Workers.** Each coding agent's usage is read through the session id git-paw
+  assigned at launch, from the CLI's own usage report. Today only the `claude`
+  family declares a usage source; every other CLI, and any session without an
+  assigned id, reads as **unknown** with a reason. A custom Claude variant
+  needs `family = "claude"` for its usage to be read; its `settings_path`
+  parent is where its reports are looked for first:
+
+  ```toml
+  [clis.claude-work]
+  command = "claude"
+  family = "claude"
+  settings_path = "~/.claude-work/settings.json"  # reports under ~/.claude-work/projects
+  ```
+- **Headless orchestrator invocations.** Each one-shot the drive loop starts
+  for a judgment call gets its own session id when its CLI supports one, so its
+  spend is counted under the orchestrator role.
+- **Excluded:** your own interactive session. git-paw never launched it and
+  cannot see it, so every total says it *excludes your own session*.
+
+Figures are input, output, cache-read and cache-write tokens, plus a cost only
+when the CLI itself reports one. The capped figure is their sum,
+`input + output + cache-read + cache-write`. `git paw status --json` reports
+`usage_total.tokens` with the same formula over the workers currently in the
+session; the drive loop's cap also keeps the spend of removed workers and of
+its headless runs.
+Cache reads dominate it: one real worker's task summed about 670 input,
+182 thousand output, 77 million cache-read and 669 thousand cache-write
+tokens. Unknown usage is never counted as zero: totals cover known usage only
+and say how many workers are unknown. Read the figures with
+`git paw status --json` (see the [CLI reference](../cli-reference.md)).
+
+**The guardrail.** Set a cap in `[supervisor]`:
+
+```toml
+[supervisor]
+budget_max_tokens = 300000000     # input + output + cache-read + cache-write
+budget_max_cost = 25.0            # only checked when every worker CLI reports cost
+budget_on_exhausted = "escalate"  # or "abandon"
+```
+
+With a cap set, the drive loop:
+
+1. **Reports at start** which workers have unknown usage. When
+   `budget_max_cost` is set but not every worker CLI reports cost, it also
+   escalates once that the cost cap cannot be evaluated (`git paw doctor`
+   warns about the same thing). Claude Code reports no cost, so for a Claude
+   fleet use `budget_max_tokens`.
+2. **Re-reads usage** every few sweeps and compares the known total with each
+   cap. Reports are parsed incrementally: only what was appended since the
+   last read.
+3. **Never lets the total go down.** A worker that is removed, swaps CLI (a new
+   session id), or whose report turns unknown keeps its last known figures in
+   the total. A worker turning unknown is warned about once, on stderr and in
+   the exit summary.
+4. **On the first breach** records one `budget-exhausted` escalation naming the
+   cap and the total, then stops every spend it initiates for the rest of the
+   run: no re-engagement or correction text, no headless orchestrator
+   invocations, no branch refreshes or their notifications. Text a human
+   already typed into a pane is still submitted.
+5. **Applies `budget_on_exhausted`.** Under `escalate` (the default) it keeps
+   sweeping until another exit condition; under `abandon` it exits with outcome
+   `budget-exhausted` and a non-zero status. This is separate from
+   `[supervisor.correction] on_exhausted`.
+
+The exit summary's usage section shows workers by CLI id, the orchestrator
+invocations, the unknown count, and each cap beside the known total.
+
+**Limits.** The guardrail stops what the loop starts; it never interrupts,
+signals or kills a worker. A worker that never prompts keeps spending until its
+task ends, and the loop compares figures between turns, so the final total can
+pass the cap. A worker whose usage is unknown is not covered by the cap at all.
+With no cap configured the loop takes the same actions as before; the only
+difference is the exit summary's usage section, for which it reads the usage
+reports once, at exit.
 
 ### The orchestrator's own permission level
 

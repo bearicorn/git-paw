@@ -27,9 +27,9 @@ session, and says so rather than pretending.
 - **Visibility.** `git paw status --json` gains each worker's `usage` (or `null`) and a session
   total; the drive loop's exit summary gains a usage section. Human `git paw status` is unchanged.
 - **Budget guardrail.** Optional `[supervisor] budget_max_tokens` / `budget_max_cost`. On breach the
-  drive loop escalates once and stops every spend it initiates (nudges, re-engagement, correction
-  cycles, one-shots); with `[supervisor.correction] on_exhausted =
-  "abandon"` it also exits with outcome `budget-exhausted`. It never interrupts or kills a worker.
+  drive loop escalates once and stops every spend it initiates (re-engagement, correction cycles,
+  one-shots, branch refreshes); with `[supervisor] budget_on_exhausted = "abandon"` it also exits
+  with outcome `budget-exhausted`. It never interrupts or kills a worker.
   A cap it cannot evaluate (unknown usage, or a cost cap with no cost source) is reported at start.
 - **Orchestrator skill.** The exported orchestrator skill gains a budget step: read the usage from
   `git paw status --json`, stop opening work on a breach, and tell the operator.

@@ -80,8 +80,10 @@ use super::permission_prompt::{
     strip_input_sigil,
 };
 
+pub mod budget;
 mod decide;
 
+pub use budget::{Attributed, BudgetCaps, UsageReader, UsageRole, UsageSetup, UsageSnapshot};
 pub use decide::{AppliedEffect, DriveEffect, EffectOutcome, JudgmentCall};
 
 /// Poll cadence: the loop re-sweeps every pane on approximately this interval.
@@ -786,6 +788,10 @@ pub enum DriveOutcome {
     /// new same-named session (GP-06) — it exits without acting on the new
     /// session's panes.
     SessionTornDown,
+    /// A `[supervisor]` budget cap was reached under
+    /// `[supervisor] budget_on_exhausted = "abandon"`; every worker is left
+    /// running.
+    BudgetExhausted,
 }
 
 impl DriveOutcome {
@@ -798,6 +804,7 @@ impl DriveOutcome {
             DriveOutcome::Stuck => "stuck",
             DriveOutcome::Heartbeat => "heartbeat",
             DriveOutcome::SessionTornDown => "session-torn-down",
+            DriveOutcome::BudgetExhausted => "budget-exhausted",
         }
     }
 }
@@ -825,6 +832,9 @@ pub struct DriveSummary {
     /// unavailable (`orchestrator-escalation-handoff`). `None` when the loop
     /// was run without a hand-off resolution (unit tests).
     pub handoff: Option<HandoffReport>,
+    /// The rendered usage section (`worker-usage-budget`), or `None` when the
+    /// loop ran without a usage reader.
+    pub usage: Option<String>,
 }
 
 /// The summary line stating the loop's CLI-unavailability coverage: the
@@ -886,6 +896,10 @@ impl DriveSummary {
 
         if let Some(report) = &self.handoff {
             let _ = writeln!(out, "\n{}", report.render());
+        }
+
+        if let Some(usage) = &self.usage {
+            let _ = write!(out, "\n{usage}");
         }
 
         if let Some(log) = &self.broker_log_hint {
@@ -1177,6 +1191,9 @@ pub struct DriveConfig {
     /// for the exit summary when [`DriveDeps::handoff`] is `None`. `None`
     /// (the default) reports nothing.
     pub handoff_unavailable: Option<String>,
+    /// Usage attribution and the budget caps (`worker-usage-budget`). `None`
+    /// (the default) reads no usage: no usage section, no guardrail.
+    pub usage: Option<UsageSetup>,
 }
 
 impl Default for DriveConfig {
@@ -1197,6 +1214,7 @@ impl Default for DriveConfig {
             layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
             roster: None,
             handoff_unavailable: None,
+            usage: None,
         }
     }
 }
@@ -1376,6 +1394,28 @@ pub fn drive_loop_logged(
     // escalations, the exhausted branches and the effect log.
     let mut shell = Shell::new(ctx);
 
+    // --- Budget guardrail (worker-usage-budget) -----------------------------
+    // With a cap set, say up front what the cap cannot see.
+    let mut budget = None;
+    if let Some(setup) = config.usage.as_ref() {
+        let mut guard = budget::BudgetGuard::new(setup.caps, setup.every_sweeps);
+        let (lines, escalation) = guard.start(setup.reader.as_ref(), &headless_sessions(deps));
+        for line in lines {
+            println!("{line}");
+        }
+        if let Some(escalation) = escalation {
+            let no_panes = HashMap::new();
+            let view = TickView {
+                agents: &agents,
+                panes: &no_panes,
+                status: &[],
+                profiles: &profiles,
+            };
+            shell.apply(deps, &view, DriveEffect::PublishEscalation(escalation));
+        }
+        budget = Some(guard);
+    }
+
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
     // pre-initialised placeholders to leave dead.
@@ -1475,23 +1515,41 @@ pub fn drive_loop_logged(
         }
 
         if winding_down {
-            let outcome = if shell.escalations.is_empty() {
-                DriveOutcome::Completed
-            } else {
+            let outcome = if shell.escalations.iter().any(budget::awaits_review) {
                 DriveOutcome::EscalatedForReview
+            } else {
+                DriveOutcome::Completed
             };
             break (outcome, latest_status);
+        }
+
+        // --- Budget check (worker-usage-budget) ------------------------------
+        // The first breach is escalated once; from then on the shell drops
+        // every spend the loop would initiate. No worker is interrupted.
+        if let (Some(guard), Some(setup)) = (budget.as_mut(), config.usage.as_ref()) {
+            let breached = guard.on_sweep(setup.reader.as_ref(), &headless_sessions(deps));
+            for warning in guard.take_warnings() {
+                eprintln!("{warning}");
+            }
+            if let Some(escalation) = breached {
+                shell.apply(deps, &view, DriveEffect::PublishEscalation(escalation));
+                shell.budget_exhausted = true;
+                if setup.caps.on_exhausted == OnExhausted::Abandon {
+                    break (DriveOutcome::BudgetExhausted, latest_status);
+                }
+            }
         }
 
         // --- Correction pass (auto-loopback) ---------------------------------
         run_correction_pass(&mut shell, deps, &view, config, &mut correction);
 
         // --- Headless hand-off (orchestrator-escalation-handoff) -------------
-        // Polls the running one-shot and starts the next queued one. Never
-        // waits on it: the sweep goes on while it runs.
+        // Polls the running one-shot and starts the next queued one — unless
+        // the budget is spent. Never waits on it: the sweep goes on while it
+        // runs.
         let now = deps.clock.now();
         if let Some(handoff) = deps.handoff.as_deref_mut() {
-            handoff.pump(now, true);
+            handoff.pump(now, !shell.budget_exhausted);
         }
 
         // --- Progress observation (unattended-heartbeat-progress) ------------
@@ -1579,7 +1637,17 @@ pub fn drive_loop_logged(
         .map(|a| (a.agent_id.clone(), deps.merge_check.merge_state(&a.branch)))
         .collect();
 
-    let (summary, effects) = decide::summarize(
+    let usage = match (budget.as_mut(), config.usage.as_ref()) {
+        (Some(guard), Some(setup)) => {
+            let section = guard.section(setup.reader.as_ref(), &headless_sessions(deps));
+            for warning in guard.take_warnings() {
+                eprintln!("{warning}");
+            }
+            Some(section)
+        }
+        _ => None,
+    };
+    let (mut summary, effects) = decide::summarize(
         decide::LoopState {
             outcome,
             escalations,
@@ -1594,6 +1662,7 @@ pub fn drive_loop_logged(
         },
         &merge_results,
     );
+    summary.usage = usage;
     // --- Wind-down synthesis learning (deduped against in-session friction) --
     let no_panes = HashMap::new();
     let view = TickView {
@@ -1609,6 +1678,14 @@ pub fn drive_loop_logged(
         summary,
         effect_log: shell.log,
     }
+}
+
+/// Every headless invocation the hand-off started this run.
+fn headless_sessions(deps: &DriveDeps<'_>) -> Vec<super::escalation::HeadlessSession> {
+    deps.handoff
+        .as_deref()
+        .map(HandoffPort::sessions)
+        .unwrap_or_default()
 }
 
 /// Lets a running headless one-shot finish or time out without starting
@@ -1775,6 +1852,11 @@ struct Shell<'r> {
     exhausted: Vec<ExhaustedBranch>,
     /// Every applied effect with its outcome, in application order.
     log: Vec<AppliedEffect>,
+    /// Set on the first budget breach (`worker-usage-budget`): every effect
+    /// that would start an agent turn — a re-engagement, a headless hand-off,
+    /// a branch refresh and its notification — is skipped for the rest of
+    /// the run. A buffered-input submit still runs: it sends a human's text.
+    budget_exhausted: bool,
 }
 
 impl<'r> Shell<'r> {
@@ -1785,6 +1867,7 @@ impl<'r> Shell<'r> {
             escalations: Vec::new(),
             exhausted: Vec::new(),
             log: Vec::new(),
+            budget_exhausted: false,
         }
     }
 
@@ -1802,6 +1885,13 @@ impl<'r> Shell<'r> {
         effect: DriveEffect,
     ) -> EffectOutcome {
         let outcome = match &effect {
+            DriveEffect::Reengage { .. }
+            | DriveEffect::InvokeOrchestrator(_)
+            | DriveEffect::RefreshBranches { .. }
+                if self.budget_exhausted =>
+            {
+                EffectOutcome::Skipped
+            }
             DriveEffect::RecordManualDecision { agent_id, captured } => {
                 deps.manual_decisions.record_forwarded(
                     agent_id,
@@ -3105,6 +3195,8 @@ pub struct DriveRunOptions {
     pub handoff: super::escalation::HandoffResolution,
     /// `[supervisor.escalation] timeout_seconds`.
     pub handoff_timeout: Duration,
+    /// The `[supervisor]` budget caps (`worker-usage-budget`).
+    pub budget: BudgetCaps,
 }
 
 /// The production hand-off port the drive loop runs with: reports the
@@ -3183,8 +3275,10 @@ pub fn run_drive_loop(
         binding,
         handoff,
         handoff_timeout,
+        budget,
     } = options;
 
+    let usage_clis = clis.clone();
     let (mut orchestrator, handoff_unavailable) = handoff_port(
         handoff,
         handoff_timeout,
@@ -3259,6 +3353,7 @@ pub fn run_drive_loop(
         // effect without restarting it.
         roster: Some(std::sync::Arc::new(SessionFileRoster::new(repo_root))),
         handoff_unavailable,
+        usage: Some(budget::session_usage(budget, repo_root, &usage_clis)),
         ..DriveConfig::default()
     };
 
@@ -5095,6 +5190,7 @@ mod tests {
             learnings_hint: Some(".git-paw/session-learnings.md".to_string()),
             merged_summary: None,
             handoff: None,
+            usage: None,
         };
         let text = summary.render();
         assert!(text.contains("escalated-for-review"), "states outcome");
@@ -5127,6 +5223,7 @@ mod tests {
                 learnings_hint: None,
                 merged_summary: None,
                 handoff: None,
+                usage: None,
             };
             let text = summary.render();
             assert!(
@@ -10442,6 +10539,7 @@ mod tests {
                 launch_args: Vec::new(),
                 approval_flags: Vec::new(),
                 headless_args: vec!["-p".to_string()],
+                session_id_args: None,
             },
             repo_root: repo.to_path_buf(),
             broker_url: Some("http://127.0.0.1:9119".to_string()),
@@ -10927,6 +11025,611 @@ mod tests {
                 extract_command_slice(&recording, replay_profile).as_deref(),
                 "{cli}: the escalated command is the replayed slice"
             );
+        }
+    }
+
+    // --- budget guardrail (worker-usage-budget) -----------------------------
+
+    mod budget_guard {
+        use super::*;
+        use std::cell::RefCell;
+
+        use crate::agent_cli::{UsageReport, UsageSummary, UsageTotals};
+        use crate::supervisor::drive::budget::{
+            BUDGET_EXHAUSTED_VERDICT, COST_CAP_UNENFORCEABLE_VERDICT, EXCLUDES_OWN_SESSION,
+            UsageLedger,
+        };
+
+        /// A reader answering the same records on every read.
+        #[derive(Debug)]
+        struct FixedUsage {
+            records: Vec<Attributed>,
+            costed: bool,
+        }
+
+        impl UsageReader for FixedUsage {
+            fn read(
+                &self,
+                _headless: &[super::super::super::escalation::HeadlessSession],
+            ) -> Vec<Attributed> {
+                self.records.clone()
+            }
+
+            fn every_worker_reports_cost(&self) -> bool {
+                self.costed
+            }
+        }
+
+        /// A reader answering each scripted read in turn, then the last again.
+        #[derive(Debug)]
+        struct ScriptedUsage(RefCell<Vec<Vec<Attributed>>>);
+
+        impl UsageReader for ScriptedUsage {
+            fn read(
+                &self,
+                _headless: &[super::super::super::escalation::HeadlessSession],
+            ) -> Vec<Attributed> {
+                let mut reads = self.0.borrow_mut();
+                if reads.len() > 1 {
+                    reads.remove(0)
+                } else {
+                    reads.first().cloned().unwrap_or_default()
+                }
+            }
+
+            fn every_worker_reports_cost(&self) -> bool {
+                false
+            }
+        }
+
+        fn known(input: u64, output: u64) -> UsageReport {
+            UsageReport::Known(UsageTotals {
+                input,
+                output,
+                ..UsageTotals::default()
+            })
+        }
+
+        fn worker(cli: &str, branch: &str, session: &str, report: UsageReport) -> Attributed {
+            Attributed {
+                role: UsageRole::Worker,
+                cli: cli.to_string(),
+                label: branch.to_string(),
+                session_id: Some(session.to_string()),
+                report,
+            }
+        }
+
+        /// Two `sonnet` workers whose known usage totals 1200 tokens.
+        fn spent_1200() -> Vec<Attributed> {
+            vec![
+                worker("sonnet", "feat/a", "s-a", known(100, 500)),
+                worker("sonnet", "feat/b", "s-b", known(100, 500)),
+            ]
+        }
+
+        fn snapshot_of(records: &[Attributed]) -> UsageSnapshot {
+            UsageLedger::default().merge(records).0
+        }
+
+        fn setup(caps: BudgetCaps, records: Vec<Attributed>) -> UsageSetup {
+            UsageSetup {
+                caps,
+                reader: std::sync::Arc::new(FixedUsage {
+                    records,
+                    costed: false,
+                }),
+                every_sweeps: 1,
+            }
+        }
+
+        fn tokens_cap(cap: u64, on_exhausted: OnExhausted) -> BudgetCaps {
+            BudgetCaps {
+                max_tokens: Some(cap),
+                max_cost: None,
+                on_exhausted,
+            }
+        }
+
+        fn cost_cap(cap: f64) -> BudgetCaps {
+            BudgetCaps {
+                max_tokens: None,
+                max_cost: Some(cap),
+                on_exhausted: OnExhausted::Escalate,
+            }
+        }
+
+        /// The correction policy stays `escalate`: only the budget's own
+        /// policy decides whether a breach ends the run.
+        fn config(usage: Option<UsageSetup>) -> DriveConfig {
+            DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_secs(5),
+                correction: CorrectionConfig {
+                    auto_loopback: true,
+                    on_exhausted: OnExhausted::Escalate,
+                    ..CorrectionConfig::default()
+                },
+                usage,
+                ..DriveConfig::default()
+            }
+        }
+
+        struct Run {
+            summary: DriveSummary,
+            effects: Vec<AppliedEffect>,
+            sends: Vec<(usize, String)>,
+            keys: Vec<(usize, String)>,
+            alerts: Vec<Escalation>,
+            spawns: usize,
+        }
+
+        /// Two working workers; `feat-a` fails a gate on the first sweep and
+        /// asks a question on the second; a hand-off port is resolvable.
+        fn run(config: &DriveConfig) -> Run {
+            let agents = two_agents();
+            let enumerator = FakeEnumerator {
+                panes: vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
+            };
+            let capturer = FakeCapturer::new(&[(2, IDLE_PANE), (3, IDLE_PANE)]);
+            let mut dispatcher = RecordingDispatcher::default();
+            let status = ScriptedStatus::new(vec![vec![
+                row("feat-a", "working"),
+                row("feat-b", "working"),
+            ]]);
+            let messages = ScriptedMessages::new(vec![
+                vec![gate_feedback("feat-a", "testing", "two tests fail")],
+                vec![BrokerMessage::Question {
+                    agent_id: "feat-b".to_string(),
+                    payload: crate::broker::messages::QuestionPayload {
+                        question: "RS256 or HS256?".to_string(),
+                    },
+                }],
+            ]);
+            let clock = FakeClock::new();
+            let mut alerts = RecordingAlerts::default();
+            let repo = tempfile::tempdir().expect("temp repo root");
+            let runner = countdown_runner(1);
+            let mut port = super::super::super::escalation::Orchestrator::new(
+                handoff_setup(repo.path()),
+                &runner,
+                RecordedOutcomes::default(),
+            );
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut RecordingLearnings::default(),
+                manual_decisions: &mut NoopManualDecisions,
+                refresher: &mut RecordingRefresher::default(),
+                wedged: Vec::new(),
+                handoff: Some(&mut port),
+            };
+            let run = drive_loop_logged(
+                "paw-test",
+                repo.path(),
+                &agents,
+                &mut deps,
+                config,
+                &AlwaysCurrentGuard,
+            );
+            Run {
+                summary: run.summary,
+                effects: run.effect_log,
+                sends: dispatcher.literal_sends.clone(),
+                keys: dispatcher.events.clone(),
+                alerts: alerts.escalations.clone(),
+                spawns: runner.spawns().len(),
+            }
+        }
+
+        fn budget_alerts(run: &Run) -> usize {
+            run.alerts
+                .iter()
+                .filter(|e| e.verdict == BUDGET_EXHAUSTED_VERDICT)
+                .count()
+        }
+
+        /// Scenario "A breach under escalate stops initiated spend".
+        #[test]
+        fn a_breach_under_escalate_escalates_once_and_sends_nothing() {
+            let breached = run(&config(Some(setup(
+                tokens_cap(1000, OnExhausted::Escalate),
+                spent_1200(),
+            ))));
+            assert_eq!(budget_alerts(&breached), 1, "{:?}", breached.alerts);
+            assert!(
+                breached.sends.is_empty(),
+                "no nudge or re-engagement text: {:?}",
+                breached.sends
+            );
+            assert_eq!(breached.spawns, 0, "no headless one-shot starts");
+            assert!(breached.effects.iter().any(|e| matches!(
+                (&e.effect, &e.outcome),
+                (DriveEffect::InvokeOrchestrator(_), EffectOutcome::Skipped)
+            )));
+            assert_ne!(breached.summary.outcome, DriveOutcome::BudgetExhausted);
+            assert!(
+                breached
+                    .summary
+                    .escalations
+                    .iter()
+                    .any(|e| e.verdict == BUDGET_EXHAUSTED_VERDICT
+                        && e.command.contains("1000")
+                        && e.command.contains("1200"))
+            );
+
+            // The same run under the cap is not affected: the gate failure
+            // re-engages the worker and the question is handed off.
+            let under = run(&config(Some(setup(
+                tokens_cap(5000, OnExhausted::Escalate),
+                spent_1200(),
+            ))));
+            assert_eq!(budget_alerts(&under), 0);
+            assert!(!under.sends.is_empty(), "the control run re-engages");
+            assert_eq!(under.spawns, 1, "the control run hands the question off");
+        }
+
+        /// Scenarios "A breach under abandon ends the run" and "The budget
+        /// policy is independent of the correction policy".
+        #[test]
+        fn a_breach_under_abandon_exits_budget_exhausted_without_touching_a_pane() {
+            let r = run(&config(Some(setup(
+                tokens_cap(1000, OnExhausted::Abandon),
+                spent_1200(),
+            ))));
+            assert_eq!(r.summary.outcome, DriveOutcome::BudgetExhausted);
+            assert!(
+                r.summary
+                    .render()
+                    .starts_with("Unattended drive loop exited: budget-exhausted")
+            );
+            assert_eq!(budget_alerts(&r), 1);
+            assert!(
+                r.keys.is_empty(),
+                "no keystroke of any kind reaches a pane: {:?}",
+                r.keys
+            );
+        }
+
+        /// Scenario "No cap leaves the loop unchanged".
+        #[test]
+        fn no_cap_leaves_actions_and_outcome_unchanged() {
+            let without_reader = run(&config(None));
+            let uncapped = run(&config(Some(setup(BudgetCaps::default(), spent_1200()))));
+            assert_eq!(uncapped.effects, without_reader.effects);
+            assert_eq!(uncapped.sends, without_reader.sends);
+            assert_eq!(uncapped.spawns, without_reader.spawns);
+            assert_eq!(uncapped.summary.outcome, without_reader.summary.outcome);
+            assert_eq!(
+                uncapped.summary.escalations,
+                without_reader.summary.escalations
+            );
+            assert!(without_reader.summary.usage.is_none());
+            assert!(
+                uncapped.summary.usage.is_some(),
+                "the usage section is shown"
+            );
+        }
+
+        /// Scenario "Unknown workers are named at start".
+        #[test]
+        fn the_start_report_names_a_worker_with_unknown_usage() {
+            let snapshot = snapshot_of(&[
+                worker("claude", "feat/a", "s-a", known(1, 1)),
+                worker(
+                    "aider",
+                    "feat/x",
+                    "s-x",
+                    UsageReport::Unknown("aider reports no usage git-paw can read".into()),
+                ),
+            ]);
+            let caps = tokens_cap(1000, OnExhausted::Escalate);
+            let lines = budget::start_report(caps, &snapshot, false);
+            assert!(lines.iter().any(|l| l.contains("feat/x")), "{lines:?}");
+            assert!(!lines.iter().any(|l| l.contains("feat/a")), "{lines:?}");
+            assert!(
+                budget::start_report(BudgetCaps::default(), &snapshot, false).is_empty(),
+                "no cap, no start report"
+            );
+        }
+
+        /// Scenario "An unenforceable cost cap is reported and escalated once".
+        #[test]
+        fn the_start_report_says_a_cost_cap_cannot_be_evaluated() {
+            let caps = cost_cap(25.0);
+            let lines = budget::start_report(caps, &snapshot_of(&spent_1200()), false);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("budget_max_cost cannot be evaluated")),
+                "{lines:?}"
+            );
+            assert_eq!(
+                budget::breach(caps, &snapshot_of(&spent_1200())),
+                None,
+                "never breached"
+            );
+
+            // The loop also escalates it once, at start, and still runs.
+            let r = run(&config(Some(setup(caps, spent_1200()))));
+            let unenforceable = r
+                .alerts
+                .iter()
+                .filter(|e| e.verdict == COST_CAP_UNENFORCEABLE_VERDICT)
+                .count();
+            assert_eq!(unenforceable, 1, "{:?}", r.alerts);
+            assert_eq!(budget_alerts(&r), 0);
+        }
+
+        /// Scenario "An unevaluable cost cap does not change the outcome".
+        #[test]
+        fn an_unevaluable_cost_cap_leaves_a_clean_wave_completed() {
+            let agents = two_agents();
+            let merge_check = FakeMergeCheck::default();
+            let (summary, _dispatcher) = run_loop_with_merge_check(
+                &agents,
+                vec![
+                    pane(0, "/repo"),
+                    pane(2, "/repo-feat-a"),
+                    pane(3, "/repo-feat-b"),
+                ],
+                &[(0, IDLE_PANE), (2, IDLE_PANE), (3, IDLE_PANE)],
+                vec![vec![row("feat-a", "done"), row("feat-b", "done")]],
+                &merge_check,
+                &DriveConfig {
+                    poll_interval: Duration::from_secs(1),
+                    heartbeat: Duration::from_hours(1),
+                    default_branch: "main".to_string(),
+                    usage: Some(setup(cost_cap(25.0), spent_1200())),
+                    ..DriveConfig::default()
+                },
+            );
+            assert_eq!(summary.outcome, DriveOutcome::Completed);
+            let notices = summary
+                .escalations
+                .iter()
+                .filter(|e| e.verdict == COST_CAP_UNENFORCEABLE_VERDICT)
+                .count();
+            assert_eq!(notices, 1, "{:?}", summary.escalations);
+        }
+
+        #[test]
+        fn a_cost_cap_is_breached_only_by_a_reported_cost() {
+            let costed = UsageReport::Known(UsageTotals {
+                cost: Some(30.0),
+                ..UsageTotals::default()
+            });
+            let snapshot = snapshot_of(&[worker("x", "feat/a", "s-a", costed.clone())]);
+            let caps = cost_cap(25.0);
+            assert!(budget::breach(caps, &snapshot).is_some());
+            assert!(budget::start_report(caps, &snapshot, true).is_empty());
+
+            // A mixed fleet has no full cost: the cap is reported, not evaluated.
+            let mixed = snapshot_of(&[
+                worker("x", "feat/a", "s-a", costed),
+                worker("y", "feat/b", "s-b", known(1, 1)),
+            ]);
+            assert!(
+                budget::start_report(caps, &mixed, false)
+                    .iter()
+                    .any(|l| l.contains("cannot be evaluated"))
+            );
+            assert_eq!(budget::breach(caps, &mixed), None);
+        }
+
+        /// Scenario "The token cap counts every token kind".
+        #[test]
+        fn the_token_cap_counts_cache_tokens_too() {
+            let cached = UsageReport::Known(UsageTotals {
+                input: 1,
+                output: 1,
+                cache_read: 900,
+                cache_write: 98,
+                cost: None,
+            });
+            let snapshot = snapshot_of(&[worker("sonnet", "feat/a", "s-a", cached)]);
+            let caps = tokens_cap(1000, OnExhausted::Escalate);
+            let reason = budget::breach(caps, &snapshot).expect("1000 tokens reach the cap");
+            assert!(reason.contains("1000 tokens"), "{reason}");
+        }
+
+        /// Scenario "A removed, swapped or unknown worker keeps its spend": a worker that
+        /// leaves, swaps CLI or turns unknown keeps its last known figures.
+        #[test]
+        fn the_total_never_goes_down_when_a_worker_leaves_swaps_or_turns_unknown() {
+            let unknown = || UsageReport::Unknown("no usage report found".to_string());
+            let reader = ScriptedUsage(RefCell::new(vec![
+                vec![
+                    worker("sonnet", "feat/a", "s-a", known(100, 0)),
+                    worker("sonnet", "feat/b", "s-b", known(200, 0)),
+                    worker("sonnet", "feat/c", "s-c", known(300, 0)),
+                ],
+                // feat/a removed; feat/b swapped CLI (new session id, unknown
+                // so far); feat/c's report turned unknown.
+                vec![
+                    worker("opus", "feat/b", "s-b2", unknown()),
+                    worker("sonnet", "feat/c", "s-c", unknown()),
+                ],
+                vec![
+                    worker("opus", "feat/b", "s-b2", known(50, 0)),
+                    worker("sonnet", "feat/c", "s-c", unknown()),
+                ],
+            ]));
+            let mut guard =
+                budget::BudgetGuard::new(tokens_cap(1_000_000, OnExhausted::Escalate), 1);
+            assert_eq!(guard.observe(&reader, &[]).total().tokens(), 600);
+            assert!(guard.take_warnings().is_empty());
+
+            let second = guard.observe(&reader, &[]);
+            assert_eq!(second.total().tokens(), 600, "nothing seen is subtracted");
+            let unknown: Vec<&str> = second
+                .workers
+                .unknown
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
+            assert_eq!(
+                unknown,
+                vec!["feat/b"],
+                "feat/c is counted once, by its kept figures, not again as unknown"
+            );
+            let warnings = guard.take_warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("feat/c"), "{warnings:?}");
+
+            let third = guard.observe(&reader, &[]);
+            assert_eq!(third.total().tokens(), 650, "the swapped CLI's spend adds");
+            assert!(guard.take_warnings().is_empty(), "warned once");
+            assert_eq!(third.workers.by_cli["opus"].tokens(), 50);
+
+            let section = guard.section(&reader, &[]);
+            assert!(
+                section.contains("feat/c's usage turned unknown"),
+                "{section}"
+            );
+            assert!(section.contains("last known figures stay"), "{section}");
+            assert!(
+                section.contains("0 worker(s) with unknown usage"),
+                "{section}"
+            );
+        }
+
+        /// Scenario "A breach still submits a human's buffered text but
+        /// refreshes no branch".
+        #[test]
+        fn after_a_breach_buffered_input_is_submitted_but_no_branch_is_refreshed() {
+            let agents = two_agents();
+            let enumerator = FakeEnumerator {
+                panes: vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
+            };
+            let buffered = idle_input_box("please continue with task 3");
+            let capturer = FakeCapturer::new(&[(2, buffered.as_str()), (3, IDLE_PANE)]);
+            let status = ScriptedStatus::new(vec![]);
+            let messages = ScriptedMessages::new(vec![]);
+            let clock = FakeClock::new();
+            let repo = tempfile::tempdir().expect("temp repo root");
+            let panes: HashMap<String, usize> = agents
+                .iter()
+                .zip([2, 3])
+                .map(|(a, p)| (a.agent_id.clone(), p))
+                .collect();
+            let rows: Vec<AgentStatusRow> = agents
+                .iter()
+                .map(|a| row_with_modified_files(&a.agent_id, "working", &[]))
+                .collect();
+            let profiles = AgentProfiles::new(HashMap::new());
+
+            for exhausted in [false, true] {
+                let mut dispatcher = RecordingDispatcher::default();
+                let mut refresher = RecordingRefresher::default();
+                let mut deps = DriveDeps {
+                    enumerator: &enumerator,
+                    capturer: &capturer,
+                    dispatcher: &mut dispatcher,
+                    status: &status,
+                    messages: &messages,
+                    clock: &clock,
+                    merge_check: &FakeMergeCheck::default(),
+                    alerts: &mut RecordingAlerts::default(),
+                    learnings: &mut RecordingLearnings::default(),
+                    manual_decisions: &mut NoopManualDecisions,
+                    refresher: &mut refresher,
+                    wedged: Vec::new(),
+                    handoff: None,
+                };
+                let view = TickView {
+                    agents: &agents,
+                    panes: &panes,
+                    status: &rows,
+                    profiles: &profiles,
+                };
+                let mut shell = Shell::new(SweepContext {
+                    session: "paw-test",
+                    repo_root: repo.path(),
+                });
+                shell.budget_exhausted = exhausted;
+                let submit = shell.apply(
+                    &mut deps,
+                    &view,
+                    DriveEffect::SubmitBufferedInput {
+                        agent_id: agents[0].agent_id.clone(),
+                        pane_index: 2,
+                        settle_delay: Duration::ZERO,
+                    },
+                );
+                let refresh = shell.apply(
+                    &mut deps,
+                    &view,
+                    DriveEffect::RefreshBranches {
+                        base: "main".to_string(),
+                    },
+                );
+                assert_ne!(submit, EffectOutcome::Skipped, "exhausted={exhausted}");
+                if exhausted {
+                    assert_eq!(refresh, EffectOutcome::Skipped);
+                    assert!(refresher.rebase_calls.is_empty());
+                    assert!(refresher.notify_calls.is_empty(), "no agent is notified");
+                } else {
+                    assert!(
+                        !refresher.notify_calls.is_empty(),
+                        "the control run refreshes"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn usage_is_read_only_every_n_sweeps_and_breaches_once() {
+            let mut guard = budget::BudgetGuard::new(tokens_cap(1000, OnExhausted::Escalate), 3);
+            let reader = FixedUsage {
+                records: spent_1200(),
+                costed: false,
+            };
+            assert!(guard.on_sweep(&reader, &[]).is_none());
+            assert!(guard.on_sweep(&reader, &[]).is_none());
+            assert!(guard.on_sweep(&reader, &[]).is_some(), "third sweep reads");
+            assert!(guard.exhausted());
+            assert!(
+                guard.on_sweep(&reader, &[]).is_none(),
+                "only the first breach"
+            );
+        }
+
+        /// Scenario "The usage section separates roles and names unknowns".
+        #[test]
+        fn the_usage_section_separates_roles_and_names_unknowns() {
+            let a = known(10, 20);
+            let b = known(1, 2);
+            let none = UsageReport::Unknown("aider reports no usage git-paw can read".into());
+            let one_shot = known(5, 5);
+            let snapshot = UsageSnapshot {
+                workers: UsageSummary::from_reports([
+                    ("sonnet", "feat/a", &a),
+                    ("sonnet", "feat/b", &b),
+                    ("aider", "feat/c", &none),
+                ]),
+                orchestrator: UsageSummary::from_reports([(
+                    "opus",
+                    "orchestrator invocation 1",
+                    &one_shot,
+                )]),
+            };
+            let text =
+                budget::render_section(&snapshot, tokens_cap(1000, OnExhausted::Escalate), &[]);
+            assert!(text.contains("workers on sonnet: 33 tokens"), "{text}");
+            assert!(
+                text.contains("orchestrator invocations: 10 tokens"),
+                "{text}"
+            );
+            assert!(text.contains("1 worker(s) with unknown usage"), "{text}");
+            assert!(text.contains(EXCLUDES_OWN_SESSION), "{text}");
+            assert!(text.contains("budget_max_tokens: 43 of 1000"), "{text}");
         }
     }
 }

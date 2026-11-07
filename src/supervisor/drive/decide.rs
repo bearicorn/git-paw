@@ -675,10 +675,10 @@ pub(super) fn summarize(
                 });
             }
         }
-        outcome = if escalations.is_empty() {
-            DriveOutcome::Completed
-        } else {
+        outcome = if escalations.iter().any(super::budget::awaits_review) {
             DriveOutcome::EscalatedForReview
+        } else {
+            DriveOutcome::Completed
         };
     }
 
@@ -717,6 +717,7 @@ pub(super) fn summarize(
         learnings_hint,
         merged_summary,
         handoff,
+        usage: None,
     };
     (summary, effects)
 }

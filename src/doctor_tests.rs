@@ -234,6 +234,7 @@ fn every_non_ok_check_carries_a_remedy() {
                 on_path: false,
             }],
             sweep_installed: false,
+            unenforceable_cost_cap: false,
         },
         hygiene: HygieneProbe {
             missing_gitignore_entries: vec![".git-paw/logs/".into()],
@@ -1142,6 +1143,7 @@ fn missing_gate_binary_fails_with_a_remedy() {
             on_path: false,
         }],
         sweep_installed: true,
+        unenforceable_cost_cap: false,
     });
     let check = named(&checks, "test_command");
     assert_eq!(check.status, CheckStatus::Fail);
@@ -1150,6 +1152,48 @@ fn missing_gate_binary_fails_with_a_remedy() {
         remedy.contains("nope"),
         "the remedy should name the missing binary; got: {remedy}"
     );
+}
+
+/// Scenario "Doctor warns about a cost cap no worker CLI can satisfy", from
+/// the config: a Claude fleet reports no cost.
+#[test]
+fn the_probe_flags_a_cost_cap_over_a_claude_fleet() {
+    let repo = tempfile::tempdir().unwrap();
+    let probe = |src: &str| {
+        let config: crate::config::PawConfig = toml::from_str(src).unwrap();
+        probe_supervisor(&config, repo.path()).unenforceable_cost_cap
+    };
+    assert!(probe(
+        "default_cli = \"claude\"\n[supervisor]\nenabled = true\nbudget_max_cost = 25.0\n"
+    ));
+    assert!(!probe(
+        "default_cli = \"claude\"\n[supervisor]\nenabled = true\nbudget_max_tokens = 1000\n"
+    ));
+    assert!(
+        !probe("[supervisor]\nenabled = true\nbudget_max_cost = 25.0\n"),
+        "no worker CLI configured: nothing is known, so no warning"
+    );
+}
+
+/// Scenario "Doctor warns about a cost cap no worker CLI can satisfy".
+#[test]
+fn a_cost_cap_no_worker_cli_reports_is_a_warning_not_a_failure() {
+    let probe = SupervisorProbe {
+        enabled: true,
+        gates: Vec::new(),
+        sweep_installed: true,
+        unenforceable_cost_cap: true,
+    };
+    let checks = check_supervisor(&probe);
+    let check = named(&checks, "budget_max_cost");
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.detail.contains("reports cost"), "{}", check.detail);
+
+    let fine = check_supervisor(&SupervisorProbe {
+        unenforceable_cost_cap: false,
+        ..probe
+    });
+    assert!(fine.iter().all(|c| c.name != "budget_max_cost"));
 }
 
 #[test]
@@ -1164,6 +1208,7 @@ fn missing_sweep_script_fails_the_supervisor_group() {
         enabled: true,
         gates: Vec::new(),
         sweep_installed: false,
+        unenforceable_cost_cap: false,
     });
     let check = named(&checks, "sweep.sh");
     assert_eq!(check.status, CheckStatus::Fail);
@@ -1200,6 +1245,7 @@ fn supervisor_check_reports_only_the_configured_stack_verbs() {
             },
         ],
         sweep_installed: true,
+        unenforceable_cost_cap: false,
     });
 
     let rendered = render_human(&checks);

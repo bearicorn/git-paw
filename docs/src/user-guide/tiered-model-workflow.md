@@ -52,6 +52,20 @@ Then name the profile as the worker CLI (`default_spec_cli = "sonnet"`, or
 model. No wrapper script on `PATH` is needed; see
 [Provider families](../supported-clis.md#provider-families).
 
+### Reading per-tier usage
+
+Because each tier is its own `[clis.*]` entry, usage is reported per tier.
+`git paw status --json` gives each worktree's `cli` and `usage`, so grouping
+by `cli` shows what the `sonnet` workers spent against the `opus` ones. The
+unattended drive loop's exit summary prints the same split (workers by CLI
+id, then the orchestrator invocations it started), and a `[supervisor]`
+`budget_max_tokens` cap stops the loop dispatching once the known total —
+every token kind, cache reads included, the formula `usage_total.tokens` uses —
+reaches it. A custom tier pointing at Claude Code needs `family = "claude"`
+for its usage to be read. Usage a CLI cannot report reads as unknown, never as zero, and
+your own session is never included; see
+[Usage and the budget guardrail](supervisor.md#usage-and-the-budget-guardrail).
+
 ## Step 1 — Plan first; planning is not a git-paw command
 
 git-paw does not author your change set — it *executes* one. Author the plan
