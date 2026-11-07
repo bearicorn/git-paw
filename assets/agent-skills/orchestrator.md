@@ -1557,17 +1557,42 @@ Wait for the user to resolve the cycle before continuing.
 
 **Step 2 — For each branch in topological order, run the per-branch merge + test loop.**
 
+**Never pipe a must-succeed step.** Run every git and test command in this loop
+bare — not `… | tail`, not `… | grep`. A pipeline's exit status is its *last*
+stage's, so a failed merge or a red test run piped into `tail` reports success
+and the loop carries on over a merge that never happened. Redirect to a file
+and read it afterwards if you need to trim the output.
+
+Check out the merge target — the integration branch this session merges into
+(the repository's resolved default branch unless you were told otherwise) — and
+record the agent branch's tip before merging, so you can prove afterwards that it
+landed. The agent branch is the one its worker was launched on (spec-driven
+launches name it with the configured branch prefix):
+
 ```bash
-git checkout main
-git merge --ff-only feat/<branch>
+git checkout __FILL_IN_TARGET_BRANCH__
+git rev-parse __FILL_IN_AGENT_BRANCH__
+git merge --ff-only __FILL_IN_AGENT_BRANCH__
 ```
 
 Never create merge commits — fast-forward only. If `git merge --ff-only` fails (the branch
-diverges from `main`, or there is a conflict), SKIP that branch and publish
+diverges from the target, or there is a conflict), SKIP that branch and publish
 `agent.feedback` to its agent listing the conflict / divergence and asking them to rebase
 or resolve. Continue with the next branch in the order.
 
-On a successful fast-forward, run the configured test command (`{{TEST_COMMAND}}`) and
+**Confirm the merge landed** before you archive or publish anything for it — the
+recorded tip must now be an ancestor of `HEAD`:
+
+```bash
+git merge-base --is-ancestor __FILL_IN_RECORDED_TIP_SHA__ HEAD
+```
+
+A non-zero exit means the merge did **not** land, whatever the earlier output
+looked like: archive nothing, publish nothing (no `agent.advanced-main`, no
+summary line claiming the merge), find out why, and treat the branch as skipped
+until it does land.
+
+Once the merge is confirmed, run the configured test command (`{{TEST_COMMAND}}`) and
 capture the output:
 
 ```bash
@@ -1575,22 +1600,29 @@ capture the output:
 ```
 
 If the test command fails, revert the merge with `git reset --hard <previous-HEAD>` (the
-SHA you recorded before the merge — typically the previous `main` HEAD), publish
+SHA you recorded before the merge — the target branch's previous HEAD), publish
 `agent.feedback` to the branch's agent describing the regression, and move on to the next
 branch. Do NOT continue merging on top of a regressed base.
 
 ```bash
 git reset --hard __FILL_IN_PREV_HEAD_SHA__
-.git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ regression "merge of feat/__FILL_IN_BRANCH__ regressed: __FILL_IN_FAILING_TEST_SUMMARY__"
+.git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ regression "merge of __FILL_IN_AGENT_BRANCH__ regressed: __FILL_IN_FAILING_TEST_SUMMARY__"
 ```
 
-If the test command passes, **publish an `agent.advanced-main` event** before
+If the test command passes and your spec workflow has an archive step for the
+merged change, run it **now** — only after the landing check above succeeded,
+never for a merge you could not confirm. After any archive step that writes to the
+tracked tree, run `{{TEST_COMMAND}}` again before moving on: the archive changes
+files the branch itself never saw, so tests that read them can fail only now.
+Treat a failure there like any regression.
+
+Then **publish an `agent.advanced-main` event** before
 continuing. The base just moved; every agent that depended on it learns this on
 their next inbox poll instead of grepping the log. Run the helper on the branch
 you just merged into:
 
 ```bash
-.git-paw/scripts/sweep.sh advanced-main feat/__FILL_IN_BRANCH__ "__FILL_IN_ONE_LINE_SUMMARY__"
+.git-paw/scripts/sweep.sh advanced-main __FILL_IN_AGENT_BRANCH__ "__FILL_IN_ONE_LINE_SUMMARY__"
 ```
 
 The helper resolves the rest itself: `base` (the checked-out branch's name),
@@ -1600,7 +1632,8 @@ The helper resolves the rest itself: `base` (the checked-out branch's name),
 - **`base` is the resolved default-branch name** — the branch you merged into,
   as the helper reads it — never a hardcoded literal, so a session whose
   default branch is not the usual one still gets a correct event.
-- **`merged_branch` is the slashed branch form** (`feat/<branch>`), matching the
+- **`merged_branch` is the slashed branch form** (the agent branch as git names
+  it, not its dashed agent id), matching the
   `branch` field of the `phase = "merge"` status you emit before the merge, so
   consumers can correlate the two events.
 - **The publish fires only after the merge succeeds and tests pass** — never

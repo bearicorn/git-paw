@@ -241,6 +241,7 @@ fn every_non_ok_check_carries_a_remedy() {
             stale_sessions: vec!["paw-demo".into()],
             exited_agent_sessions: vec!["paw-exited".into()],
             orphaned_worktrees: vec!["/gone".into()],
+            stale_orchestrator_pointer: true,
         },
     };
 
@@ -861,9 +862,9 @@ fn spec_workflow_check_warns_naming_only_the_unreachable_cli() {
 }
 
 #[test]
-fn spec_workflow_check_reports_an_unknown_cli_without_warning() {
+fn spec_workflow_check_warns_on_an_unknown_cli() {
     // git-paw does not know where this CLI keeps command definitions, so it
-    // says so rather than inventing a path and warning about it.
+    // invents no path, but it does not show the row as passing either.
     let check = check_spec_workflow(&SpecWorkflowProbe {
         resolved_format: Some("openspec".into()),
         command: Some("/opsx:apply".into()),
@@ -874,8 +875,15 @@ fn spec_workflow_check_reports_an_unknown_cli_without_warning() {
         }],
     });
 
-    assert_eq!(check.status, CheckStatus::Ok);
-    assert!(check.remedy.is_none());
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check
+            .remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("[worktree.env] copy")),
+        "the remedy should name [worktree.env] copy: {:?}",
+        check.remedy
+    );
     assert!(
         check.detail.contains("could not be verified") && check.detail.contains("mystery-cli"),
         "{}",
@@ -903,7 +911,7 @@ fn a_reachable_and_an_unknown_cli_each_scope_the_detail_to_themselves() {
         ],
     });
 
-    assert_eq!(check.status, CheckStatus::Ok);
+    assert_eq!(check.status, CheckStatus::Warn);
     assert!(
         check
             .detail
@@ -1333,6 +1341,25 @@ fn orphaned_worktree_registration_warns_with_the_purge_remedy() {
             .as_deref()
             .unwrap_or_default()
             .contains("purge --stale"),
+        "remedy: {:?}",
+        check.remedy
+    );
+}
+
+/// preflight-diagnostics scenario "An out-of-date pointer section warns".
+#[test]
+fn an_out_of_date_orchestrator_pointer_warns_with_the_init_remedy() {
+    let checks = check_hygiene(&HygieneProbe {
+        stale_orchestrator_pointer: true,
+        ..HygieneProbe::default()
+    });
+    let check = named(&checks, "orchestrator pointer");
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check
+            .remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("git paw init")),
         "remedy: {:?}",
         check.remedy
     );

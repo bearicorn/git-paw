@@ -431,6 +431,10 @@ pub struct HygieneProbe {
     pub exited_agent_sessions: Vec<String>,
     /// Worktree paths a session receipt registers that no longer exist.
     pub orphaned_worktrees: Vec<String>,
+    /// The root `AGENTS.md` carries the orchestrator pointer section, but not
+    /// the one this binary writes (for example one written before the section
+    /// was scoped to the root session).
+    pub stale_orchestrator_pointer: bool,
 }
 
 /// Every probed input the check functions consume.
@@ -922,10 +926,17 @@ fn instructed_workflow_command(backend: crate::specs::SpecBackendKind) -> Option
 /// of the spec tool for that CLI — guessing a path would produce a false
 /// warning about a definition that never lived there. Unknown CLIs are
 /// reported as unverified instead.
-fn workflow_definition_locations(cli: &str, command: &str) -> &'static [&'static str] {
-    match (cli, command) {
+///
+/// Keyed by provider family, not CLI name: a `[clis.<name>]` variant of a
+/// family (for example one pinned to a model) keeps its definitions where
+/// the family's CLI does.
+fn workflow_definition_locations(
+    family: crate::agent_cli::CliFamily,
+    command: &str,
+) -> &'static [&'static str] {
+    match (family, command) {
         // Verified against this repository's OpenSpec install for Claude Code.
-        ("claude", "/opsx:apply") => &[
+        (crate::agent_cli::CliFamily::Claude, "/opsx:apply") => &[
             ".claude/commands/opsx/apply.md",
             ".claude/skills/openspec-apply-change/SKILL.md",
         ],
@@ -975,6 +986,7 @@ fn workflow_cli_summary(cli: &WorkflowCliProbe) -> String {
 /// the worktree under the root, where the CLI's ancestor search still finds it.
 ///
 /// Never ✗: an unreachable workflow degrades a launch, it does not block one.
+/// A CLI whose definition locations git-paw does not know is ⚠, not ✓.
 #[must_use]
 pub fn check_spec_workflow(probe: &SpecWorkflowProbe) -> CheckResult {
     const NAME: &str = "spec workflow";
@@ -1045,15 +1057,26 @@ pub fn check_spec_workflow(probe: &SpecWorkflowProbe) -> CheckResult {
             reachable.join(", ")
         )
     };
-    if !unverified.is_empty() {
-        let _ = write!(
-            detail,
-            "; reachability could not be verified for {} (git-paw does not know where that CLI \
-             keeps command definitions)",
-            unverified.join(", ")
-        );
+    if unverified.is_empty() {
+        return CheckResult::ok(GROUP_SPEC_SYSTEM, NAME, detail);
     }
-    CheckResult::ok(GROUP_SPEC_SYSTEM, NAME, detail)
+    let _ = write!(
+        detail,
+        "; reachability could not be verified for {} (git-paw does not know where that CLI \
+         keeps command definitions)",
+        unverified.join(", ")
+    );
+    // A check git-paw could not make must not read as passed.
+    CheckResult::warn(
+        GROUP_SPEC_SYSTEM,
+        NAME,
+        detail,
+        format!(
+            "make sure every worktree can find the {command} definitions: list each of that \
+             CLI's command definition files under [worktree.env] copy in .git-paw/config.toml \
+             (one entry per file), or commit them"
+        ),
+    )
 }
 
 /// The adjective for a placement, for the warning's prose.
@@ -1316,6 +1339,24 @@ pub fn check_hygiene(probe: &HygieneProbe) -> Vec<CheckResult> {
             PURGE_STALE,
         )
     });
+
+    // Only `git paw init` rewrites the section, so a repository initialised by
+    // an earlier binary keeps telling worktree agents they are the orchestrator.
+    if probe.stale_orchestrator_pointer {
+        checks.push(CheckResult::warn(
+            GROUP_HYGIENE,
+            "orchestrator pointer",
+            "the git-paw orchestrator section in AGENTS.md is out of date (it may not scope \
+             itself to the root session, so worktree agents can read it as theirs)",
+            "run `git paw init` to rewrite the section",
+        ));
+    } else {
+        checks.push(CheckResult::ok(
+            GROUP_HYGIENE,
+            "orchestrator pointer",
+            "AGENTS.md carries the current orchestrator section, or none",
+        ));
+    }
 
     checks
 }
@@ -1839,14 +1880,17 @@ fn probe_spec_workflow(
         .iter()
         .map(|cli| WorkflowCliProbe {
             cli: cli.clone(),
-            locations: workflow_definition_locations(cli, command)
-                .iter()
-                .map(|path| WorkflowDefinitionProbe {
-                    path: (*path).to_string(),
-                    present: definition_root.join(path).exists(),
-                    committed: is_committed(&runner, &root, path),
-                })
-                .collect(),
+            locations: workflow_definition_locations(
+                crate::agent_cli::CliProfile::resolve(cli, &config.clis).family(),
+                command,
+            )
+            .iter()
+            .map(|path| WorkflowDefinitionProbe {
+                path: (*path).to_string(),
+                present: definition_root.join(path).exists(),
+                committed: is_committed(&runner, &root, path),
+            })
+            .collect(),
         })
         .collect();
 
@@ -2144,11 +2188,11 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
     let (stale_sessions, exited_agent_sessions, orphaned_worktrees) =
         match crate::session::find_session_for_repo(repo_root) {
             Ok(Some(session)) => {
-                let liveness = crate::tmux::session_liveness_for(
+                let liveness = session.reconcile_liveness(crate::tmux::session_liveness_for(
                     &session.session_name,
                     session.created_at,
                     session.agent_pane_offset(),
-                );
+                ));
                 let stale =
                     if crate::session::DisplayStatus::from_receipt(&session.status, liveness)
                         == crate::session::DisplayStatus::Stale
@@ -2181,11 +2225,17 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
             _ => (Vec::new(), Vec::new(), Vec::new()),
         };
 
+    let stale_orchestrator_pointer = std::fs::read_to_string(repo_root.join("AGENTS.md"))
+        .ok()
+        .and_then(|content| crate::agents::orchestrator_pointer_is_current(&content))
+        .is_some_and(|current| !current);
+
     HygieneProbe {
         missing_gitignore_entries,
         stale_sessions,
         exited_agent_sessions,
         orphaned_worktrees,
+        stale_orchestrator_pointer,
     }
 }
 

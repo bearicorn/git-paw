@@ -99,6 +99,12 @@ git paw init
 
 Smart start: reattaches if a session is active, recovers if stopped/crashed, or launches a new interactive session. Reattach is checked before anything else — including entering supervisor mode — so re-running `start` against a repository that already has a live session never forks a second, parallel one; see [Reattaching instead of forking](user-guide/session-lifecycle.md#reattaching-instead-of-forking).
 
+A session left with **no agents** never silently drops a launch selection
+(`--branches`, `--specs`, `--from-all-specs`): a stopped one is replaced by a fresh
+session running the selection, and a running one is refused with a pointer to
+`git paw add`. A session that still has agents is revived as before, with a
+one-line notice that the selection was not applied. See [Refilling an emptied session](user-guide/session-lifecycle.md#refilling-an-emptied-session).
+
 ```
 Usage: git-paw start [OPTIONS]
 
@@ -459,6 +465,10 @@ still running. Status says so with a hint under the status line
 (`agent panes exited — run 'git paw start' to recover them`), reports
 `Tmux: running`, and sets `"tmux_running": true` in JSON. `git paw start`
 recovers such a session; `git paw purge --stale` deliberately leaves it alone.
+
+A session with **no agent pane at all** — every agent removed with
+`git paw remove` — is not "exited": nothing died, its dashboard and broker still
+run, so it stays `🟢 active` and `git paw add` refills it.
 
 `🔴 stale` (and the JSON `"stale"` value) means only that the tmux session is
 gone. When the status is `🔴 stale`, run `git paw start` to self-heal (the stale

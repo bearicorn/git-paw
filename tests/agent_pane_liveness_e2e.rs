@@ -22,7 +22,7 @@ use std::process::Command as StdCommand;
 use std::time::{Duration, SystemTime};
 
 use assert_cmd::Command;
-use git_paw::session::{Session, SessionMode, SessionStatus};
+use git_paw::session::{Session, SessionMode, SessionStatus, WorktreeEntry};
 use tempfile::TempDir;
 
 fn cmd() -> Command {
@@ -92,7 +92,20 @@ fn dead_panes_receipt(session_name: &str, repo_path: &Path) -> Session {
         project_name: "gp03c".to_string(),
         created_at: SystemTime::now() - Duration::from_secs(120),
         status: SessionStatus::Active,
-        worktrees: vec![],
+        // The receipt records an agent: with none recorded, a window with no
+        // live agent CLI is an emptied session, which is alive, not exited.
+        worktrees: vec![WorktreeEntry {
+            branch: "feat/gp03c".to_string(),
+            worktree_path: repo_path.to_path_buf(),
+            cli: "claude".to_string(),
+            branch_created: false,
+            base_branch: None,
+            pending_boot_prompt: None,
+            pending_entry_point: None,
+            runtime_slot: None,
+            cli_session_id: None,
+            spec_id: None,
+        }],
         broker_port: None,
         broker_bind: None,
         broker_log_path: None,

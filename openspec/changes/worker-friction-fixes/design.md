@@ -29,8 +29,15 @@ whose path is not in `<files>` adds that path. Unknown kinds or a bad range exit
 publish.
 
 The bare-call instruction extends the skill's existing "Run dev commands bare" section to name the
-helper explicitly and adds one line to both boot templates. It describes the call's shape only,
-so it stays CLI-agnostic.
+helper explicitly and leads both boot templates (their first paragraph, round 1 review: the same
+rule already sat in the coordination skill and was ignored all session). It describes the call's
+shape only, so it stays CLI-agnostic.
+
+**This reduces, but does not fix, DF-12 / DF-19 / DF-38.** A worker still appends a probe or a
+pipe now and then, and any such call misses a path-prefix allow rule. Prose cannot make a model
+comply every time. The durable fix is on the CLI side: permission matching that recognises a
+granted command inside a trivially wrapped call. That is outside git-paw, which must not write
+any agent CLI's settings.
 
 ### D2 — Keep the pointer in the tracked AGENTS.md, scope it in prose (Group B)
 
@@ -54,8 +61,13 @@ MODIFIED scenarios by name. Its body now asserts `Warn`. Rename it when the spec
 
 Root cause of DF-43: `has_live_agent_pane_with` returns false both when every agent pane runs a
 bare shell and when there is no agent pane at all, so an emptied session reads `AgentsExited` →
-`Stopped`. Split the two: zero coding-agent panes → `Alive`. `add` then sees `Active` and works
-with no change to `add.rs`. The launch grace period and the exited-agents behaviour are untouched.
+`Stopped`. The pane probe cannot tell those apart — a session whose recorded agents' panes were
+all closed looks the same — so the probe stays receipt-blind and `Session::reconcile_liveness`
+decides from the receipt: `AgentsExited` with zero recorded worktrees → `Alive`. Every consumer
+of the probe that holds a receipt applies it (`session_has_live_agents`, `status`, `pause`,
+doctor). `add` then sees `Active` and works with no change to `add.rs`. (Round 1 review: an
+earlier draft made the probe itself treat "no agent pane" as alive, which reattached to an empty
+grid instead of recovering closed agents.)
 
 DF-44: `start --specs` on such a session went through `revive_existing`, which ignores selection.
 Decision: when the receipt records zero worktrees and a selection flag is given:
@@ -69,7 +81,11 @@ Decision: when the receipt records zero worktrees and a selection flag is given:
   dashboard state for no gain.
 
 This leaves the recover contract intact. A session with agents, or `start` without selection
-flags, behaves exactly as before.
+flags, behaves exactly as before. The rule is applied at all three existing-session checks
+(`start`, `start_with_specs`, and `supervisor`, which supervisor-enabled repos dispatch to).
+`--unattended` is unaffected: its existing-session branch returns `DriveExisting` before the
+rule runs, and its documented contract is that selection flags are not applied to a live
+session.
 
 ### D5 — Landed-merge check in the orchestrator skill (Group E)
 

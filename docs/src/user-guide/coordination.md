@@ -92,12 +92,24 @@ exactly as it always has.
 
 | Subcommand | Publishes / reads |
 |------------|-------------------|
-| `status <message>` | `agent.status` (`status:"working"`, the message, `modified_files:[]`) |
+| `status [--activity <phrase>] <message>` | `agent.status` (`status:"working"`, the message, `modified_files:[]`); `--activity` adds the short `activity` phrase the dashboard shows, and without it no `activity` key is sent |
 | `artifact [--exports a,b] [--files a,b]` | `agent.artifact` (`status:"done"`) — the code-less DONE fallback |
 | `blocked <needs> <from>` | `agent.blocked` with dependency info |
 | `question <text>` | `agent.question` |
-| `intent <summary> <files> [valid_for_seconds]` | `agent.intent` (forward-coordination file claim); the TTL defaults to **900** seconds when omitted |
-| `poll [since]` | reads `GET <broker>/messages/<agent-id>?since=<n>` — this agent's inbox |
+| `intent <summary> <files> [valid_for_seconds] [--region <path>#<kind>=<value>]...` | `agent.intent` (forward-coordination file claim); the TTL defaults to **900** seconds when omitted; each `--region` (kind `function`, `class`, `block` or `range`, a range written `<start>-<end>`) turns that path into a region object — see [Declaring regions](#declaring-regions-v060). A malformed region exits `2` and publishes nothing |
+| `poll [since]` | reads `GET <broker>/messages/<agent-id>?since=<n>` — this agent's inbox — and ends with a `last_seq: <n>` line, the `since` to pass next |
+
+> **Upgrading:** `broker.sh poll` now ends its output with a `last_seq: <n>`
+> line (the cursor to pass as the next `since`), and refuses a `since` that is
+> not a non-negative integer. A script that reads `poll`'s output and expected
+> the last line to be a message payload (or `(no messages)`) must skip that
+> trailing line. `status --activity` and `intent --region` are new options;
+> existing calls behave as before.
+
+Coding agents run every helper call **bare**: no appended exit-status probe
+(`; echo "exit=$?"`) and no pipe, so a permission rule that matches the helper's
+path prefix matches every call. The helper already exits non-zero, with the
+broker's error on stderr, when a publish is rejected.
 
 `valid_for_seconds` is a required field of `agent.intent`, so the helper always
 sends one: give a TTL explicitly when you want a different window, and the
@@ -130,7 +142,7 @@ permission rule in your agent CLI can name — see
 
 ## Boot-Prompt Injection
 
-To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. The block calls `.git-paw/scripts/broker.sh` (with the pre-expanded `--agent <id>`) for four essential operations — no raw `curl` and no broker URL appear in the boot block:
+To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. The block calls `.git-paw/scripts/broker.sh` (with the pre-expanded `--agent <id>`) for four essential operations — no raw `curl` and no broker URL appear in the boot block. The block also asks the agent to run each helper call bare (no appended `; echo "exit=$?"` and no pipe), so a permission rule matching the helper's path matches every call:
 
 ### 1. REGISTER - Immediate Status Publication
 
@@ -385,9 +397,11 @@ arrives and `[supervisor] verify_on_commit_nudge` is on (the default).
 > filesystem watcher publishes `agent.status` (with `modified_files`) whenever
 > a worktree's `git status --porcelain` output changes, and the post-commit git hook publishes
 > `agent.artifact` with `status: "committed"` and the committed file list every
-> time an agent commits. The manual `curl` examples below are escape hatches
-> for cases where the automatic publishers do not apply (e.g. code-less tasks
-> or heartbeat injection during read-only investigation).
+> time an agent commits. The `curl` examples below document the HTTP wire
+> format for integrators; coding agents never send them. Agents publish the
+> agent-side events (status, artifact, blocked, intent, question) through the
+> [broker helper](#broker-helper), which the injected `coordination` skill
+> teaches exclusively.
 
 ### Status
 
@@ -540,7 +554,7 @@ Peer work arrives through the base branch instead, via the
 ## When Main Advances
 
 An `agent.advanced-main` event arrives on your normal
-`/messages/<agent_id>` poll — no special subscription is needed. When the
+`broker.sh poll` (the `/messages/<agent_id>` inbox) — no special subscription is needed. When the
 `base` it names is one your branch depends on, react **deliberately**, never
 automatically:
 
@@ -580,7 +594,7 @@ curl -s "$GIT_PAW_BROKER_URL/messages/feat-auth?since=42"
 
 This cursor-based approach is lossless -- no messages are missed between polls, regardless of timing.
 
-Agents can use the bundled helper instead of a raw `curl` for the same read — `.git-paw/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>` and prints the returned messages (see [Broker helper](#broker-helper)).
+Coding agents make the same read through the bundled helper, never a raw `curl` — `.git-paw/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>`, prints the returned messages, and ends with a `last_seq: <n>` line to pass as the next `since` (see [Broker helper](#broker-helper)).
 
 ## Waiting for Events
 

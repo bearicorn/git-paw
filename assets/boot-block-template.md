@@ -1,5 +1,10 @@
 ## BOOT INSTRUCTIONS - DO NOT REMOVE
 
+**Run each helper call bare, exactly as shown** — no appended `; echo "exit=$?"`,
+no `&& echo`, and no pipe — so a permission rule matching the helper's path
+matches every call. The helper already exits non-zero, with the broker's error on
+stderr, when a publish is rejected.
+
 These instructions ensure reliable coordination. Follow them exactly before starting your assigned task.
 
 All broker interaction goes through the bundled helper at

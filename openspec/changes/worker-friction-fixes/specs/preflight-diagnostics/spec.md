@@ -2,7 +2,7 @@
 
 ### Requirement: Spec-workflow reachability check
 
-`git paw doctor` SHALL include, in its "Spec system" group, a check that the workflow command the boot task prompt instructs spec-driven agents to run is reachable from the repository's worktrees. The check SHALL be a pure function of a probe recording: the resolved spec format, the workflow command that format's task prompt names (if any), the configured worktree placement (`PawConfig::worktree_placement()`), the effective spec-driven worker CLIs — the deduplicated list the discovered specs resolve to, as already surfaced by the spec-worker CLI check, empty when no specs are discovered — and, for each of those CLIs and each location where that CLI's definition of the command can live (as recorded in a per-CLI table with a generic unknown fallback), whether the file exists at the main checkout and whether it is committed there. "Committed" SHALL mean present at the main checkout's `HEAD`, because `git worktree add` populates a new worktree from a commit: a definition that is ignored, untracked, or merely staged does not travel. Each resolved CLI SHALL be judged on its own:
+`git paw doctor` SHALL include, in its "Spec system" group, a check that the workflow command the boot task prompt instructs spec-driven agents to run is reachable from the repository's worktrees. The check SHALL be a pure function of a probe recording: the resolved spec format, the workflow command that format's task prompt names (if any), the configured worktree placement (`PawConfig::worktree_placement()`), the effective spec-driven worker CLIs — the deduplicated list the discovered specs resolve to, as already surfaced by the spec-worker CLI check, empty when no specs are discovered — and, for each of those CLIs and each location where that CLI's definition of the command can live (as recorded in a table keyed by the CLI's provider family — so a `[clis.<name>]` entry declaring a `family` uses that family's locations — with a generic unknown fallback), whether the file exists at the main checkout and whether it is committed there. "Committed" SHALL mean present at the main checkout's `HEAD`, because `git worktree add` populates a new worktree from a commit: a definition that is ignored, untracked, or merely staged does not travel. Each resolved CLI SHALL be judged on its own:
 
 - reachable when a definition is committed, or when placement is `child` and a definition exists at the main checkout;
 - unreachable when its locations are known and either placement is `sibling` and every definition found is uncommitted, or no definition is found;
@@ -119,3 +119,33 @@ Test: `tests/doctor_e2e.rs::an_unverifiable_workflow_cli_warns_with_a_provisioni
 - **THEN** the output SHALL contain the spec-workflow check with its status and detail
 
 Test: `tests/doctor_e2e.rs::an_uncommitted_workflow_definition_warns_under_sibling_placement, tests/doctor_e2e.rs::json_document_carries_the_required_fields_on_every_check`
+
+#### Scenario: A family variant uses its family's locations
+
+- **GIVEN** an OpenSpec repository whose spec-driven worker CLI is `[clis.claude-opus]` with `family = "claude"`, and whose `.claude/commands/opsx/apply.md` is committed
+- **WHEN** `git paw doctor` runs
+- **THEN** the spec-workflow check SHALL be `Ok` and name `claude-opus` as reachable
+
+Test: `tests/doctor_e2e.rs::a_family_variant_finds_its_familys_workflow_definitions`
+
+## ADDED Requirements
+
+### Requirement: Doctor flags an out-of-date orchestrator pointer
+
+`git paw doctor` SHALL include in its "Hygiene" group an "orchestrator pointer" check that is `Warn` when the root `AGENTS.md` carries the orchestrator pointer section but not the section the running binary writes (for example one written before the section was scoped to the root session), with a remedy to re-run `git paw init`; and `Ok` when the section is current or absent. It SHALL be read-only and never `Fail`.
+
+#### Scenario: An out-of-date pointer section warns
+
+- **GIVEN** a root `AGENTS.md` whose pointer section was written by an earlier binary
+- **WHEN** `git paw doctor` runs
+- **THEN** the orchestrator-pointer check SHALL be `Warn` with a remedy naming `git paw init`
+
+Test: `doctor::tests::an_out_of_date_orchestrator_pointer_warns_with_the_init_remedy`, `tests/doctor_e2e.rs::an_out_of_date_orchestrator_pointer_warns`
+
+#### Scenario: A current or absent pointer passes
+
+- **GIVEN** a repository just initialised by the running binary, or one with no pointer section
+- **WHEN** `git paw doctor` runs
+- **THEN** the orchestrator-pointer check SHALL be `Ok`
+
+Test: `agents::tests::orchestrator_pointer_currency_is_detected`, `doctor::tests::a_clean_repository_passes_every_hygiene_check`

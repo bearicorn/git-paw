@@ -8,9 +8,12 @@ have all exited (the `is_tmux_alive` input becomes false) — so a session whose
 died shortly after launch is reported `Stopped`, not `Active`. Liveness SHALL NOT be
 satisfied by the mere existence of the named tmux session; it SHALL require at
 least one live agent pane (a pane whose launched CLI process is still running) —
-except when the tmux session has no coding-agent pane at all (every agent was
-removed with `git paw remove`), which SHALL be reported alive: no agent exited,
-the session is empty, and its dashboard and broker are still serving. This
+except when the session's receipt records zero agents (every agent was removed
+with `git paw remove`) and no live agent pane exists, which SHALL be reported
+alive: no agent exited, the session is empty, and its dashboard and broker are
+still serving. The pane probe itself stays receipt-blind; the exception is
+decided from the receipt, so a session that still records agents whose panes
+were all closed SHALL keep the agent-panes-exited outcome. This
 ensures `git paw status` and `git paw doctor` never report a session healthy after
 its panes have all died (the full-auto boot-exit failure mode). The probe SHALL
 tolerate the brief launch window in which panes are still starting their CLIs (it
@@ -98,7 +101,18 @@ exited agent panes while any of its agents is still running.
 
 #### Scenario: A live session emptied by remove stays active
 
-- **GIVEN** a session recorded `Active`, created past the launch grace period, whose last agent was removed with `git paw remove` so its tmux session holds only infrastructure panes (dashboard, and supervisor where present)
+- **GIVEN** a session recorded `Active`, created past the launch grace period, whose last agent was removed with `git paw remove` so its receipt records zero agents and its tmux session holds only infrastructure panes (dashboard, and supervisor where present)
 - **WHEN** its effective status is resolved
-- **THEN** the liveness probe SHALL report the session alive, not the agent-panes-exited outcome
+- **THEN** the session SHALL be reported alive, not with the agent-panes-exited outcome
 - **AND** `git paw status` SHALL NOT display `🟡 stopped` or the agent-panes-exited hint for it
+
+Test: `session::tests::an_emptied_session_with_no_agent_pane_is_alive`, `tests/emptied_session_refill_e2e.rs::add_refills_a_live_session_emptied_by_remove`
+
+#### Scenario: A session whose agents' panes were all closed still reports Stopped
+
+- **GIVEN** a session recorded `Active`, created past the launch grace period, whose receipt still records an agent but whose window holds no agent pane
+- **WHEN** its effective status is resolved and the user runs `git paw start`
+- **THEN** the session SHALL keep the agent-panes-exited outcome and display `🟡 stopped`
+- **AND** `start` SHALL recover it rather than reattach to an empty grid
+
+Test: `session::tests::a_session_recording_agents_with_no_live_pane_stays_agents_exited`, `tests/emptied_session_refill_e2e.rs::closed_agent_panes_with_agents_recorded_still_recover`

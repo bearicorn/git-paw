@@ -169,8 +169,31 @@ pub fn build_inter_agent_rules(own_branch: &str, branches: &[&str]) -> String {
         .replace("{{OWN_ID}}", &own_id)
 }
 
-/// Generates a marker-delimited assignment section for a worktree's AGENTS.md.
+/// Whether two paths name the same directory, resolving symlinks where both
+/// exist and comparing them as given otherwise.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The worker-side half of the orchestrator pointer's scoping: every worktree
+/// checks out the tracked `AGENTS.md`, so its sidecar says plainly which
+/// section is not addressed to it.
+pub const WORKER_ROLE_LINE: &str = "- **Role:** You are a coding agent in a worktree; ignore the \
+                                    'git-paw orchestrator' section of AGENTS.md.";
+
+/// Generates a marker-delimited assignment section for a worker worktree's
+/// AGENTS.md, including [`WORKER_ROLE_LINE`].
 pub fn generate_worktree_section(assignment: &WorktreeAssignment) -> String {
+    generate_section(assignment, true)
+}
+
+/// [`generate_worktree_section`], with the worker role line only when the
+/// section is for a worker worktree: the root session's own context is the
+/// orchestrator's, which must not be told to ignore the orchestrator section.
+fn generate_section(assignment: &WorktreeAssignment, for_worker: bool) -> String {
     let mut section = String::new();
     section.push_str(START_MARKER);
     section.push('\n');
@@ -179,6 +202,10 @@ pub fn generate_worktree_section(assignment: &WorktreeAssignment) -> String {
     section.push('\n');
     let _ = writeln!(section, "- **Branch:** `{}`", assignment.branch);
     let _ = writeln!(section, "- **CLI:** {}", assignment.cli);
+    if for_worker {
+        section.push_str(WORKER_ROLE_LINE);
+        section.push('\n');
+    }
 
     if let Some(ref spec) = assignment.spec_content {
         section.push('\n');
@@ -340,7 +367,9 @@ pub fn setup_worktree_agents_md(
         }
     };
 
-    let section = generate_worktree_section(assignment);
+    // The repository root's own context is the orchestrator's, not a worker's.
+    let for_worker = !same_dir(repo_root, worktree_root);
+    let section = generate_section(assignment, for_worker);
     let output = inject_into_content(&root_content, &section);
 
     // Resolve the sidecar path and create the `.git-paw/` parent directory if
@@ -847,6 +876,18 @@ const ORCHESTRATOR_POINTER_BODY: &str = include_str!("../assets/agents-md-orches
 pub fn orchestrator_pointer_section() -> String {
     let body = ORCHESTRATOR_POINTER_BODY.trim_end_matches('\n');
     format!("{ORCHESTRATOR_POINTER_START}\n{body}\n{ORCHESTRATOR_POINTER_END}\n")
+}
+
+/// Whether `content`'s orchestrator pointer section is the one this binary
+/// writes: `None` when there is no section, `Some(false)` when one written by
+/// an earlier binary is still in place.
+#[must_use]
+pub fn orchestrator_pointer_is_current(content: &str) -> Option<bool> {
+    let start = content.find(ORCHESTRATOR_POINTER_START)?;
+    let end_rel = content[start..].find(ORCHESTRATOR_POINTER_END)?;
+    let end = start + end_rel + ORCHESTRATOR_POINTER_END.len();
+    let current = orchestrator_pointer_section();
+    Some(content[start..end] == *current.trim_end_matches('\n'))
 }
 
 /// Returns `content` with the orchestrator pointer section injected: the
@@ -1398,6 +1439,54 @@ mod tests {
             .args(["commit", "-m", "add agents"])
             .output()
             .expect("git commit");
+    }
+
+    /// core-init scenario "The root session's context carries no worker role
+    /// line": the repository root's own sidecar is the orchestrator's context.
+    #[test]
+    fn the_repository_roots_own_context_carries_no_worker_role_line() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        let assignment = make_assignment(None, None);
+
+        setup_worktree_agents_md(repo.path(), repo.path(), &assignment).unwrap();
+        let root_context = fs::read_to_string(sidecar_path(repo.path())).unwrap();
+        assert!(
+            !root_context.contains(WORKER_ROLE_LINE),
+            "the orchestrator's own context must not tell it to ignore the orchestrator \
+             section:\n{root_context}"
+        );
+    }
+
+    /// The root is recognised through a symlink too, so a repository reached
+    /// by a symlinked path still gets no worker role line in its own context.
+    #[cfg(unix)]
+    #[test]
+    fn the_root_reached_through_a_symlink_carries_no_worker_role_line() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("repo-link");
+        std::os::unix::fs::symlink(repo.path(), &link).unwrap();
+
+        setup_worktree_agents_md(&link, repo.path(), &make_assignment(None, None)).unwrap();
+        let root_context = fs::read_to_string(sidecar_path(repo.path())).unwrap();
+        assert!(!root_context.contains(WORKER_ROLE_LINE), "{root_context}");
+    }
+
+    /// A separate worker worktree's sidecar does carry the role line.
+    #[test]
+    fn a_worker_worktrees_sidecar_carries_the_worker_role_line() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+
+        setup_worktree_agents_md(repo.path(), wt.path(), &make_assignment(None, None)).unwrap();
+        let worker = fs::read_to_string(sidecar_path(wt.path())).unwrap();
+        assert!(worker.contains(WORKER_ROLE_LINE), "{worker}");
     }
 
     #[test]
@@ -2081,7 +2170,7 @@ mod tests {
         let content = include_str!("../assets/agent-skills/coordination.md");
         assert!(content.contains("agent.blocked"));
         assert!(content.contains("agent.artifact"));
-        assert!(content.contains("{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}"));
+        assert!(content.contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll"));
     }
 
     #[test]
@@ -2626,5 +2715,63 @@ mod tests {
 
         assert!(inject_orchestrator_pointer(dir.path()).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+    }
+
+    /// core-init scenario "Each worker's sidecar disclaims the orchestrator
+    /// section".
+    #[test]
+    fn worktree_section_tells_the_worker_to_ignore_the_orchestrator_section() {
+        let section = generate_worktree_section(&WorktreeAssignment {
+            branch: "feat/x".to_string(),
+            cli: "claude".to_string(),
+            spec_content: None,
+            owned_files: None,
+            skill_content: None,
+            inter_agent_rules: None,
+        });
+        assert!(
+            section.contains(
+                "You are a coding agent in a worktree; ignore the 'git-paw orchestrator' \
+                 section of AGENTS.md."
+            ),
+            "{section}"
+        );
+    }
+
+    /// The current section reads as current; an earlier one (or no section)
+    /// does not, which is what doctor's pointer row keys on.
+    #[test]
+    fn orchestrator_pointer_currency_is_detected() {
+        let current = inject_orchestrator_pointer_into("# Project\n");
+        assert_eq!(orchestrator_pointer_is_current(&current), Some(true));
+        let earlier = format!(
+            "# Project\n\n{ORCHESTRATOR_POINTER_START}\n## git-paw orchestrator\n\nWhen a git-paw \
+             session is active in this repository, you are its\norchestrator.\n\
+             {ORCHESTRATOR_POINTER_END}\n"
+        );
+        assert_eq!(orchestrator_pointer_is_current(&earlier), Some(false));
+        assert_eq!(orchestrator_pointer_is_current("# Project\n"), None);
+    }
+
+    /// core-init scenario "The pointer is scoped to the root session". Every
+    /// worktree checks out the tracked `AGENTS.md`, so the condition must come
+    /// before the section tells its reader it is the orchestrator.
+    #[test]
+    fn pointer_is_scoped_to_the_root_session() {
+        let section = orchestrator_pointer_section();
+        let scope = section
+            .find("applies only to the agent session running at the repository\nroot")
+            .expect("the pointer should say it applies only to the root session");
+        let ignore = section
+            .find("coding agent working in a git-paw\nworktree, ignore this section")
+            .expect("the pointer should tell worktree coding agents to ignore it");
+        let role = section
+            .find("you are its orchestrator")
+            .expect("the pointer still names the orchestrator role");
+        assert!(scope < role && ignore < role);
+        assert!(
+            section.contains("and you are that root\nsession, you are its orchestrator"),
+            "the orchestrator claim should be conditional on being the root session"
+        );
     }
 }

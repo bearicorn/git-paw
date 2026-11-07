@@ -352,6 +352,23 @@ impl Session {
         }
     }
 
+    /// Reconciles a probed liveness with what this receipt records.
+    ///
+    /// The pane probe cannot tell "every agent exited" from "no agent was
+    /// left"; only the receipt can. A session recording no agents is empty,
+    /// not dead, so its `AgentsExited` becomes `Alive`.
+    #[must_use]
+    pub fn reconcile_liveness(
+        &self,
+        probed: crate::tmux::SessionLiveness,
+    ) -> crate::tmux::SessionLiveness {
+        use crate::tmux::SessionLiveness;
+        match probed {
+            SessionLiveness::AgentsExited if self.worktrees.is_empty() => SessionLiveness::Alive,
+            other => other,
+        }
+    }
+
     /// Returns the session's creation timestamp formatted as an ISO 8601 UTC
     /// string, or `None` if the timestamp is before the Unix epoch. Used by
     /// the stale-receipt invalidation notice (design D5).
@@ -1906,6 +1923,48 @@ mod tests {
         let mut session = sample_session();
         session.status = SessionStatus::Paused;
         assert_eq!(session.effective_status(|_| false), SessionStatus::Stopped);
+    }
+
+    // -- reconcile_liveness --
+
+    use crate::tmux::SessionLiveness;
+
+    /// session-state scenario "A live session emptied by remove stays active".
+    #[test]
+    fn an_emptied_session_with_no_agent_pane_is_alive() {
+        let mut session = sample_session();
+        session.worktrees.clear();
+        assert_eq!(
+            session.reconcile_liveness(SessionLiveness::AgentsExited),
+            SessionLiveness::Alive
+        );
+    }
+
+    /// session-state scenario "A session whose agents' panes were all closed
+    /// still reports Stopped": the receipt records agents, so no agent pane
+    /// means they exited, and `start` recovers them.
+    #[test]
+    fn a_session_recording_agents_with_no_live_pane_stays_agents_exited() {
+        let session = sample_session();
+        assert!(!session.worktrees.is_empty(), "sample records agents");
+        assert_eq!(
+            session.reconcile_liveness(SessionLiveness::AgentsExited),
+            SessionLiveness::AgentsExited
+        );
+    }
+
+    /// The receipt never turns an absent or unprobed session alive.
+    #[test]
+    fn reconcile_liveness_leaves_other_outcomes_alone() {
+        let mut session = sample_session();
+        session.worktrees.clear();
+        for probed in [
+            SessionLiveness::Alive,
+            SessionLiveness::Stale,
+            SessionLiveness::Indeterminate,
+        ] {
+            assert_eq!(session.reconcile_liveness(probed), probed);
+        }
     }
 
     // -- agent_pane_offset --

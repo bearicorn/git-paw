@@ -326,6 +326,11 @@ Each entry is copied **verbatim** from the repository root into the new
 worktree, after the worktree is created and before the agent's CLI starts — so
 the agent's first read already sees a provisioned checkout.
 
+Entries are files, not directories. Besides env files, `copy` is how an
+uncommitted spec-workflow command definition (for example the file behind
+`/opsx:apply`) reaches each worktree — one entry per file; see
+[Spec-Driven Launch](../user-guide/spec-driven-launch.md#workflow-commands-in-worktrees).
+
 The propagated file is an **independent copy, never a symlink**. That is
 deliberate: a symlinked `.env` is shared mutable state across every agent, which
 is the exact silent runtime corruption worktrees exist to prevent. A copy

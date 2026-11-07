@@ -47,8 +47,9 @@ Hygiene
   ✓ .gitignore              every git-paw entry is ignored
   ✓ session state           no stale session receipt
   ✓ worktree registrations  every registered worktree exists on disk
+  ✓ orchestrator pointer    AGENTS.md carries the current orchestrator section, or none
 
-18 ✓ · 1 ⚠ · 1 ✗
+19 ✓ · 1 ⚠ · 1 ✗
 ```
 
 ## Diagnose, don't repair
@@ -91,7 +92,7 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker **for this repository**. A git-paw broker serving another repository is ⚠ with the `[broker] port` remedy — it is the clash that would refuse your next `git paw start`. A non-git-paw service on the port is a separate ⚠ with its own remedy. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. Warns (⚠) when `budget_max_cost` is set but not every configured worker CLI reports cost, so the cap cannot fire. When disabled, an informational ✓. |
-| **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session state; registered worktrees whose directory no longer exists. Each is ⚠. A receipt that claims active while its tmux session is **gone** gets the `git paw purge --stale` remedy, as does an orphaned worktree registration. A session whose tmux session is still up but whose agent panes have all dropped back to a bare shell (past a short launch grace period) is a separate finding: it names the session, says its agent panes exited, and its remedy is `git paw start`, which recovers it — `purge --stale` never purges such a session. |
+| **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session state; registered worktrees whose directory no longer exists. Each is ⚠. A receipt that claims active while its tmux session is **gone** gets the `git paw purge --stale` remedy, as does an orphaned worktree registration. A session whose tmux session is still up but whose agent panes have all dropped back to a bare shell (past a short launch grace period) is a separate finding: it names the session, says its agent panes exited, and its remedy is `git paw start`, which recovers it — `purge --stale` never purges such a session. An **orchestrator pointer** row is ⚠ when the root `AGENTS.md` carries the `git-paw orchestrator` section but not the one this binary writes — typically one written before the section was scoped to the root session, which worktree agents could read as theirs; its remedy is `git paw init`, which rewrites the section in place. |
 
 ### The sandbox-mode check
 
@@ -264,16 +265,20 @@ Definitions are looked for in the **main checkout**, so running doctor from
 inside an agent's worktree — which never carries them itself — reports the same
 verdict as running it at the repository root.
 
-Two states are reported rather than warned about:
+One state is reported rather than warned about:
 
 - ✓ **not applicable** when the resolved spec format declares no workflow
   entry point (Markdown, Spec Kit, Superpowers, or no spec system), or
-  when no spec-driven worker CLI resolves — there is nothing to reach;
-- ✓ **could not be verified** for a CLI whose definition locations git-paw does
-  not know. Where a CLI keeps its command definitions is per-CLI knowledge;
-  git-paw lists only the locations verified against a real install (today,
-  `claude`) rather than guessing a path and warning about a definition that
-  never lived there.
+  when no spec-driven worker CLI resolves — there is nothing to reach.
+
+A CLI whose definition locations git-paw does not know is ⚠ **could not be
+verified**. Where a CLI keeps its command definitions is per-CLI knowledge;
+git-paw lists only the locations verified against a real install (today,
+`claude`) and never guesses a path — but a check it could not make is not
+shown as passing. The remedy names `[worktree.env] copy`: list each of that
+CLI's command definition files there and git-paw copies them into every new
+worktree (see [Spec-Driven Launch](spec-driven-launch.md#workflow-commands-in-worktrees)),
+or commit them.
 
 Like the setup checks, this one is read-only and **never ✗** — an unreachable
 workflow degrades a launch, it does not block one.

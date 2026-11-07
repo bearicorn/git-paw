@@ -361,3 +361,91 @@ fn per_cli_setup_names_the_exported_cli_setup_skill() {
     assert!(s.contains(".git-paw/skills/cli-setup/skill.md"));
     assert!(s.contains("get_skill"));
 }
+
+// skill-agent / *Orchestrator skill confirms a merge landed before archiving*:
+// the ancestor check sits between the fast-forward and every archive / publish.
+#[test]
+fn merge_landing_is_checked_before_archive_and_publish() {
+    let s = section("### Merge orchestration");
+    let merge = s.find("git merge --ff-only").expect("fast-forward step");
+    let check = s
+        .find("git merge-base --is-ancestor")
+        .expect("the landing check");
+    let archive = s.find("archive step").expect("the archive step");
+    let publish = s
+        .find("sweep.sh advanced-main")
+        .expect("the advanced-main publish");
+    assert!(merge < check && check < archive && check < publish);
+    assert!(
+        s.contains("the merge did **not** land") && s.contains("archive nothing, publish nothing"),
+        "a failed check must stop the archive and the publish"
+    );
+}
+
+// Same requirement: an archive that writes the tracked tree re-runs the tests
+// before the merge is announced.
+#[test]
+fn an_archive_writing_the_tracked_tree_reruns_the_tests() {
+    let s = section("### Merge orchestration");
+    let condition = s
+        .find("archive step that writes to the tracked tree")
+        .expect("names an archive step that writes to the tracked tree");
+    let after = &s[condition..];
+    let publish = after
+        .find("sweep.sh advanced-main")
+        .expect("the advanced-main publish follows the archive condition");
+    let between = &after[..publish];
+    assert!(
+        between.contains("{{test_command}}"),
+        "the test command must be re-run after the archive and before the merge is announced"
+    );
+}
+
+// The merge loop's commands must not hardcode the target branch or the
+// agent-branch prefix.
+#[test]
+fn merge_loop_names_no_literal_branch() {
+    let s = section("### Merge orchestration");
+    let start = s.find("**step 2 —").expect("the step 2 heading");
+    let end = s.find("**step 3 —").expect("the step 3 heading");
+    let step2 = &s[start..end];
+    for literal in ["git checkout main", "feat/<branch>", "feat/__fill_in"] {
+        assert!(
+            !step2.contains(literal),
+            "the merge loop should not hardcode `{literal}`"
+        );
+    }
+    assert!(step2.contains("git checkout __fill_in_target_branch__"));
+    assert!(step2.contains("git merge --ff-only __fill_in_agent_branch__"));
+}
+
+// Same requirement: must-succeed steps are never piped — the rule is stated,
+// and the loop's own commands follow it.
+#[test]
+fn must_succeed_steps_are_never_piped() {
+    let s = section("### Merge orchestration");
+    assert!(s.contains("never pipe a must-succeed step"));
+
+    let skill = template();
+    let start = skill.find("**Step 2 —").expect("the step 2 heading");
+    let end = skill.find("**Step 3 —").expect("the step 3 heading");
+    let mut in_block = false;
+    let mut commands = 0;
+    for line in skill[start..end].lines() {
+        if line.trim_start().starts_with("```") {
+            in_block = !in_block;
+            continue;
+        }
+        if in_block && !line.trim().is_empty() {
+            commands += 1;
+            assert!(
+                !line.contains(" | "),
+                "a merge-loop command is piped: {line}"
+            );
+        }
+    }
+    assert!(
+        commands >= 5,
+        "expected the merge loop's commands, found {commands}"
+    );
+}

@@ -1,5 +1,7 @@
 ## BOOT INSTRUCTIONS - DO NOT REMOVE
 
+**Run each helper call bare, exactly as shown** — whenever you run the bundled helper `.git-paw/scripts/broker.sh` (to poll your inbox), add no `; echo "exit=$?"`, no `&& echo`, and no pipe, so a permission rule matching the helper's path matches every call.
+
 These instructions ensure reliable coordination. Follow them exactly before starting your assigned task.
 
 Your coordination events publish through this session's git-paw MCP server (`git paw mcp`), already connected. Each publish tool resolves your agent id automatically from this worktree's branch — you never pass one.

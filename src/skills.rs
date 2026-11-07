@@ -1469,7 +1469,7 @@ mod tests {
         assert!(tmpl.content.contains("agent.blocked"));
         assert!(
             tmpl.content
-                .contains("{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}")
+                .contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll")
         );
     }
 
@@ -1653,7 +1653,8 @@ mod tests {
 
         // (1) Polling source: arrives on the normal /messages poll.
         assert!(
-            section.contains("agent.advanced-main") && section.contains("/messages/{{BRANCH_ID}}"),
+            section.contains("agent.advanced-main")
+                && section.contains("broker.sh --agent {{BRANCH_ID}} poll"),
             "subsection must name the event and its delivery on the normal /messages poll"
         );
         // (2) No-auto-rebase rule with a safety rationale.
@@ -1695,32 +1696,26 @@ mod tests {
     }
 
     #[test]
-    fn coordination_skill_contains_agent_intent_curl_example() {
+    fn coordination_skill_contains_agent_intent_helper_example() {
         let tmpl = resolve("coordination").unwrap();
-        let curl_pos = tmpl
+        let section_start = tmpl
             .content
-            .find("agent.intent")
-            .expect("coordination skill should mention agent.intent");
-        // Look at a window around the intent example and assert all required
-        // payload fields appear there.
-        let window_start = curl_pos.saturating_sub(200);
-        let window_end = (curl_pos + 800).min(tmpl.content.len());
-        let window = &tmpl.content[window_start..window_end];
+            .find("### Before you start editing")
+            .expect("coordination skill should have a Before you start editing section");
+        let section = &tmpl.content[section_start..];
+        let example = section
+            .lines()
+            .find(|l| l.contains("broker.sh --agent {{BRANCH_ID}} intent "))
+            .expect("agent.intent example should be a broker.sh intent invocation");
         assert!(
-            window.contains("curl"),
-            "agent.intent example should be a curl invocation"
+            example.contains("\"wire AuthClient\"")
+                && example.contains("\"src/auth/<file>,src/auth/client/<file>\"")
+                && example.trim_end().ends_with(" 900"),
+            "intent example should pass a summary, a file list and a TTL: {example}"
         );
         assert!(
-            window.contains("\"files\""),
-            "agent.intent example should include the files field"
-        );
-        assert!(
-            window.contains("\"summary\""),
-            "agent.intent example should include the summary field"
-        );
-        assert!(
-            window.contains("\"valid_for_seconds\""),
-            "agent.intent example should include valid_for_seconds"
+            section.contains("valid_for_seconds"),
+            "the section should name the TTL's wire field"
         );
     }
 
@@ -2133,7 +2128,8 @@ mod tests {
         // A concrete helper example for the variant (broker-watcher-and-state
         // *Supervisor publishes on merge to main*): no raw `/publish` request.
         assert!(
-            merge_section.contains(".git-paw/scripts/sweep.sh advanced-main feat/")
+            merge_section
+                .contains(".git-paw/scripts/sweep.sh advanced-main __FILL_IN_AGENT_BRANCH__")
                 && merge_section.contains("new_main_sha"),
             "the merge section must include a concrete `sweep.sh advanced-main` example"
         );
@@ -7032,8 +7028,9 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     }
 
     /// Spec "Per-CLI compact mechanism table" /
-    /// "Table includes claude and claude-oss explicitly" + "Generic 'other'
-    /// row points users at their CLI's equivalent".
+    /// "Table includes claude and claude-oss explicitly" (now: a `claude` row
+    /// and no user-defined variant row) + "Generic 'other' row points users at
+    /// their CLI's equivalent".
     #[test]
     fn coordination_skill_per_cli_mechanism_table() {
         let tmpl = resolve("coordination").unwrap();
@@ -7042,14 +7039,15 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             .find("#### Per-CLI mechanism")
             .expect("per-CLI mechanism subsection present");
         let section = &tmpl.content[start..];
-        // claude and claude-oss rows, each naming /compact and /clear.
+        // A claude row naming /compact and /clear; no row for `claude-oss`,
+        // a name one project chose for its own `[clis]` entry.
         assert!(
             section.contains("| `claude` | `/compact` | `/clear` |"),
             "table should contain a claude row naming /compact and /clear"
         );
         assert!(
-            section.contains("| `claude-oss` | `/compact` | `/clear` |"),
-            "table should contain a claude-oss row naming /compact and /clear"
+            !section.contains("claude-oss"),
+            "table should not name a project's own CLI variant"
         );
         // Generic "other" fallback row directing to the CLI's equivalent.
         let other = section

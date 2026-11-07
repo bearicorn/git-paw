@@ -38,7 +38,7 @@ use super::launch::{
 use super::purge::invalidate_if_stale;
 use super::recover::recover_session_detached;
 use super::spec_mode::{SpecMode, apply_spec_mode};
-use super::start::{restart_from_pause_detached, revive_existing};
+use super::start::{handle_existing_session, restart_from_pause_detached};
 use super::{CommandContext, Output};
 use crate::config::resolve_submit_delay_ms;
 
@@ -387,7 +387,12 @@ pub fn supervisor(
                 status: effective,
             });
         }
-        return revive_existing(repo_root, existing, &effective, out);
+        let has_selection = branches_flag.is_some() || *spec_mode != SpecMode::None;
+        if let Some(outcome) =
+            handle_existing_session(repo_root, existing, &effective, has_selection, out)?
+        {
+            return Ok(outcome);
+        }
     }
 
     // Refuse a port held by another repository's broker before the branch and

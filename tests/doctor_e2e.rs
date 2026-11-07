@@ -506,6 +506,116 @@ fn an_uncommitted_workflow_definition_warns_under_sibling_placement() {
 }
 
 #[test]
+fn an_unverifiable_workflow_cli_warns_with_a_provisioning_remedy() {
+    // preflight-diagnostics scenarios "An unknown CLI is reported, not warned"
+    // and "An unverified CLI never shows as passing": git-paw does not know
+    // where a custom CLI keeps command definitions, so the row cannot pass.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", true);
+    std::fs::write(
+        sandbox.repo.join(".git-paw/config.toml"),
+        "default_spec_cli = \"mystery-cli\"\n\
+         worktree_placement = \"sibling\"\n\
+         \n\
+         [clis.mystery-cli]\n\
+         command = \"true\"\n\
+         \n\
+         [specs]\n\
+         type = \"openspec\"\n\
+         dir = \"openspec/changes\"\n",
+    )
+    .expect("write config");
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+    assert_eq!(check["status"], "warn", "check: {check}");
+    let detail = check["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("could not be verified for mystery-cli"),
+        "detail: {detail}"
+    );
+    let remedy = check["remedy"].as_str().unwrap_or_default();
+    assert!(remedy.contains("[worktree.env] copy"), "remedy: {remedy}");
+}
+
+#[test]
+fn an_out_of_date_orchestrator_pointer_warns() {
+    // A repository initialised by an earlier binary keeps the unscoped section
+    // until `init` runs again.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let pointer = |doc: &serde_json::Value| {
+        checks(doc)
+            .iter()
+            .find(|c| c["name"] == "orchestrator pointer")
+            .cloned()
+            .unwrap_or_else(|| panic!("the report should carry the pointer check: {doc}"))
+    };
+    assert_eq!(pointer(&sandbox.doctor_json().1)["status"], "ok");
+
+    let agents_md = sandbox.repo.join("AGENTS.md");
+    let content = std::fs::read_to_string(&agents_md).expect("read AGENTS.md");
+    let earlier = content.replace(
+        "This section applies only to the agent session running at the repository\n\
+         root (the main checkout). If you are a coding agent working in a git-paw\n\
+         worktree, ignore this section and follow your own session assignment\n\
+         instead.\n\n",
+        "",
+    );
+    assert_ne!(
+        earlier, content,
+        "the scoping paragraph should be present to remove"
+    );
+    std::fs::write(&agents_md, earlier).expect("write AGENTS.md");
+
+    let check = pointer(&sandbox.doctor_json().1);
+    assert_eq!(check["status"], "warn", "check: {check}");
+    assert!(
+        check["remedy"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("git paw init"),
+        "check: {check}"
+    );
+}
+
+#[test]
+fn a_family_variant_finds_its_familys_workflow_definitions() {
+    // preflight-diagnostics scenario "A family variant uses its family's
+    // locations": a `[clis.<name>]` entry declaring `family = "claude"` keeps
+    // its command definitions where Claude Code does.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", true);
+    std::fs::write(
+        sandbox.repo.join(".git-paw/config.toml"),
+        "default_spec_cli = \"claude-opus\"\n\
+         worktree_placement = \"sibling\"\n\
+         \n\
+         [clis.claude-opus]\n\
+         command = \"claude\"\n\
+         family = \"claude\"\n\
+         \n\
+         [specs]\n\
+         type = \"openspec\"\n\
+         dir = \"openspec/changes\"\n",
+    )
+    .expect("write config");
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+    assert_eq!(check["status"], "ok", "check: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is reachable from every worktree for claude-opus"),
+        "check: {check}"
+    );
+}
+
+#[test]
 fn the_same_uncommitted_definition_passes_under_child_placement() {
     // A child worktree sits under the root, so the CLI's ancestor search
     // still finds the uncommitted definition.
