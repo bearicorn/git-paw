@@ -464,7 +464,7 @@ recovers such a session; `git paw purge --stale` deliberately leaves it alone.
 gone. When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
 receipt is invalidated automatically before launching) or `git paw purge --stale`
 to clear it. The `--json` output is an object with `session`, `status`,
-`tmux_running`, and `worktrees` fields, plus `wave` when the session's own
+`tmux_running`, `worktrees` and `usage_total` fields, plus `wave` when the session's own
 broker is reachable (just `{ "session": null }` when the repository has no
 session); its `status` field carries the matching lowercase value (`active`,
 `paused`, `stopped`, or `stale`).
@@ -493,9 +493,30 @@ Each entry in `--json`'s `worktrees` array carries:
 | `cli` | string | The CLI id assigned to this worktree. |
 | `worktree_path` | string | Absolute path to the worktree. |
 | `cli_session_id` | string or `null` | The session identifier git-paw assigned this worker's CLI at launch, or `null` when the CLI has no assignment template. Resume it by hand with the CLI's own resume flag (e.g. `claude --resume <id>`), or let `git paw start` do it automatically on recovery. |
+| `usage` | object or `null` | The worker's attributed token usage, or `null` when it is unknown (the CLI declares no usage source, the session has no assigned id, or its report cannot be read). Unknown is not zero. |
 
-The human-readable table (no `--json`) never shows `cli_session_id` — it is
-operator/tooling data surfaced only in JSON.
+A `usage` object carries `input_tokens`, `output_tokens`, `cache_read_tokens`
+and `cache_write_tokens` (integers), plus `cost` (a number, in the CLI's own
+currency) only when the CLI itself reports one.
+
+`usage_total` has the same fields, summed over the workers currently in the
+session whose usage is known, plus `tokens` — `input + output + cache-read +
+cache-write`, computed with the same formula as `[supervisor]
+budget_max_tokens` but over the current workers only (the drive loop's cap also
+keeps the spend of removed workers and of its headless runs) — and
+`unknown_workers`: how many workers it does not cover. Its `cost` is present
+only when every known worker reports one. The totals exclude your own
+interactive session; see
+[Usage and the budget guardrail](user-guide/supervisor.md#usage-and-the-budget-guardrail).
+Each `--json` call reads every worker's transcripts in full.
+
+```json
+"usage": {"input_tokens": 5, "output_tokens": 150, "cache_read_tokens": 2500, "cache_write_tokens": 520},
+"usage_total": {"input_tokens": 5, "output_tokens": 150, "cache_read_tokens": 2500, "cache_write_tokens": 520, "tokens": 3175, "unknown_workers": 1}
+```
+
+The human-readable table (no `--json`) never shows `cli_session_id` or usage —
+they are operator/tooling data surfaced only in JSON.
 
 **Example:**
 ```bash

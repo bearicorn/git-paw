@@ -1340,6 +1340,9 @@ fn supervisor_round_trips_through_save_and_load() {
             correction: CorrectionConfig::default(),
             branch_refresh: None,
             escalation: EscalationConfig::default(),
+            budget_max_tokens: None,
+            budget_max_cost: None,
+            budget_on_exhausted: None,
         }),
         ..Default::default()
     };

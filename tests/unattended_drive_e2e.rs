@@ -81,6 +81,18 @@
 // - wind-down synthesis records durable learnings → drive::loop_escalates_live_prompts_without_blocking_either_agent
 // - the claim guards the loop's own sends → drive::a_pane_claimed_by_another_sender_receives_no_typed_text
 // - drive loop is exercised end-to-end without a real LLM → every e2e:: test here
+// - a breach under escalate stops initiated spend →
+//   drive::budget_guard::a_breach_under_escalate_escalates_once_and_sends_nothing
+// - a breach under abandon ends the run →
+//   e2e::a_budget_breach_under_abandon_exits_non_zero_and_leaves_the_worker_running,
+//   drive::budget_guard::a_breach_under_abandon_exits_budget_exhausted_without_touching_a_pane
+// - no cap leaves the loop unchanged → drive::budget_guard::no_cap_leaves_actions_and_outcome_unchanged
+// - unknown workers are named at start →
+//   drive::budget_guard::the_start_report_names_a_worker_with_unknown_usage
+// - an unenforceable cost cap is reported →
+//   drive::budget_guard::the_start_report_says_a_cost_cap_cannot_be_evaluated
+// - the usage section separates roles and names unknowns →
+//   drive::budget_guard::the_usage_section_separates_roles_and_names_unknowns
 
 use std::fs;
 use std::io::Read;
@@ -2492,4 +2504,138 @@ fn unattended_hands_an_ambiguous_question_to_a_headless_one_shot() {
         escalation_log.contains("question|feat-beta|RS256 or HS256?"),
         "escalation log: {escalation_log:?}"
     );
+}
+
+/// Writes a claude-family stub CLI that copies `report` to
+/// `$CLAUDE_CONFIG_DIR/projects/stub/<its --session-id>.jsonl` — the usage
+/// report a Claude Code session writes — then bumps `alive` every 0.3s for as
+/// long as it runs.
+fn write_usage_reporting_stub(dir: &Path, report: &Path, alive: &Path) -> PathBuf {
+    let path = dir.join("usage_stub.sh");
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         sid=''\n\
+         while [ $# -gt 0 ]; do [ \"$1\" = '--session-id' ] && sid=\"$2\"; shift; done\n\
+         mkdir -p \"$CLAUDE_CONFIG_DIR/projects/stub\"\n\
+         cp '{report}' \"$CLAUDE_CONFIG_DIR/projects/stub/$sid.jsonl\"\n\
+         stty -echo 2>/dev/null\n\
+         i=0\n\
+         while true; do i=$((i+1)); echo $i > '{alive}'; sleep 0.3; done\n",
+        report = report.display(),
+        alive = alive.display(),
+    );
+    fs::write(&path, script).expect("write stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    }
+    path
+}
+
+/// Spec scenario "A breach under abandon ends the run"
+/// (`worker-usage-budget`): a worker whose usage report already exceeds
+/// `budget_max_tokens` ends the run `budget-exhausted` with a non-zero
+/// status, the summary carries the usage section, and the worker keeps
+/// running — the loop never stops a pane.
+#[test]
+#[serial]
+fn a_budget_breach_under_abandon_exits_non_zero_and_leaves_the_worker_running() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let claude_config = TempDir::new().expect("claude config dir");
+    let port = pick_broker_port();
+    let alive = out.path().join("alive");
+    let report =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude_usage/session.jsonl");
+    let stub = write_usage_reporting_stub(tr.path(), &report, &alive);
+
+    let paw = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw).expect("create .git-paw");
+    fs::write(
+        paw.join("config.toml"),
+        format!(
+            "default_cli = \"stub\"\n\n\
+             [clis.stub]\n\
+             command = \"{}\"\n\
+             family = \"claude\"\n\n\
+             [broker]\n\
+             enabled = true\n\
+             port = {port}\n\n\
+             [supervisor]\n\
+             enabled = true\n\
+             cli = \"cat\"\n\
+             budget_max_tokens = 100\n\
+             budget_on_exhausted = \"abandon\"\n",
+            stub.display()
+        ),
+    )
+    .expect("write config");
+
+    let stdout_path = out.path().join("stdout.log");
+    let mut child = StdCommand::new(BIN)
+        .current_dir(tr.path())
+        .args(["start", "--unattended", "--branches", "feat/alpha"])
+        .env("TMUX_TMPDIR", tmux_env.socket_dir())
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("CLAUDE_CONFIG_DIR", claude_config.path())
+        .env("GIT_PAW_READINESS_TIMEOUT_MS", "120")
+        .env("GIT_PAW_DRIVE_POLL_MS", "300")
+        .env("GIT_PAW_DRIVE_HEARTBEAT_MS", "30000")
+        .env("GIT_PAW_DRIVE_USAGE_EVERY_SWEEPS", "1")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdout(Stdio::from(
+            fs::File::create(&stdout_path).expect("stdout log"),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(out.path().join("stderr.log")).expect("stderr log"),
+        ))
+        .spawn()
+        .expect("spawn git paw start --unattended");
+
+    let status = wait_child(&mut child, Duration::from_secs(45));
+    let stdout = read_to_string(&stdout_path);
+    let stderr = read_to_string(&out.path().join("stderr.log"));
+
+    // The worker is still running after the loop exited: its counter moves.
+    let before = read_to_string(&alive);
+    let moved = wait_until(|| read_to_string(&alive) != before, Duration::from_secs(5));
+    let session = session_name_in(&stdout);
+    let still_there = session
+        .as_deref()
+        .is_some_and(|s| session_exists(tmux_env.socket_dir(), s));
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        !status.success(),
+        "a budget-exhausted run exits non-zero; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Unattended drive loop exited: budget-exhausted"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[budget-exhausted]") && stdout.contains("budget_max_tokens 100"),
+        "the breach is one escalation; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("workers on stub: 3175 tokens")
+            && stdout.contains("excludes your own session"),
+        "usage section; stdout:\n{stdout}"
+    );
+    assert!(
+        still_there,
+        "the session survives the exit; stdout:\n{stdout}"
+    );
+    assert!(moved, "the worker keeps running after the exit");
 }

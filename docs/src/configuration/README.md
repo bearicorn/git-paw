@@ -571,10 +571,10 @@ args = "--model opus"
 # paste, then sends Enter separately. Default suits most CLIs; raise it
 # for a CLI whose large-paste handling needs longer before submit lands.
 submit_delay_ms = 1500
-# Path to this CLI's claude-format settings file. Parsed and preserved for
-# compatibility only: git-paw never reads, writes, or seeds this file, and
-# nothing in git-paw acts on it today. A leading `~` is expanded to the home
-# directory.
+# Path to this CLI's claude-format settings file. git-paw never reads, writes,
+# or seeds this file; its parent directory is where a claude-family CLI keeps
+# its usage reports, so usage attribution looks there first. A leading `~` is
+# expanded to the home directory.
 settings_path = "~/.config/claude-variant/settings.json"
 # Per-approval-level flag overrides, consulted BEFORE git-paw's built-in
 # flag table when composing launch commands. Keys are the approval level
@@ -617,7 +617,7 @@ approval_markers = ["proceed? (y/n)"]
 | `family` | no | The [provider family](../supported-clis.md#provider-families) this CLI is a variant of: `claude`, `codex`, `agy`, `qwen`, `cursor-agent` or `generic`. Supplies the built-in approval flags, session-id / resume / headless templates and MCP default wherever the entry sets no override. Unset, a known CLI name keeps its own family and any other name resolves `generic`; never inferred from `command`. An unknown value is rejected at config load, listing the accepted values. Omitted when the config is written back. |
 | `args` | no | Arguments appended verbatim after `command` on every launch of this CLI (start, `add`, recovery, readiness relaunch), before the approval flags. In a pane, `args` is interpreted by the pane's shell, so it carries the same trust as `command`: quoting and expansion apply, and anyone who can edit the config can run anything there. The headless orchestrator hand-off splits `args` on whitespace instead (no shell, so quoting is not supported there). Put permission flags in `approval_args`, not here. Omitted when the config is written back. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
-| `settings_path` | no | Path to the CLI's claude-format settings file. **Parse-only**: accepted and preserved across a load/save round-trip so existing configurations keep working, but git-paw never reads, writes, or acts on it — not even [`git paw setup-cli`](../user-guide/cli-setup.md), whose only target is the main checkout's project-local settings file. |
+| `settings_path` | no | Path to the CLI's claude-format settings file. git-paw never reads or writes the file itself — not even [`git paw setup-cli`](../user-guide/cli-setup.md), whose only target is the main checkout's project-local settings file. Its **parent directory** locates a claude-family CLI's usage reports: [usage attribution](../user-guide/supervisor.md#usage-and-the-budget-guardrail) searches there first, then `CLAUDE_CONFIG_DIR`, then `~/.claude`. Only an absolute path (after `~` expansion) is used. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 | `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
 | `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
@@ -628,9 +628,8 @@ approval_markers = ["proceed? (y/n)"]
 | `sandbox_args` | no | The CLI's native sandbox arguments, consulted **before** the provider family's built-in row (`codex` → `--sandbox workspace-write`; no other family has one). Passed only when `sandbox = "native"`, after `args` and before the approval flags, and left out when the approval flags already contain them verbatim. `sandbox = "native"` with neither this key nor a built-in row is rejected at config load, naming `sandbox` and `sandbox_args`. Appended verbatim, with the same trust as `approval_args`. Omitted when the config is written back. |
 
 `settings_path` used to feed a protected-path set that the auto-approve
-classifier consulted before approving a write. That classifier is retired, so
-the field now has no effect at all — it is kept so existing configurations
-load and round-trip unchanged. Agent memory isolation is carried by the
+classifier consulted before approving a write. That classifier is retired;
+the field's only effect now is locating usage reports. Agent memory isolation is carried by the
 bundled skills' doctrine, and mechanically by deny rules in the agent CLI's
 own settings or by the [sandbox](../user-guide/sandbox.md). See
 [Agent permissions](../user-guide/supervisor.md#agent-permissions).
@@ -1131,7 +1130,7 @@ gate_tags = ["testing", "regression", "spec audit", "doc audit", "security audit
 |-------|---------|-------------|
 | `auto_loopback` | `false` | Whether a failing gate automatically re-engages the worker's pane with that gate's feedback. **Off by default** so an existing unattended setup behaves identically after an upgrade; the recommended config above turns it on. When `false`, the feedback is published exactly as before and no keystrokes are sent. |
 | `max_cycles` | `5` | Verify↔fix rounds the loop drives for one branch before giving up and applying `on_exhausted`. A branch that passes its gate leaves the cycle early and its counter resets. Must be a positive integer — `0` is a config error; to turn the loop off set `auto_loopback = false`. |
-| `on_exhausted` | `"escalate"` | What to do with a branch that reaches `max_cycles`. `"escalate"` flags it to the orchestrator/human as unrecoverable; `"abandon"` marks it failed and leaves it un-corrected without an escalation. Neither re-engages the branch again. Any other value is a config error naming the accepted set. |
+| `on_exhausted` | `"escalate"` | What to do with a branch that reaches `max_cycles`. `"escalate"` flags it to the orchestrator/human as unrecoverable; `"abandon"` marks it failed and leaves it un-corrected without an escalation. Neither re-engages the branch again. A budget breach has its own policy, [`budget_on_exhausted`](#budget-caps). Any other value is a config error naming the accepted set. |
 | `escalate_after_cycles` | `3` | Cycle count at which a slow-converging worker is flagged **once**, as an early heads-up, while re-engagement continues to `max_cycles`. No distinct early flag is emitted when this is greater than or equal to `max_cycles`. Must be a positive integer — `0` is a config error; to suppress the flag, set it to `max_cycles` or higher. |
 | `gate_tags` | `["testing", "regression", "spec audit", "doc audit", "security audit", "scope"]` | Gate names recognised as a `[<gate>]` prefix on a supervisor `agent.feedback` error line; only a matching tag (case-insensitive) counts as a failing gate verdict that starts a correction cycle. The default reproduces git-paw's own five-gate framework plus `scope` exactly. A consumer whose review process names different gates lists them here instead — the correction *loop* itself is unaffected, only the tag vocabulary it recognises. Must be non-empty; an empty list is a config error (it would silently disable the loop even with `auto_loopback = true` — set `auto_loopback = false` instead). |
 
@@ -1170,6 +1169,33 @@ timeout_seconds = 1800
 The table is optional: a config without it loads with both defaults. The
 invocation's permission level is [`[supervisor] approval`](#supervisor)
 (falling back to `agent_approval`).
+
+### Budget caps
+
+Optional `[supervisor]` keys cap what an `--unattended` run spends, measured
+over the usage git-paw can attribute: each worker's session and each headless
+hand-off it started. Your own session is never included. See
+[Supervisor § Usage and the budget guardrail](../user-guide/supervisor.md#usage-and-the-budget-guardrail).
+
+```toml
+[supervisor]
+budget_max_tokens = 300000000   # input + output + cache-read + cache-write tokens
+budget_max_cost = 25.0          # in the currency the agent CLI reports
+budget_on_exhausted = "escalate"  # or "abandon"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `budget_max_tokens` | none (no cap) | `input + output + cache-read + cache-write` tokens across the attributed usage. `git paw status --json` reports `usage_total.tokens` with the same formula, but over the current workers only; the drive loop's cap also keeps the spend of removed workers and of its headless runs. Cache reads dominate real usage (one worker's task can read tens of millions of cached tokens), so size the cap from a past run's `usage_total.tokens`. Must be a positive integer — `0` or a negative value is a config error naming the key. |
+| `budget_max_cost` | none (no cap) | Cost in the currency the agent CLI's own cost figure uses. git-paw ships no price table, so this cap is evaluated only when every worker CLI reports a cost. Claude Code reports none, so for a Claude fleet the cap can never fire: `git paw doctor` warns, and the loop escalates once at start. Must be a positive number — `0` or a negative value is a config error naming the key. |
+| `budget_on_exhausted` | `"escalate"` | What a breach does to the run: `"escalate"` keeps sweeping until another exit condition; `"abandon"` exits with outcome `budget-exhausted` and a non-zero status. Independent of [`[supervisor.correction] on_exhausted`](#correction-loop-tuning). Any other value is a config error naming the accepted set. |
+
+On the first breach the loop records one `budget-exhausted` escalation and
+stops every spend it initiates — nudges, re-engagement and correction text,
+headless hand-offs, and branch refreshes with their notifications. A human's
+text already typed into a pane is still submitted. It never interrupts or
+kills a worker. The keys are omitted on save when absent, so an existing config
+round-trips unchanged.
 
 ### Routing through the supervisor (`/tell`)
 

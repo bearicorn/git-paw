@@ -195,6 +195,10 @@ pub struct HeadlessInvocation {
     pub approval_flags: Vec<String>,
     /// The resolved headless arguments.
     pub headless_args: Vec<String>,
+    /// The CLI's session-id template (containing
+    /// [`crate::config::SESSION_ID_PLACEHOLDER`]), when it has one, so each
+    /// invocation's usage can be attributed (`worker-usage-budget`).
+    pub session_id_args: Option<String>,
 }
 
 impl HeadlessInvocation {
@@ -202,9 +206,27 @@ impl HeadlessInvocation {
     /// arguments.
     #[must_use]
     pub fn args(&self) -> Vec<String> {
+        self.args_with_session(None)
+    }
+
+    /// [`Self::args`] with the session-id arguments for `session_id` before
+    /// the headless arguments, when the CLI has a session-id template.
+    #[must_use]
+    pub fn args_with_session(&self, session_id: Option<&str>) -> Vec<String> {
+        let session: Vec<String> = session_id
+            .zip(self.session_id_args.as_deref())
+            .map(|(id, template)| {
+                template
+                    .replace(crate::config::SESSION_ID_PLACEHOLDER, id)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.launch_args
             .iter()
             .chain(&self.approval_flags)
+            .chain(&session)
             .chain(&self.headless_args)
             .cloned()
             .collect()
@@ -300,6 +322,7 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
             .collect(),
             approval_flags: flags.split_whitespace().map(str::to_string).collect(),
             headless_args: headless.split_whitespace().map(str::to_string).collect(),
+            session_id_args: profile.session_id_args(crate::config::SESSION_ID_PLACEHOLDER),
         }),
         warning,
     }
@@ -604,6 +627,22 @@ pub trait HandoffPort {
     fn abort(&mut self, now: Instant, reason: &str);
     /// The exit-summary report.
     fn report(&self) -> HandoffReport;
+    /// Every invocation started this run, for usage attribution.
+    fn sessions(&self) -> Vec<HeadlessSession> {
+        Vec::new()
+    }
+}
+
+/// One headless invocation started this run, as usage attribution needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessSession {
+    /// The orchestrator CLI's name.
+    pub cli: String,
+    /// The invocation's working directory.
+    pub cwd: PathBuf,
+    /// The session id it was assigned, or `None` when its CLI has no
+    /// session-id template (its usage is then unknown).
+    pub session_id: Option<String>,
 }
 
 /// Everything a headless invocation is spawned with besides its context.
@@ -628,6 +667,17 @@ impl HandoffSetup {
     /// the escalation log.
     #[must_use]
     pub fn spawn_spec(&self, handoff: &HandOff) -> SpawnSpec {
+        self.spawn_spec_with_session(handoff, None)
+    }
+
+    /// [`Self::spawn_spec`] assigning the invocation `session_id`
+    /// ([`HeadlessInvocation::args_with_session`]).
+    #[must_use]
+    pub fn spawn_spec_with_session(
+        &self,
+        handoff: &HandOff,
+        session_id: Option<&str>,
+    ) -> SpawnSpec {
         let context = render_context(
             handoff,
             ContextInputs {
@@ -637,7 +687,7 @@ impl HandoffSetup {
         );
         SpawnSpec {
             program: self.invocation.program.clone(),
-            args: self.invocation.args(),
+            args: self.invocation.args_with_session(session_id),
             cwd: self.repo_root.clone(),
             stdin: context.into_bytes(),
             env: self
@@ -673,6 +723,7 @@ pub struct Orchestrator<R: CommandRunner, P: OutcomePublisher> {
     non_zero: usize,
     timed_out: usize,
     capped: usize,
+    sessions: Vec<HeadlessSession>,
 }
 
 impl<R: CommandRunner, P: OutcomePublisher> Orchestrator<R, P> {
@@ -697,6 +748,7 @@ impl<R: CommandRunner, P: OutcomePublisher> Orchestrator<R, P> {
             non_zero: 0,
             timed_out: 0,
             capped: 0,
+            sessions: Vec::new(),
         }
     }
 }
@@ -733,12 +785,24 @@ impl<R: CommandRunner, P: OutcomePublisher> HandoffPort for Orchestrator<R, P> {
     fn pump(&mut self, now: Instant, dequeue: bool) {
         let setup = &self.setup;
         let runner = &self.runner;
+        let sessions = &mut self.sessions;
         let finished = self.queue.pump(now, dequeue, &mut |handoff| {
             log_line(
                 &setup.log_path,
                 &format!("=== orchestrator escalation: {} ===", handoff.key()),
             );
-            let child = runner.spawn(&setup.spawn_spec(handoff))?;
+            let session_id = setup
+                .invocation
+                .session_id_args
+                .as_ref()
+                .and_then(|_| crate::random::generate_uuid_v4().ok());
+            let child =
+                runner.spawn(&setup.spawn_spec_with_session(handoff, session_id.as_deref()))?;
+            sessions.push(HeadlessSession {
+                cli: setup.invocation.cli.clone(),
+                cwd: setup.repo_root.clone(),
+                session_id,
+            });
             // The pid is also the process group id: what to kill by hand if
             // git-paw itself is interrupted while the one-shot runs.
             log_line(
@@ -772,6 +836,10 @@ impl<R: CommandRunner, P: OutcomePublisher> HandoffPort for Orchestrator<R, P> {
             capped: self.capped,
             log_path: self.setup.log_path.clone(),
         }
+    }
+
+    fn sessions(&self) -> Vec<HeadlessSession> {
+        self.sessions.clone()
     }
 }
 
@@ -1183,6 +1251,7 @@ mod tests {
                 launch_args: Vec::new(),
                 approval_flags: vec!["--permission-mode".to_string(), "acceptEdits".to_string()],
                 headless_args: vec!["-p".to_string()],
+                session_id_args: None,
             },
             repo_root: PathBuf::from("/repo"),
             broker_url: Some(BROKER.to_string()),
@@ -1475,6 +1544,57 @@ mod tests {
             log_path: escalation_log_path(dir, "paw-x"),
             ..setup()
         }
+    }
+
+    #[test]
+    fn a_claude_orchestrator_resolves_a_session_id_template() {
+        let r = resolve(&config("[supervisor]\ncli = \"claude\"\n"));
+        let inv = r.invocation.unwrap();
+        let with = inv.args_with_session(Some("sid-1"));
+        assert_eq!(with[with.len() - 3..], ["--session-id", "sid-1", "-p"]);
+        assert!(
+            !inv.args().iter().any(|a| a == "--session-id"),
+            "no id, no session arguments"
+        );
+    }
+
+    /// Each one-shot whose CLI has a session-id template is assigned a fresh
+    /// id on argv, and the port keeps every id for the run's usage.
+    #[test]
+    fn the_port_assigns_and_keeps_a_session_id_per_one_shot() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = FakeCommandRunner::succeeding("");
+        let mut s = temp_setup(dir.path());
+        s.invocation.session_id_args = Some("--session-id {{SESSION_ID}}".to_string());
+        let mut port = Orchestrator::new(s, &runner, Recorded::default());
+        assert!(port.enqueue(question("feat-a", "one?")));
+        assert!(port.enqueue(question("feat-b", "two?")));
+        port.pump(Instant::now(), true);
+        port.pump(Instant::now(), true);
+
+        let sessions = port.sessions();
+        assert_eq!(sessions.len(), 2);
+        let spawns = runner.spawns();
+        for (session, spawn) in sessions.iter().zip(&spawns) {
+            let id = session.session_id.as_deref().expect("an id is assigned");
+            assert_eq!(session.cli, "claude");
+            assert_eq!(session.cwd, dir.path());
+            let at = spawn.args.iter().position(|a| a == "--session-id").unwrap();
+            assert_eq!(spawn.args[at + 1], id);
+        }
+        assert_ne!(sessions[0].session_id, sessions[1].session_id);
+    }
+
+    #[test]
+    fn a_one_shot_without_a_template_is_kept_with_no_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = FakeCommandRunner::succeeding("");
+        let mut port = Orchestrator::new(temp_setup(dir.path()), &runner, Recorded::default());
+        assert!(port.enqueue(question("feat-a", "one?")));
+        port.pump(Instant::now(), true);
+        assert_eq!(port.sessions().len(), 1);
+        assert_eq!(port.sessions()[0].session_id, None);
+        assert!(!runner.spawns()[0].args.iter().any(|a| a == "--session-id"));
     }
 
     #[test]

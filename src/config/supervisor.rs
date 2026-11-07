@@ -323,6 +323,82 @@ pub struct SupervisorConfig {
     /// back on save, so older configs round-trip unchanged.
     #[serde(default, skip_serializing_if = "EscalationConfig::is_default")]
     pub escalation: EscalationConfig,
+    /// Token cap for the unattended drive loop: input, output, cache-read and
+    /// cache-write tokens. `None` means no cap; `0` is a config error.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_budget_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub budget_max_tokens: Option<u64>,
+    /// Cost cap for the unattended drive loop, in the currency the agent
+    /// CLI's own cost figure uses. Evaluated only against CLIs that report
+    /// a cost; `None` (absent) means no cap. `0` or a negative value is a
+    /// config error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_max_cost: Option<BudgetCost>,
+    /// What a budget breach does: `escalate` (the `None` default) keeps
+    /// sweeping, `abandon` ends the run. Separate from
+    /// `[supervisor.correction] on_exhausted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_on_exhausted: Option<OnExhausted>,
+}
+
+/// A positive, finite cost cap (`[supervisor] budget_max_cost`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct BudgetCost(f64);
+
+// A `BudgetCost` is always finite (never NaN), so equality is total.
+impl Eq for BudgetCost {}
+
+impl BudgetCost {
+    /// The cap, or an error naming the field when it is not positive and
+    /// finite.
+    ///
+    /// # Errors
+    ///
+    /// A message naming `budget_max_cost` for `0`, a negative value, NaN or
+    /// infinity.
+    pub fn new(value: f64) -> Result<Self, String> {
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err(format!(
+                "[supervisor] budget_max_cost must be a positive number, got {value}"
+            ))
+        }
+    }
+
+    /// The cap's value.
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BudgetCost {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(f64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// `deserialize_with` shim for [`SupervisorConfig::budget_max_tokens`]:
+/// rejects `0`, naming the field.
+fn deserialize_budget_tokens<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    u64::try_from(value)
+        .ok()
+        .filter(|v| *v > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "[supervisor] budget_max_tokens must be a positive integer, got {value}"
+            ))
+        })
 }
 
 /// `[supervisor.escalation]`: the headless orchestrator hand-off policy
@@ -1107,6 +1183,93 @@ mod tests {
     fn supervisor_from(toml_src: &str) -> SupervisorConfig {
         let config: PawConfig = toml::from_str(toml_src).expect("config parses");
         config.supervisor.expect("[supervisor] section present")
+    }
+
+    /// Scenario "Absent caps load as no cap".
+    #[test]
+    fn absent_budget_caps_load_as_no_cap_and_are_not_written_back() {
+        let supervisor = supervisor_from("[supervisor]\nenabled = true\n");
+        assert_eq!(supervisor.budget_max_tokens, None);
+        assert_eq!(supervisor.budget_max_cost, None);
+        let saved = toml::to_string(&supervisor).unwrap();
+        assert!(!saved.contains("budget"), "got {saved}");
+    }
+
+    /// Scenario "A zero cap is rejected", plus the negative and cost cases.
+    #[test]
+    fn a_zero_or_negative_cap_is_rejected_naming_the_field() {
+        for (src, field) in [
+            ("budget_max_tokens = 0", "budget_max_tokens"),
+            ("budget_max_tokens = -5", "budget_max_tokens"),
+            ("budget_max_cost = 0.0", "budget_max_cost"),
+            ("budget_max_cost = -1.5", "budget_max_cost"),
+        ] {
+            let err = toml::from_str::<PawConfig>(&format!("[supervisor]\n{src}\n"))
+                .expect_err(src)
+                .to_string();
+            assert!(err.contains(field), "{src}: {err}");
+        }
+    }
+
+    /// Scenario "Caps round-trip".
+    #[test]
+    fn budget_caps_round_trip() {
+        let supervisor =
+            supervisor_from("[supervisor]\nbudget_max_tokens = 2000000\nbudget_max_cost = 25.0\n");
+        assert_eq!(supervisor.budget_max_tokens, Some(2_000_000));
+        assert_eq!(supervisor.budget_max_cost.map(BudgetCost::get), Some(25.0));
+        let saved = toml::to_string(&supervisor).unwrap();
+        let reloaded: SupervisorConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded, supervisor);
+    }
+
+    #[test]
+    fn the_init_template_carries_both_caps_as_loadable_examples() {
+        let template = crate::config::generate_default_config();
+        let lines: Vec<&str> = template
+            .lines()
+            .filter_map(|l| l.strip_prefix("# "))
+            .filter(|l| l.starts_with("budget_"))
+            .collect();
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        let supervisor = supervisor_from(&format!("[supervisor]\n{}\n", lines.join("\n")));
+        assert!(supervisor.budget_max_tokens.is_some());
+        assert!(supervisor.budget_max_cost.is_some());
+        assert_eq!(supervisor.budget_on_exhausted, Some(OnExhausted::Escalate));
+    }
+
+    /// Scenario "The budget policy is independent of the correction policy".
+    #[test]
+    fn budget_on_exhausted_round_trips_independently_of_the_correction_policy() {
+        let supervisor = supervisor_from(
+            "[supervisor]\nbudget_on_exhausted = \"abandon\"\n\
+             [supervisor.correction]\non_exhausted = \"escalate\"\n",
+        );
+        assert_eq!(supervisor.budget_on_exhausted, Some(OnExhausted::Abandon));
+        assert_eq!(supervisor.correction.on_exhausted, OnExhausted::Escalate);
+        let saved = toml::to_string(&supervisor).unwrap();
+        let reloaded: SupervisorConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded, supervisor);
+    }
+
+    #[test]
+    fn an_absent_budget_on_exhausted_loads_as_unset() {
+        let unset = supervisor_from("[supervisor]\nenabled = true\n");
+        assert_eq!(unset.budget_on_exhausted, None);
+    }
+
+    #[test]
+    fn an_unknown_budget_on_exhausted_is_rejected_naming_the_accepted_values() {
+        let err = toml::from_str::<PawConfig>("[supervisor]\nbudget_on_exhausted = \"stop\"\n")
+            .expect_err("an unknown policy is rejected")
+            .to_string();
+        assert!(err.contains("escalate") && err.contains("abandon"), "{err}");
+    }
+
+    #[test]
+    fn an_integer_cost_cap_is_accepted() {
+        let supervisor = supervisor_from("[supervisor]\nbudget_max_cost = 25\n");
+        assert_eq!(supervisor.budget_max_cost.map(BudgetCost::get), Some(25.0));
     }
 
     /// Spec scenario "Table absent loads with defaults" — and the v0.13.0

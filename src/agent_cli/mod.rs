@@ -19,6 +19,7 @@
 //! new family is decided in one place.
 
 mod profile;
+pub mod usage;
 
 use std::fmt;
 use std::str::FromStr;
@@ -27,6 +28,7 @@ use crate::config::{ApprovalLevel, CliPromptProfile, claude_prompt_profile};
 use crate::error::PawError;
 
 pub use profile::{AgentCli, AgentProfiles, CliProfile, LaunchSession, resolve_for_launch};
+pub use usage::{UsageCache, UsageQuery, UsageReport, UsageSummary, UsageTotals};
 
 /// A provider family: which in-tree [`CliProvider`] supplies a CLI's built-in
 /// facts.
@@ -235,6 +237,18 @@ pub trait CliProvider: Sync {
     fn dialog_markers(&self) -> &'static [DialogMarker] {
         DEFAULT_DIALOG_MARKERS
     }
+
+    /// The session's token usage as the CLI reports it, or unknown with a
+    /// reason naming the CLI when the family declares no usage source.
+    fn usage(&self, query: &UsageQuery<'_>) -> UsageReport {
+        UsageReport::Unknown(usage::no_source_reason(query.cli_id))
+    }
+
+    /// Whether the family reports cost. Claude Code writes no cost figure, so
+    /// no in-tree family overrides this.
+    fn reports_cost(&self) -> bool {
+        false
+    }
 }
 
 /// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
@@ -302,6 +316,11 @@ impl CliProvider for ClaudeProvider {
     }
     fn mcp_capable(&self) -> bool {
         true
+    }
+    /// Session transcripts, verified against Claude Code 2.1.322 on
+    /// 2026-11-10 (`tests/fixtures/claude_usage/README.md`).
+    fn usage(&self, query: &UsageQuery<'_>) -> UsageReport {
+        usage::read_claude_usage(query)
     }
 }
 

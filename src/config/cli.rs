@@ -31,11 +31,11 @@ pub struct CustomCli {
     pub submit_delay_ms: Option<u64>,
     /// Optional path to this CLI's claude-format settings file.
     ///
-    /// **Parse-only.** git-paw never reads or writes this file. It records
-    /// where a claude-family variant keeps its settings (e.g. a `claude-oss`
-    /// entry on `~/.claude-oss/settings.json`) for an operator's own
-    /// reference and for a later change that may act on it. A leading `~` is
-    /// expanded to the home directory.
+    /// git-paw never reads or writes this file. It records where a
+    /// claude-family variant keeps its settings (e.g. a `claude-oss` entry on
+    /// `~/.claude-oss/settings.json`); its parent directory is where usage
+    /// attribution looks first for the variant's usage reports. A leading `~`
+    /// is expanded to the home directory.
     ///
     /// It previously also seeded the classifier's protected-path set, which
     /// refused to auto-approve writes into operator territory. With nothing
