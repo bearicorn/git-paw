@@ -87,6 +87,13 @@ pub enum Command {
         about = "Launch a new session or reattach to an existing one",
         long_about = "Smart start: reattaches if a session is active, recovers if stopped/crashed, \
                       or launches a new interactive session.\n\n\
+                      A session left with no agents (every one removed with `git paw remove`) \
+                      never silently drops a launch selection (`--branches`, `--specs`, \
+                      `--from-all-specs`): a stopped one is replaced by a fresh session running \
+                      the selection, and a running one is refused with a pointer to \
+                      `git paw add`, which refills it. A session that still has agents is \
+                      revived as before, with a one-line notice that the selection was not \
+                      applied.\n\n\
                       With `--unattended`, a repository that already has a supervised session \
                       gets a new drive loop bound to it instead: the session is driven as it \
                       stands when active, revived first when paused, recovered first when \
@@ -301,7 +308,9 @@ pub enum Command {
                       no stop/purge/restart, the other agents keep working undisturbed. The \
                       agent grid re-tiles to the layout a start of that many agents would \
                       produce, the new branch is registered in the session, and the agent boots \
-                      with the same broker boot block + initial prompt a start-time agent gets.\n\n\
+                      with the same broker boot block + initial prompt a start-time agent gets. \
+                      A running session whose last agent was removed is still running, so `add` \
+                      refills it.\n\n\
                       Provide a branch name, or use --from-spec to derive the branch (and CLI) \
                       from a discovered spec. Adding past the 25-agent cap is rejected. When the \
                       session is paused, the new pane starts paused too and begins on the next \

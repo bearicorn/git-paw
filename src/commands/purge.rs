@@ -226,6 +226,33 @@ pub(crate) fn invalidate_if_stale(
     Ok(true)
 }
 
+/// Tears `existing` down without asking — its tmux session (if alive), its
+/// worktrees and its receipt — exactly as `purge --force` would. Used by
+/// `start` to replace a stopped session that records no agents.
+///
+/// # Errors
+///
+/// Returns an error when the session state dir cannot be resolved or the
+/// teardown fails.
+pub(crate) fn discard_session(
+    repo_root: &Path,
+    existing: &Session,
+    out: &mut dyn Output,
+) -> Result<(), PawError> {
+    let sessions_dir = session::session_state_dir()?;
+    let mut confirm = |_: &str| -> Result<bool, PawError> { Ok(true) };
+    purge_with_prompt(
+        repo_root,
+        &sessions_dir,
+        existing,
+        true,
+        &mut confirm,
+        &mut kill_live_tmux,
+        out,
+    )?;
+    Ok(())
+}
+
 /// Purges only stale sessions (receipt claims active but the tmux session is
 /// gone), scoped to `opts.repo_root` when set, else to every repository on
 /// the machine. Live sessions are always left untouched.

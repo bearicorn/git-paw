@@ -777,3 +777,315 @@ fn learn_rejects_a_lone_surrogate_with_a_clean_diagnostic() {
 
     drop(handle);
 }
+
+/// Returns the payload of the first broker-log entry of `msg_type`.
+fn logged_payload(port: u16, msg_type: &str) -> serde_json::Value {
+    let log = fetch_log(port);
+    let parsed: serde_json::Value = serde_json::from_str(&log).expect("parse /log body");
+    parsed["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|e| e["message"]["type"] == msg_type)
+        .unwrap_or_else(|| panic!("no {msg_type} reached the broker; log:\n{log}"))["message"]
+        ["payload"]
+        .clone()
+}
+
+/// Spec scenario "status carries an activity phrase".
+#[test]
+#[serial]
+fn status_carries_an_activity_phrase_only_when_given() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &[
+            "--agent",
+            "feat-x",
+            "status",
+            "--activity",
+            "running the test suite",
+            "checking gates",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload = logged_payload(port, "agent.status");
+    assert_eq!(payload["activity"], "running the test suite");
+    assert_eq!(payload["message"], "checking gates");
+    drop(handle);
+
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &["--agent", "feat-x", "status", "booting"],
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload = logged_payload(port, "agent.status");
+    assert_eq!(payload["message"], "booting");
+    assert!(
+        payload.get("activity").is_none(),
+        "the plain form must carry no activity key: {payload}"
+    );
+    drop(handle);
+}
+
+/// Spec scenario "intent carries declared regions". The broker accepting the
+/// publish checks the wire shape for real.
+#[test]
+#[serial]
+fn intent_carries_declared_regions() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &[
+            "--agent",
+            "feat-x",
+            "intent",
+            "harden token checks",
+            "src/a.rs,src/b.rs",
+            "--region",
+            "src/a.rs#function=validate_token",
+            "--region",
+            "src/a.rs#range=10-40",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload = logged_payload(port, "agent.intent");
+    assert_eq!(
+        payload["files"],
+        serde_json::json!([
+            {"path": "src/a.rs", "regions": [
+                {"kind": "function", "name": "validate_token"},
+                {"kind": "range", "start_line": 10, "end_line": 40}
+            ]},
+            "src/b.rs"
+        ])
+    );
+    assert_eq!(payload["valid_for_seconds"], 900);
+    drop(handle);
+}
+
+/// Spec scenario "a malformed region is refused".
+#[test]
+#[serial]
+fn a_malformed_region_is_refused_unpublished() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    for region in [
+        "src/a.rs#loop=foo",
+        "src/a.rs#range=40-10",
+        "src/a.rs",
+        "src/a.rs#function=",
+    ] {
+        let out = run(
+            &broker_sh,
+            repo.path(),
+            &[
+                "--agent", "feat-x", "intent", "x", "src/a.rs", "--region", region,
+            ],
+        );
+        assert!(!out.status.success(), "region {region:?} must be refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("malformed --region '{region}'")),
+            "region {region:?} must get a diagnostic quoting it; stderr:\n{stderr}"
+        );
+    }
+    let log = fetch_log(port);
+    assert!(
+        !log.contains("agent.intent"),
+        "a refused region must publish nothing; log:\n{log}"
+    );
+    drop(handle);
+}
+
+/// Spec scenario "a region whose path contains # splits at the kind marker".
+#[test]
+#[serial]
+fn a_region_path_containing_a_hash_keeps_it() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &[
+            "--agent",
+            "feat-x",
+            "intent",
+            "docs",
+            "docs/c#.md",
+            "--region",
+            "docs/c#.md#block=## Setup",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload = logged_payload(port, "agent.intent");
+    assert_eq!(
+        payload["files"],
+        serde_json::json!([
+            {"path": "docs/c#.md", "regions": [{"kind": "block", "anchor": "## Setup"}]}
+        ])
+    );
+    drop(handle);
+}
+
+/// Spec scenarios "a region containing a newline is refused" and "poll refuses
+/// a non-numeric cursor".
+#[test]
+#[serial]
+fn malformed_region_newline_and_poll_cursor_are_refused() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &[
+            "--agent",
+            "feat-x",
+            "intent",
+            "x",
+            "src/a.rs",
+            "--region",
+            "src/a.rs#function=a\nb",
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "a region with a newline must be refused"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("newline"));
+    assert!(
+        !fetch_log(port).contains("agent.intent"),
+        "nothing may be published"
+    );
+
+    for cursor in ["abc", "1&x=2", "-1"] {
+        let out = run(
+            &broker_sh,
+            repo.path(),
+            &["--agent", "feat-x", "poll", cursor],
+        );
+        assert!(!out.status.success(), "cursor {cursor:?} must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("non-negative integer"),
+            "cursor {cursor:?}"
+        );
+    }
+    drop(handle);
+}
+
+/// Spec scenario "poll prints the next cursor".
+#[test]
+#[serial]
+fn poll_prints_the_next_cursor() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (broker_sh, _) = install_helpers(repo.path());
+    let (handle, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    // Two agents, so a peer artifact lands in feat-x's inbox.
+    for agent in ["feat-x", "feat-y"] {
+        let out = run(
+            &broker_sh,
+            repo.path(),
+            &["--agent", agent, "status", "booting"],
+        );
+        assert!(
+            out.status.success(),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = run(
+        &broker_sh,
+        repo.path(),
+        &["--agent", "feat-y", "artifact", "--files", "src/y.rs"],
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let addr = format!("127.0.0.1:{port}");
+    let mut stream = TcpStream::connect(&addr).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream
+        .write_all(
+            format!(
+                "GET /messages/feat-x?since=0 HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write request");
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).expect("read response");
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or_default();
+    let last_seq =
+        serde_json::from_str::<serde_json::Value>(body).expect("parse /messages")["last_seq"]
+            .as_u64()
+            .expect("last_seq");
+
+    let out = run(&broker_sh, repo.path(), &["--agent", "feat-x", "poll"]);
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim_end().lines().last(),
+        Some(format!("last_seq: {last_seq}").as_str()),
+        "poll must end with the next cursor; stdout:\n{stdout}"
+    );
+    drop(handle);
+}

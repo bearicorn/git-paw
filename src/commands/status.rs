@@ -228,11 +228,11 @@ pub fn status(
     // healthy even though the tmux session object still exists. Its tmux
     // session IS still running, so it counts as running below, and only an
     // absent tmux session (Stale) yields the stale display.
-    let liveness = tmux::session_liveness_for(
+    let liveness = existing.reconcile_liveness(tmux::session_liveness_for(
         &existing.session_name,
         existing.created_at,
         existing.agent_pane_offset(),
-    );
+    ));
     let display = session::DisplayStatus::from_receipt(&existing.status, liveness);
     let tmux_running = matches!(
         liveness,

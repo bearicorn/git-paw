@@ -3335,6 +3335,40 @@ fn has_live_agent_pane_false_when_list_panes_fails() {
     assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
 }
 
+/// The pane probe is receipt-blind: a window with no coding-agent pane reads
+/// as "agents exited". Whether that means an emptied session or one whose
+/// panes were all closed is decided from the receipt
+/// (`Session::reconcile_liveness`), not here.
+#[test]
+fn session_liveness_for_reports_agents_exited_when_no_agent_pane_is_left() {
+    let now = SystemTime::now();
+    let created_at = now - Duration::from_secs(120);
+    for panes in [
+        "0|node|dashboard\n",
+        "0|node|dashboard\n1|node|supervisor\n",
+        "0|node|\n",
+    ] {
+        let runner = runner_with_panes(panes);
+        assert_eq!(
+            session_liveness_for_with(&runner, "paw-proj", created_at, 1, now),
+            SessionLiveness::AgentsExited,
+            "panes {panes:?}"
+        );
+    }
+}
+
+/// One agent pane back at its shell beside the dashboard is "agents exited".
+#[test]
+fn an_agent_pane_at_its_shell_beside_the_dashboard_is_still_agents_exited() {
+    let runner = runner_with_panes("0|node|dashboard\n1|zsh|feat/auth\n");
+    let now = SystemTime::now();
+    let created_at = now - Duration::from_secs(120);
+    assert_eq!(
+        session_liveness_for_with(&runner, "paw-proj", created_at, 1, now),
+        SessionLiveness::AgentsExited
+    );
+}
+
 /// Spec scenario "Exited agent panes are a distinct liveness outcome from an
 /// absent session" — past the launch grace period, bare-shell agent panes give
 /// [`SessionLiveness::AgentsExited`], not `Stale`.

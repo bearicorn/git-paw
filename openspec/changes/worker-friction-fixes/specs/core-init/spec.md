@@ -36,3 +36,26 @@ The system SHALL, when `git paw init` runs, inject into `<repo>/AGENTS.md` (crea
 - **THEN** the section SHALL state that it applies only to the session at the repository root
 - **AND** SHALL state that a coding agent running in a worktree ignores it
 - **AND** SHALL NOT address its reader as the orchestrator without that condition
+
+Test: `agents::tests::pointer_is_scoped_to_the_root_session`
+
+## ADDED Requirements
+
+### Requirement: Each worker's sidecar disclaims the orchestrator section
+
+The session-assignment section git-paw writes into every worker's `.git-paw/AGENTS.local.md` SHALL carry one line telling the worker that it is a coding agent in a worktree and must ignore the `git-paw orchestrator` section of `AGENTS.md`. The context git-paw writes at the repository root itself (the orchestrator's) SHALL NOT carry that line.
+
+#### Scenario: Each worker's sidecar disclaims the orchestrator section
+
+- **WHEN** git-paw writes a worker's session-assignment section (at start or on `git paw add`)
+- **THEN** it SHALL contain "You are a coding agent in a worktree; ignore the 'git-paw orchestrator' section of AGENTS.md."
+
+Test: `agents::tests::worktree_section_tells_the_worker_to_ignore_the_orchestrator_section`, `tests/emptied_session_refill_e2e.rs::add_refills_a_live_session_emptied_by_remove`
+
+#### Scenario: The root session's context carries no worker role line
+
+- **WHEN** git-paw writes the orchestrator's context into `.git-paw/AGENTS.local.md` at the repository root (a supervised start)
+- **THEN** that context SHALL NOT contain the worker role line
+- **AND** a worker's sidecar written in the same session SHALL still contain it
+
+Test: `agents::tests::the_repository_roots_own_context_carries_no_worker_role_line`, `tests/emptied_session_refill_e2e.rs::add_refills_a_live_session_emptied_by_remove`

@@ -2,12 +2,12 @@
 
 ### Requirement: Boot block asks for bare helper calls
 
-Every rendered boot block (the standard and the MCP variant) SHALL instruct the agent to run each `.git-paw/scripts/broker.sh` call as a bare command, with no appended exit-status probe (such as `; echo "exit=$?"`) and no pipe, so a permission rule matching the helper's path prefix matches every call. The instruction SHALL describe the call's shape and SHALL NOT name any agent CLI or its permission system.
+Every rendered boot block (the standard and the MCP variant) SHALL open, as its first paragraph after the heading, with an instruction to run each `.git-paw/scripts/broker.sh` call as a bare command, with no appended exit-status probe (such as `; echo "exit=$?"`) and no pipe, so a permission rule matching the helper's path prefix matches every call. The instruction SHALL describe the call's shape and SHALL NOT name any agent CLI or its permission system.
 
 #### Scenario: Standard boot block asks for bare helper calls
 
 - **WHEN** a standard boot block is rendered for any branch
-- **THEN** it SHALL contain an instruction to run each `broker.sh` call bare, without an exit-status probe or a pipe
+- **THEN** its first paragraph after the heading SHALL instruct running each `broker.sh` call bare, without an exit-status probe or a pipe
 - **AND** it SHALL contain no `; echo` appended to any `broker.sh` example
 
 #### Scenario: MCP boot block asks for bare helper calls

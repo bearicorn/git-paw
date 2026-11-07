@@ -29,12 +29,14 @@
 # `--undo` removes exactly what it added.
 #
 # Subcommands implemented (per agent-broker-helper §D1):
-#   status <message>                       — publish agent.status (working)
+#   status [--activity <p>] <message>      — publish agent.status (working)
 #   artifact [--exports a,b] [--files a,b] — publish agent.artifact (done)
 #   blocked <needs> <from>                 — publish agent.blocked
 #   question <text>                        — publish agent.question
-#   intent <summary> <files> [ttl]         — publish agent.intent (ttl default 900s)
-#   poll [since]                           — GET this agent's broker inbox
+#   intent <summary> <files> [ttl] [--region <path>#<kind>=<value>]...
+#                                          — publish agent.intent (ttl default 900s)
+#   poll [since]                           — GET this agent's broker inbox, then
+#                                            print a closing `last_seq: <n>` line
 
 set -u
 
@@ -147,13 +149,22 @@ usage() {
   cat >&2 <<USAGE
 usage: $0 [--agent <id>] <subcommand> [args]
 
-  status <message>                       publish agent.status (status="working", message, modified_files=[])
+  status [--activity <phrase>] <message> publish agent.status (status="working", message, modified_files=[];
+                                         --activity adds a short what-I-am-doing phrase)
   artifact [--exports a,b] [--files a,b] publish agent.artifact (status="done") — code-less DONE fallback
   blocked <needs> <from>                 publish agent.blocked with dependency info
   question <text>                        publish agent.question
   intent <summary> <files> [ttl]         publish agent.intent (files: comma-separated;
-                                         ttl: valid_for_seconds, default ${DEFAULT_INTENT_TTL_SECONDS})
-  poll [since]                           GET <broker>/messages/<agent-id>?since=<n> and print the inbox
+         [--region <path>#<kind>=<value>]...
+                                         ttl: valid_for_seconds, default ${DEFAULT_INTENT_TTL_SECONDS};
+                                         --region scopes a path to a function, class, block or
+                                         range (range value: <start>-<end>); repeatable)
+  poll [since]                           GET <broker>/messages/<agent-id>?since=<n>, print the inbox,
+                                         then a closing "last_seq: <n>" line (the next since)
+
+Run each call bare — no appended exit-status probe and no pipe — so a
+permission rule matching this script's path matches every call. A rejected
+publish already exits non-zero with the broker's error on stderr.
 
 The agent id comes from --agent <id> (the boot block passes the pre-expanded
 branch id) or, absent one, from slugifying the current worktree branch. In the
@@ -175,21 +186,36 @@ publish() {
 }
 
 cmd_status() {
+  local activity="" has_activity=0
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --activity) activity="${2:-}"; has_activity=1; shift 2 || { echo "broker.sh: --activity requires a phrase" >&2; exit 2; } ;;
+      --activity=*) activity="${1#--activity=}"; has_activity=1; shift ;;
+      *) break ;;
+    esac
+  done
+  if [[ "${has_activity}" == 1 && -z "${activity}" ]]; then
+    echo "broker.sh: --activity requires a phrase" >&2
+    exit 2
+  fi
   local msg=$*
   if [[ -z "${msg}" ]]; then
-    echo "usage: $0 status <message>" >&2
+    echo "usage: $0 status [--activity <phrase>] <message>" >&2
     exit 2
   fi
   local agent payload
   agent=$(resolve_agent) || exit $?
-  payload=$("${PY}" -c "$(cat <<'PY'
-import json, sys
+  payload=$(ACTIVITY="${activity}" "${PY}" -c "$(cat <<'PY'
+import json, os, sys
 agent, msg = sys.argv[1], sys.argv[2]
-print(json.dumps({
-    "type": "agent.status",
-    "agent_id": agent,
-    "payload": {"status": "working", "message": msg, "modified_files": []},
-}))
+payload = {"status": "working"}
+# Leave the key out when no activity is given, so the plain payload stays as it was.
+activity = os.environ.get("ACTIVITY", "")
+if activity:
+    payload["activity"] = activity
+payload["message"] = msg
+payload["modified_files"] = []
+print(json.dumps({"type": "agent.status", "agent_id": agent, "payload": payload}))
 PY
 )" "${agent}" "${msg}")
   publish "${payload}"
@@ -271,20 +297,79 @@ PY
 }
 
 cmd_intent() {
-  local summary=${1:-} files=${2:-} ttl=${3:-}
+  # Regions reach python one per line through the environment.
+  local positionals=() regions=""
+  local region
+  while [[ $# -gt 0 ]]; do
+    region=""
+    case "${1}" in
+      --region) [[ $# -ge 2 && -n "${2}" ]] || { echo "broker.sh: --region requires <path>#<kind>=<value>" >&2; exit 2; }
+        region="${2}"; shift 2 ;;
+      --region=*) region="${1#--region=}"; shift ;;
+      *) positionals+=("${1}"); shift; continue ;;
+    esac
+    # Regions travel one per line, so a newline inside one would split it.
+    if [[ "${region}" == *$'\n'* ]]; then
+      echo "broker.sh: --region must not contain a newline" >&2
+      exit 2
+    fi
+    regions+="${region}"$'\n'
+  done
+  local summary=${positionals[0]:-} files=${positionals[1]:-} ttl=${positionals[2]:-}
   if [[ -z "${summary}" || -z "${files}" ]]; then
-    echo "usage: $0 intent <summary> <files> [valid_for_seconds]" >&2
+    echo "usage: $0 intent <summary> <files> [valid_for_seconds] [--region <path>#<kind>=<value>]..." >&2
     echo "  files: comma-separated list of paths the agent is about to touch" >&2
     echo "  valid_for_seconds: defaults to ${DEFAULT_INTENT_TTL_SECONDS}" >&2
+    echo "  --region: kind is function, class, block or range (range value: <start>-<end>)" >&2
     exit 2
   fi
   local agent payload
   agent=$(resolve_agent) || exit $?
-  payload=$(TTL="${ttl}" DEFAULT_TTL="${DEFAULT_INTENT_TTL_SECONDS}" "${PY}" -c "$(cat <<'PY'
+  payload=$(TTL="${ttl}" DEFAULT_TTL="${DEFAULT_INTENT_TTL_SECONDS}" REGIONS="${regions}" "${PY}" -c "$(cat <<'PY'
 import json, os, sys
 agent, summary, files = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def fail(msg):
+    print(f"broker.sh: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+KINDS = ("function", "class", "block", "range")
+
+def parse_region(spec):
+    # A path (or a block anchor) may itself contain "#", so split at the LAST
+    # "#" that opens a "<kind>=" marker; with no such marker, at the last "#".
+    split = -1
+    for i, ch in enumerate(spec):
+        if ch == "#" and any(spec.startswith(k + "=", i + 1) for k in KINDS):
+            split = i
+    if split < 0:
+        split = spec.rfind("#")
+    path, rest = (spec[:split], spec[split + 1:]) if split >= 0 else (spec, "")
+    kind, eq, value = rest.partition("=")
+    if split < 0 or not eq or not path.strip() or not value.strip():
+        fail(f"malformed --region {spec!r}: expected <path>#<kind>=<value>")
+    path, kind, value = path.strip(), kind.strip(), value.strip()
+    if kind in ("function", "class"):
+        return path, {"kind": kind, "name": value}
+    if kind == "block":
+        return path, {"kind": kind, "anchor": value}
+    if kind == "range":
+        start, dash, end = value.partition("-")
+        if not dash or not start.isdigit() or not end.isdigit() or int(start) > int(end):
+            fail(f"malformed --region {spec!r}: a range value is <start>-<end> with start <= end")
+        return path, {"kind": kind, "start_line": int(start), "end_line": int(end)}
+    fail(f"malformed --region {spec!r}: kind must be function, class, block or range")
+
+paths = [p.strip() for p in files.split(",") if p.strip()]
+regions = {}
+for spec in os.environ.get("REGIONS", "").splitlines():
+    if spec.strip():
+        path, region = parse_region(spec)
+        regions.setdefault(path, []).append(region)
+        if path not in paths:
+            paths.append(path)
 payload = {
-    "files": [p.strip() for p in files.split(",") if p.strip()],
+    "files": [{"path": p, "regions": regions[p]} if p in regions else p for p in paths],
     "summary": summary,
 }
 # The broker requires valid_for_seconds on every agent.intent, so an omitted
@@ -294,12 +379,17 @@ ttl = os.environ.get("TTL", "").strip() or os.environ["DEFAULT_TTL"]
 payload["valid_for_seconds"] = int(ttl)
 print(json.dumps({"type": "agent.intent", "agent_id": agent, "payload": payload}))
 PY
-)" "${agent}" "${summary}" "${files}")
+)" "${agent}" "${summary}" "${files}") || exit $?
   publish "${payload}"
 }
 
 cmd_poll() {
   local since=${1:-0}
+  # The cursor goes into the request URL, so only a plain number is accepted.
+  if [[ ! "${since}" =~ ^[0-9]+$ ]]; then
+    echo "broker.sh: poll cursor must be a non-negative integer (got '${since}')" >&2
+    exit 2
+  fi
   local agent
   agent=$(resolve_agent) || exit $?
   # Pipe curl into python via `-c` so the script body does not compete with
@@ -320,6 +410,10 @@ for m in messages:
     print(f"--- {t} from {a} ---")
     print(json.dumps(m.get("payload", {}), indent=2))
     print()
+# Cursor for the next `poll <since>`. Double quotes only here: single quotes
+# inside this $(...) reached python mangled.
+cursor = data.get("last_seq") or 0
+print("last_seq: " + str(cursor))
 PY
 )"
 }

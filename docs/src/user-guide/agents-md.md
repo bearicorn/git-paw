@@ -92,14 +92,28 @@ is absent), between its own markers:
 ```markdown
 <!-- git-paw-orchestrator:start -->
 
-(when a git-paw session is active, you are its orchestrator: read
- .git-paw/skills/orchestrator/SKILL.md and .git-paw/AGENTS.local.md)
+(applies only to the agent session at the repository root — coding agents
+ in worktrees ignore it; when a git-paw session is active, that root session
+ is its orchestrator: read .git-paw/skills/orchestrator/SKILL.md and
+ .git-paw/AGENTS.local.md)
 
 <!-- git-paw-orchestrator:end -->
 ```
 
 It is how the agent you drive the session with discovers the orchestrator
-skill: `AGENTS.md` is the cross-CLI file that agent already reads. The prose
+skill: `AGENTS.md` is the cross-CLI file that agent already reads. Because
+`AGENTS.md` is tracked, every worker worktree checks the section out too, so
+it opens by scoping itself to the root session and telling a coding agent in a
+worktree to ignore it. Each worker's generated `.git-paw/AGENTS.local.md` says
+the same thing from the worker's side.
+
+> **Upgrading:** only `git paw init` writes this section, so a repository
+> initialised by an earlier binary keeps the old, unscoped wording — which
+> worktree agents can read as their own. Re-run `git paw init` once after
+> upgrading; `git paw doctor` flags an out-of-date section in its
+> **orchestrator pointer** row until you do.
+
+The prose
 comes from a bundled, project-agnostic asset and carries no broker URL, secret,
 toolchain or vendor name. Re-running `git paw init` replaces the section in
 place, leaving everything outside the markers byte-identical. Unlike the

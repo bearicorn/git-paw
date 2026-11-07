@@ -121,12 +121,13 @@ pub(crate) fn launch_session(
 /// launch paths make before deciding to reattach, revive or recover.
 pub(crate) fn session_has_live_agents(name: &str, existing: &Session) -> bool {
     use crate::terminal::TerminalBackend;
+    let probed = crate::terminal::tmux::TmuxBackend::new().liveness(
+        name,
+        existing.created_at,
+        existing.agent_pane_offset(),
+    );
     matches!(
-        crate::terminal::tmux::TmuxBackend::new().liveness(
-            name,
-            existing.created_at,
-            existing.agent_pane_offset()
-        ),
+        existing.reconcile_liveness(probed),
         crate::terminal::SessionLiveness::Alive
     )
 }

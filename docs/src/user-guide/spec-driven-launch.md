@@ -90,6 +90,33 @@ The `paw_cli` field overrides the CLI for this specific spec. If omitted, the de
 
 Supplementary spec files in `specs/<name>/spec.md` are appended to the prompt with section headers. File ownership can be declared with "Files owned:" or "Owned files:" followed by a markdown list.
 
+#### Workflow commands in worktrees
+
+An OpenSpec boot task prompt tells the agent to run `/opsx:apply <change>`. The
+agent's CLI must be able to find that command's definition **from inside its
+worktree**. A worktree is populated from a commit, so a definition that lives
+in a gitignored or uncommitted CLI directory at the repository root never
+reaches a sibling worktree, and the agent improvises a workflow instead.
+
+Either commit the definitions, use `worktree_placement = "child"` (the CLI's
+search from a child worktree still finds the root copy), or have git-paw copy
+them into every new worktree with `[worktree.env] copy`:
+
+```toml
+[worktree.env]
+copy = [
+  ".claude/commands/opsx/apply.md",
+  ".claude/commands/opsx/propose.md",
+]
+```
+
+`copy` takes **files, not directories**, so list each command file your agents
+need (the paths above are one CLI's layout — use wherever yours keeps its
+command files). git-paw only copies the files you name; it never writes any
+agent CLI's settings or command files itself. `git paw doctor`'s
+**spec workflow** row checks this: ✓ when the definitions reach every worktree,
+⚠ when they do not or when it cannot tell for your CLI.
+
 ### Markdown Format
 
 Flat `.md` files in the specs directory. Each file uses YAML frontmatter to control status and branch mapping.

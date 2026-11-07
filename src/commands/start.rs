@@ -96,7 +96,12 @@ pub fn start(
         && !invalidate_if_stale(&repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
-        return revive_existing(&repo_root, existing, &effective, out);
+        let has_selection = branches_flag.is_some();
+        if let Some(outcome) =
+            handle_existing_session(&repo_root, existing, &effective, has_selection, out)?
+        {
+            return Ok(outcome);
+        }
     }
 
     // Fresh launch (or dry-run preview)
@@ -606,7 +611,12 @@ pub fn start_with_specs(
         && !invalidate_if_stale(&repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
-        return revive_existing(&repo_root, existing, &effective, out);
+        let has_selection = *spec_mode != SpecMode::None;
+        if let Some(outcome) =
+            handle_existing_session(&repo_root, existing, &effective, has_selection, out)?
+        {
+            return Ok(outcome);
+        }
     }
 
     // Fresh launch from specs (or dry-run preview)
@@ -1078,6 +1088,83 @@ pub(crate) fn revive_existing(
     }
 }
 
+/// What `start` does with an existing (not stale) session it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExistingSessionAction {
+    /// Restart, recover or report it, as [`revive_existing`] does.
+    Revive,
+    /// It records no agents and is stopped: discard it and launch the
+    /// selection fresh.
+    Replace,
+    /// It records no agents and is running: refuse, naming `git paw add`.
+    Refuse,
+}
+
+/// Decides [`ExistingSessionAction`]. Launch-selection flags (`--branches`,
+/// `--specs`, `--from-all-specs`) are never silently dropped on a session that
+/// has no agents to revive; with agents, or without a selection, `start`
+/// behaves as it always has.
+pub(crate) fn existing_session_action(
+    recorded_agents: usize,
+    has_selection: bool,
+    effective: &SessionStatus,
+) -> ExistingSessionAction {
+    if recorded_agents > 0 || !has_selection {
+        return ExistingSessionAction::Revive;
+    }
+    match effective {
+        SessionStatus::Stopped => ExistingSessionAction::Replace,
+        SessionStatus::Active | SessionStatus::Paused => ExistingSessionAction::Refuse,
+    }
+}
+
+/// The one-line notice `start` prints when it revives a session that has
+/// agents and so does not apply the launch selection it was given.
+pub(crate) fn selection_ignored_notice(session_name: &str) -> String {
+    format!(
+        "notice: session '{session_name}' already has agents, so the launch selection was not \
+         applied — add more with `git paw add <branch>` or `git paw add --from-spec <name>`"
+    )
+}
+
+/// Applies [`existing_session_action`] to `existing`. Returns the outcome when
+/// the session was revived, `None` when it was discarded and the caller should
+/// launch the selection fresh.
+///
+/// # Errors
+///
+/// Returns an error naming `git paw add` when a running session with no agents
+/// is given a selection, or when reviving or discarding the session fails.
+pub(crate) fn handle_existing_session(
+    repo_root: &Path,
+    existing: &Session,
+    effective: &SessionStatus,
+    has_selection: bool,
+    out: &mut dyn Output,
+) -> Result<Option<LaunchOutcome>, PawError> {
+    match existing_session_action(existing.worktrees.len(), has_selection, effective) {
+        ExistingSessionAction::Revive => {
+            if has_selection {
+                out.warn(&selection_ignored_notice(&existing.session_name));
+            }
+            revive_existing(repo_root, existing, effective, out).map(Some)
+        }
+        ExistingSessionAction::Replace => {
+            out.line(&format!(
+                "Session '{}' had no agents; replacing it with the selection...",
+                existing.session_name
+            ));
+            super::purge::discard_session(repo_root, existing, out)?;
+            Ok(None)
+        }
+        ExistingSessionAction::Refuse => Err(PawError::SessionError(format!(
+            "session '{}' is running with no agents — add them with `git paw add <branch>` \
+             or `git paw add --from-spec <name>`",
+            existing.session_name
+        ))),
+    }
+}
+
 /// Restarts a paused session: recreates the broker host (and the dashboard
 /// pane, only when none is running) and updates status to `Active`. Skips
 /// worktree creation, CLI spawning, and boot-prompt injection — coding-agent
@@ -1417,4 +1504,76 @@ fn submit_held_boot_prompts(
     // After the blocked report, so a user reading stderr sees what was held
     // before the launch blocks waiting for the panes that were not.
     submit_entry_points(backend, &session_name, pending_entry_points, out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExistingSessionAction, existing_session_action};
+    use crate::session::SessionStatus;
+
+    // tmux-orchestration / *start never ignores launch selection on a session
+    // with no agents*: each scenario's decision.
+    #[test]
+    fn existing_session_action_table() {
+        use ExistingSessionAction::{Refuse, Replace, Revive};
+        let cases = [
+            // (agents, selection, status, expected, scenario)
+            (
+                0,
+                true,
+                SessionStatus::Stopped,
+                Replace,
+                "stopped empty + selection",
+            ),
+            (
+                0,
+                true,
+                SessionStatus::Active,
+                Refuse,
+                "live empty + selection",
+            ),
+            (
+                0,
+                true,
+                SessionStatus::Paused,
+                Refuse,
+                "paused empty + selection",
+            ),
+            (
+                0,
+                false,
+                SessionStatus::Stopped,
+                Revive,
+                "no selection keeps recover",
+            ),
+            (
+                0,
+                false,
+                SessionStatus::Active,
+                Revive,
+                "no selection keeps reattach",
+            ),
+            (
+                2,
+                true,
+                SessionStatus::Stopped,
+                Revive,
+                "agents keep recover",
+            ),
+            (
+                2,
+                true,
+                SessionStatus::Active,
+                Revive,
+                "agents keep reattach",
+            ),
+        ];
+        for (agents, selection, status, expected, scenario) in cases {
+            assert_eq!(
+                existing_session_action(agents, selection, &status),
+                expected,
+                "{scenario}"
+            );
+        }
+    }
 }

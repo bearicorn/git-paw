@@ -43,7 +43,9 @@ message and publish it as `payload.activity`; without it the payload SHALL omit
 `activity`. `broker.sh intent` SHALL accept a repeatable
 `--region <path>#<kind>=<value>` (`kind` one of `function`, `class`, `block`,
 `range`; a `range` value is `<start>-<end>`) and publish that path as a region
-object; a malformed region SHALL be rejected (non-zero exit, stderr) unpublished.
+object; a malformed region, or one containing a newline, SHALL be rejected
+(non-zero exit, stderr) unpublished. The value SHALL be split at the last `#`
+that opens a `<kind>=` marker, so a `#` inside the path or a block anchor is kept.
 
 The `broker.sh intent` subcommand SHALL always publish a `valid_for_seconds`
 field, because the broker requires it: when the caller supplies no TTL the
@@ -171,6 +173,22 @@ done.
 - **THEN** the helper SHALL exit non-zero with a diagnostic on stderr
 - **AND** SHALL NOT publish anything
 
+Test: `tests/helper_publish_contract.rs::a_malformed_region_is_refused_unpublished`
+
+#### Scenario: a region containing a newline is refused
+
+- **WHEN** `broker.sh intent` is given a `--region` value containing a newline
+- **THEN** the helper SHALL exit non-zero naming the newline and SHALL NOT publish anything
+
+Test: `tests/helper_publish_contract.rs::malformed_region_newline_and_poll_cursor_are_refused`
+
+#### Scenario: a region whose path contains # splits at the kind marker
+
+- **WHEN** `broker.sh intent docs docs/c#.md --region 'docs/c#.md#block=## Setup'` is invoked
+- **THEN** the published file SHALL be `docs/c#.md` with region `{kind: "block", anchor: "## Setup"}`
+
+Test: `tests/helper_publish_contract.rs::a_region_path_containing_a_hash_keeps_it`
+
 ### Requirement: Helper poll subcommand
 
 The `broker.sh` helper SHALL expose a `poll` subcommand that performs a
@@ -179,7 +197,9 @@ artifacts and any feedback/inbox messages routed to it. The read SHALL
 target `GET <broker-url>/messages/<agent-id>` and SHALL accept an
 optional `since` cursor. After the messages it SHALL print a
 `last_seq: <n>` line carrying the broker's `last_seq`, so the agent can pass
-it as the next `since` without reading the raw response.
+it as the next `since` without reading the raw response. A `since` cursor that
+is not a non-negative integer SHALL be rejected (non-zero exit, stderr) before
+any request is made.
 
 #### Scenario: poll reads the agent inbox
 
@@ -198,3 +218,12 @@ it as the next `since` without reading the raw response.
 - **GIVEN** a broker whose `/messages/<agent-id>` response carries `last_seq = 7`
 - **WHEN** `broker.sh poll` is invoked
 - **THEN** its output SHALL end with the line `last_seq: 7`
+
+Test: `tests/helper_publish_contract.rs::poll_prints_the_next_cursor`
+
+#### Scenario: poll refuses a non-numeric cursor
+
+- **WHEN** `broker.sh poll abc` (or any cursor that is not a non-negative integer) is invoked
+- **THEN** the helper SHALL exit non-zero with a diagnostic and SHALL NOT query the broker
+
+Test: `tests/helper_publish_contract.rs::malformed_region_newline_and_poll_cursor_are_refused`

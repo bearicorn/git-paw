@@ -166,7 +166,7 @@ Every coordination message the orchestrator and its agents exchange goes through
 
 Nobody hand-writes these envelopes:
 
-- The coding agents publish theirs through `.git-paw/scripts/broker.sh` (`status`, `artifact`, `blocked`, `question`, `intent`) or the MCP publish tools.
+- The coding agents publish theirs through `.git-paw/scripts/broker.sh` (`status`, with `--activity` for a what-I-am-doing phrase; `artifact`; `blocked`; `question`; `intent`, with `--region` to claim parts of a file) or the MCP publish tools, and read their inbox with `broker.sh poll`. Each helper call runs bare (no exit-status probe, no pipe), so one path-scoped permission rule matches it.
 - The orchestrator publishes through `.git-paw/scripts/sweep.sh` (`status-publish`, `verified`, `feedback-gate`, `conflict-ack`, `learn`, `answer`, `advanced-main`) or `broker.sh --agent supervisor` (`question`, `intent`).
 - The filesystem watcher and the post-commit hook publish `agent.status` and `agent.artifact` automatically.
 

@@ -21,15 +21,18 @@ merges it never confirmed landed.
   reachability, the row is ⚠ (was ✓), with a remedy naming `[worktree.env] copy`. The
   spec-driven-launch guide documents provisioning workflow command files that way. git-paw still
   writes no agent CLI settings or command files.
-- **Group D — an emptied session can be refilled.** A live session with no coding-agent pane is
-  alive (not "agents exited"), so `git paw add` works on it. `git paw start` with
+- **Group D — an emptied session can be refilled.** A live session whose receipt records zero
+  agents is alive (not "agents exited"), so `git paw add` works on it; a session that still records
+  agents whose panes all closed stays "agents exited", so `start` recovers it. The pane probe stays
+  receipt-blind; the receipt decides. `git paw start` with
   `--branches` / `--specs` / `--from-all-specs` against a session recording zero agents no longer
   ignores the flags: a stopped one is discarded and the selection launched fresh; a live one is
   refused with an error naming `git paw add`.
 - **Group E — merges confirmed before archive.** The orchestrator skill's merge loop checks
   `git merge-base --is-ancestor <tip> HEAD` after each fast-forward, before archiving or
   publishing; forbids piping a must-succeed step; runs the spec archive only after that check; and
-  re-runs `{{TEST_COMMAND}}` after an archive that adds a capability.
+  re-runs `{{TEST_COMMAND}}` after any archive step that writes to the tracked tree, and names
+  no literal target or agent branch.
 
 ## Capabilities
 
@@ -45,7 +48,7 @@ None.
 - `boot-block`: the boot block asks for bare helper calls.
 - `core-init`: the orchestrator pointer section is scoped to the root session.
 - `preflight-diagnostics`: an unverified spec-workflow CLI is ⚠ with a `[worktree.env] copy` remedy.
-- `session-state`: a live session with no coding-agent pane is alive.
+- `session-state`: a live session whose receipt records zero agents is alive.
 - `git-add-remove-branch`: `add` works on a live session with zero agents.
 - `tmux-orchestration`: `start` never silently ignores launch-selection flags on a zero-agent session.
 
@@ -55,10 +58,11 @@ None.
   `assets/scripts/broker.sh`, `assets/boot-block-template.md`, `assets/boot-block-mcp-template.md`
   (if it carries the helper paragraph), `assets/agents-md-orchestrator-section.md`,
   `assets/agent-skills/orchestrator.md`.
-- **Code:** `src/doctor.rs` (`check_spec_workflow`), `src/tmux/session.rs`
-  (`session_liveness_for_with` / `has_live_agent_pane_with`), `src/commands/start.rs` (`start`,
-  `start_with_specs`, `revive_existing` callers), `src/commands/add.rs` (only if the liveness change
-  does not already admit the session).
+- **Code:** `src/doctor.rs` (`check_spec_workflow`, hygiene probe), `src/session.rs`
+  (`Session::reconcile_liveness`, applied by `src/commands/helpers.rs` `session_has_live_agents`,
+  `status`, `pause` and doctor), `src/commands/start.rs` (`start`, `start_with_specs`,
+  `revive_existing` callers), `src/commands/supervisor.rs`, `src/agents.rs` (worker role line, not
+  written for the root session's own context).
 - **Tests pinning text that changes:** `src/skills.rs` (`embedded_coordination_contains_all_operations`,
   the "When main advances" `/messages/{{BRANCH_ID}}` assertion), `src/agents.rs`
   (`embedded_coordination_still_contains_optin_operations`, orchestrator pointer tests),

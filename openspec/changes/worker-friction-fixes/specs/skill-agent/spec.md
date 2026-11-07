@@ -158,11 +158,39 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
 - **THEN** the activity example uses `broker.sh status --activity`
 - **AND** the region example uses `broker.sh intent` with `--region`
 
+### Requirement: Per-CLI compact mechanism table
+
+The skill SHALL include a small table identifying the
+compact / clear mechanism per supported CLI. The table SHALL
+include an explicit entry for `claude` and a generic "other" row
+directing agents to look for their CLI's equivalent. It SHALL NOT
+list a name one project chose for its own `[clis.<name>]` entry
+(such as `claude-oss`): the exported skill is project-agnostic.
+
+#### Scenario: Table includes claude and claude-oss explicitly
+
+- **WHEN** the per-CLI table in the section is read
+- **THEN** the table SHALL contain one row for `claude` naming the
+  compact and clear command slash forms
+- **AND** SHALL NOT contain a row for `claude-oss`, a project's own
+  CLI variant name (the scenario keeps its earlier name so the
+  archive can match it)
+
+Test: `skills::tests::coordination_skill_per_cli_mechanism_table`, `tests/coordination_helper_only_skill_content.rs::coordination_skill_carries_no_git_paw_history_or_variant_names`
+
+#### Scenario: Generic "other" row points users at their CLI's equivalent
+
+- **WHEN** the per-CLI table is read by a user on a CLI not
+  explicitly listed
+- **THEN** the table SHALL include a fallback row directing
+  them to look for the CLI's `/compact`, `/save`, or `/reset`
+  equivalent
+
 ## ADDED Requirements
 
 ### Requirement: Orchestrator skill confirms a merge landed before archiving
 
-The orchestrator skill's merge loop SHALL, after each fast-forward, check that the branch tip is an ancestor of `HEAD` (`git merge-base --is-ancestor <tip> HEAD`) before archiving a spec or publishing `agent.advanced-main`; run the spec archive only after that check; re-run `{{TEST_COMMAND}}` after an archive that adds a capability; and forbid piping a must-succeed git or test step. Wording SHALL stay project-agnostic.
+The orchestrator skill's merge loop SHALL, after each fast-forward, check that the branch tip is an ancestor of `HEAD` (`git merge-base --is-ancestor <tip> HEAD`) before archiving a spec or publishing `agent.advanced-main`; run the spec archive only after that check; re-run `{{TEST_COMMAND}}` after any archive step that writes to the tracked tree; and forbid piping a must-succeed step. Wording SHALL stay project-agnostic: no hardcoded target or agent branch names.
 
 #### Scenario: Ancestor check precedes archive and publish
 
@@ -171,17 +199,26 @@ The orchestrator skill's merge loop SHALL, after each fast-forward, check that t
 - **AND** that check appears before the archive step and before the `advanced-main` publish
 - **AND** it says a failed check means the merge did not land: archive nothing, publish nothing
 
-#### Scenario: Archive adding a capability re-runs the tests
+Test: `tests/orchestrator_skill_content.rs::merge_landing_is_checked_before_archive_and_publish`
+
+#### Scenario: An archive writing the tracked tree re-runs the tests
 
 - **WHEN** the same section is inspected
-- **THEN** it instructs re-running `{{TEST_COMMAND}}` after an archive that adds a new capability
+- **THEN** it instructs re-running `{{TEST_COMMAND}}` after any archive step that writes to the tracked tree
+
+Test: `tests/orchestrator_skill_content.rs::an_archive_writing_the_tracked_tree_reruns_the_tests`
 
 #### Scenario: Must-succeed steps are not piped
 
 - **WHEN** the same section is inspected
 - **THEN** it states that a must-succeed git or test step is never piped, because a pipeline's exit status is its last stage's
 
+Test: `tests/orchestrator_skill_content.rs::must_succeed_steps_are_never_piped`
+
 #### Scenario: Merge-landing steps stay project-agnostic
 
 - **WHEN** the rendered orchestrator skill is audited by `tests/lang_agnostic_skill_audit.rs`
 - **THEN** the audit passes and the new steps name no stack-specific command
+- **AND** the merge loop's commands name no literal target branch (such as `main`) or agent-branch prefix (such as `feat/`)
+
+Test: `tests/lang_agnostic_skill_audit.rs::exported_orchestrator_skill_passes_the_audit_for_every_backend`, `tests/orchestrator_skill_content.rs::merge_loop_names_no_literal_branch`

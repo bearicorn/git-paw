@@ -361,6 +361,34 @@ What it does:
 agent passively: its heartbeat stops, and the supervisor drops it from
 its coordination scope on the next `/status` poll.
 
+### Refilling an emptied session
+
+Removing the **last** agent leaves the session running: its dashboard and
+broker keep serving, and `git paw status` keeps it `🟢 active` (an empty
+session is not one whose agents exited). Refill it with `git paw add`:
+
+```bash
+git paw remove feat/a      # the last agent
+git paw add feat/b         # attaches to the same running session
+```
+
+`git paw start` with a launch selection (`--branches`, `--specs`,
+`--from-all-specs`) never silently drops that selection on a session that
+records no agents:
+
+- a **running** (or paused) empty session is left untouched and the command
+  fails with a pointer to `git paw add`;
+- a **stopped** empty session has nothing to recover, so it is discarded and
+  a fresh session launches the selection (`Session '<name>' had no agents;
+  replacing it with the selection...`).
+
+Without a selection flag, or on a session that still has agents, `start`
+behaves as before: it reattaches, restarts or recovers. When it does that
+despite a selection flag, it says so in one line (`notice: session '<name>'
+already has agents, so the launch selection was not applied — add more with
+git paw add ...`) rather than dropping the flag silently. `--unattended`, which
+binds a drive loop to the session as it stands, is unaffected.
+
 > **Scope:** `add` / `remove` operate on **every** live session — bare,
 > spec-driven and supervisor-mode alike. Every session git-paw builds uses
 > the agent grid, which is the layout that can be re-tiled incrementally for
