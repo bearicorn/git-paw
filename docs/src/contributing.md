@@ -47,6 +47,9 @@ cargo build --release
 
 # Install locally
 cargo install --path .
+
+# Run from source without installing
+cargo run -- start
 ```
 
 ## Testing

@@ -23,6 +23,23 @@ commits normally, mid-session.
 > injection to a gitignored sidecar removes the reason `assume-unchanged`
 > existed: the tracked file is never touched, so it is never hidden.
 
+## Pointing your CLI at AGENTS.md
+
+git-paw uses `AGENTS.md`, the Linux Foundation standard for AI agent instructions, as the agent instruction file. Point a CLI that reads a different file at it without copying content:
+
+- **Claude Code** reads `CLAUDE.md` and supports imports. Make `@AGENTS.md` the first line of a `CLAUDE.md`, then add any machine-local notes below it:
+
+  ```markdown
+  @AGENTS.md
+
+  # personal, machine-local notes (optional)
+  ```
+
+  The import beats a symlink: it stays in sync with `AGENTS.md`, it survives tools that rewrite `CLAUDE.md` (a symlink gets replaced by them), and it can carry CLI-specific additions.
+- **A CLI with no import syntax** that reads a fixed file (Gemini reads `GEMINI.md`) can use a symlink: `ln -s AGENTS.md GEMINI.md`.
+
+Add the local `CLAUDE.md` and any symlinks to `.gitignore` so they stay per-developer.
+
 ## Boot-Prompt-Full-Body Model
 
 Earlier versions of git-paw embedded a condensed spec excerpt inside the

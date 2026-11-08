@@ -248,7 +248,7 @@ they grow stale.
 To add a new AI CLI to the auto-detection list:
 
 1. Add the binary name to `KNOWN_CLIS` in `src/detect.rs`
-2. Add a row to the "Supported AI CLIs" table in `README.md` and in `docs/src/supported-clis.md`
+2. Add the binary to the `## Supported CLIs` line in `README.md` and a row to the table in `docs/src/supported-clis.md`
 3. Add a test case in the detection tests
 4. Submit a PR with a link to the CLI's homepage
 

@@ -13,18 +13,20 @@ docs lag its behavior.
 ## The four doc layers (all must stay consistent)
 
 1. **`--help`** — every command/flag has `about` + `long_about` + examples (`src/cli.rs`).
-2. **README** — the landing page (CLI table, feature list, quick starts).
+2. **README** — the landing page (highlights, command table, quick start).
 3. **mdBook** — the user guide under `docs/src/`, one chapter per feature.
 4. **Rustdoc + configuration reference** — every public item `///`-documented; every config field in
    `docs/src/configuration/`.
 
 ## What each change type must update
 
-- **New/changed CLI command or flag** → `--help` + README CLI table + the relevant mdBook chapter +
+- **New CLI command** → `--help` + a README command-table row + the relevant mdBook chapter +
   `cli-reference`.
+- **New/changed CLI flag** → `--help` + `docs/src/cli-reference.md` (+ the relevant mdBook chapter);
+  not the README.
 - **New/changed config field** → the configuration reference + a commented example in the init default.
 - **New capability/feature** → a mdBook chapter (+ cross-link from the user-guide index) + a README
-  feature entry.
+  Highlights line when it adds a capability family.
 - **Module/architecture change** → `docs/src/architecture.md`.
 - **Removed command/flag** → purge it from **all** layers (no phantom references — e.g. the
   `git paw resume` / deprecated `--from-specs` cases).

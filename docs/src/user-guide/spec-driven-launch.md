@@ -344,6 +344,8 @@ git paw start --from-all-specs
 git paw start --from-all-specs --no-supervisor
 ```
 
+A spec-mode launch without supervisor mode prints a warning when it finds uncommitted changes in the selected specs; `git paw start --from-all-specs --force` bypasses that warning. The check does not run under supervisor mode, so `start --force` has no effect under supervisor mode.
+
 When `[broker] enabled = true` — the broker defaults to disabled and must be
 opted into explicitly in config (supervisor mode does not turn it on for
 you) — each spec agent pane receives a boot block via `tmux send-keys`

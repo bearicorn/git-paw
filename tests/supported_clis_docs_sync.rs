@@ -1,14 +1,10 @@
-//! Guard: the Supported AI CLIs tables must match `src/detect.rs`'s roster.
+//! Guard: the Supported AI CLIs lists must match `src/detect.rs`'s roster.
 //!
-//! Both the README's Supported AI CLIs table and the mdBook
-//! `docs/src/supported-clis.md` table advertise which binaries git-paw
-//! auto-detects. Either can silently drift when the roster changes — a binary
-//! added to `KNOWN_CLIS` but not to the tables under-advertises support, and a
-//! binary dropped from the roster but left in a table promises detection that
-//! no longer happens (exactly what the `cursor` → `cursor-agent` move would
-//! have left behind). This test is the standing guard in both directions:
-//! every roster binary appears in each table, and neither table lists a binary
-//! the roster does not carry.
+//! The README's one-line Supported CLIs list and the mdBook
+//! `docs/src/supported-clis.md` table can drift from the roster: a missing
+//! binary under-advertises support, and one left after removal promises
+//! detection that no longer happens (as the `cursor` → `cursor-agent` move
+//! would have). The guard checks both directions for both lists.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -79,6 +75,32 @@ fn binary_column(label: &str, content: &str) -> BTreeSet<String> {
     binaries
 }
 
+/// The `` `<binary>` `` code spans on the first non-empty line after
+/// `## Supported CLIs`. Only that line is read, so code spans elsewhere in
+/// the README cannot count as advertised binaries.
+fn readme_cli_line(content: &str) -> BTreeSet<String> {
+    let mut lines = content.lines();
+    assert!(
+        lines.by_ref().any(|l| l.trim() == "## Supported CLIs"),
+        "README.md: expected a `## Supported CLIs` section"
+    );
+    let line = lines
+        .find(|l| !l.trim().is_empty())
+        .expect("README.md: the Supported CLIs section is empty");
+
+    let binaries: BTreeSet<String> = line
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|span| span.trim().to_string())
+        .collect();
+    assert!(
+        !binaries.is_empty(),
+        "README.md: parsed no binary code spans from the Supported CLIs line {line:?}"
+    );
+    binaries
+}
+
 /// Splits one markdown table row into its trimmed cells.
 fn cells(row: &str) -> Vec<String> {
     row.trim()
@@ -101,19 +123,22 @@ fn readme_and_book_tables_match_known_cli_roster() {
         "the known-CLI roster should carry Cursor's agent CLI as `cursor-agent`"
     );
 
-    let tables = [
-        ("README.md", root.join("README.md")),
+    let read = |rel: &str| {
+        let path = root.join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    let lists = [
+        ("README.md", readme_cli_line(&read("README.md"))),
         (
             "docs/src/supported-clis.md",
-            root.join("docs/src/supported-clis.md"),
+            binary_column(
+                "docs/src/supported-clis.md",
+                &read("docs/src/supported-clis.md"),
+            ),
         ),
     ];
 
-    for (label, path) in tables {
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let listed = binary_column(label, &content);
-
+    for (label, listed) in lists {
         let missing: Vec<&String> = roster.difference(&listed).collect();
         assert!(
             missing.is_empty(),

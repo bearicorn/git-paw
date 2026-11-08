@@ -139,6 +139,14 @@ git paw start --no-supervisor --cli claude --branches feat/quick-fix
 
 The flag only affects the current session. Your config is untouched, so the next `git paw start` returns to supervisor mode as configured.
 
+A spec-mode launch without supervisor mode prints a warning when the selected specs have uncommitted changes. Pass `--force` to bypass it:
+
+```bash
+git paw start --no-supervisor --from-all-specs --force
+```
+
+The check does not run under supervisor mode, so `start --force` has no effect under supervisor mode.
+
 ## Key Config Knobs
 
 The full reference lives in [Configuration → Supervisor](configuration/README.md#supervisor). The fields you will reach for most often:
