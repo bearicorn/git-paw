@@ -74,6 +74,15 @@ Each helper SHALL be invocable at a single stable path, so that a permission
 rule scoped to that exact path can name it. Publishing through a helper SHALL
 NOT require a broad `curl *` permission grant.
 
+`broker.sh status` SHALL accept an optional `--activity <phrase>` before the
+message and publish it as `payload.activity`; without it the payload SHALL omit
+`activity`. `broker.sh intent` SHALL accept a repeatable
+`--region <path>#<kind>=<value>` (`kind` one of `function`, `class`, `block`,
+`range`; a `range` value is `<start>-<end>`) and publish that path as a region
+object; a malformed region, or one containing a newline, SHALL be rejected
+(non-zero exit, stderr) unpublished. The value SHALL be split at the last `#`
+that opens a `<kind>=` marker, so a `#` inside the path or a block anchor is kept.
+
 The `broker.sh intent` subcommand SHALL always publish a `valid_for_seconds`
 field, because the broker requires it: when the caller supplies no TTL the
 helper SHALL send a default of `900` seconds. Every publish subcommand of both
@@ -179,13 +188,54 @@ done.
   permission rule scoped to the exact path can name it
 - **AND** no broad `curl *` grant SHALL be required to publish the status
 
+#### Scenario: status carries an activity phrase
+
+- **WHEN** `broker.sh status --activity "running the test suite" "checking gates"` is invoked
+- **THEN** the published `agent.status` SHALL carry `payload.activity = "running the test suite"`
+  and `payload.message = "checking gates"`
+- **AND** `broker.sh status booting` SHALL publish a payload with no `activity` key
+
+#### Scenario: intent carries declared regions
+
+- **WHEN** `broker.sh intent "harden token checks" src/a.rs --region 'src/a.rs#function=validate_token' --region 'src/a.rs#range=10-40'` is invoked
+- **THEN** the published `payload.files` SHALL contain one object with `path = "src/a.rs"` and two
+  regions: `{kind: "function", name: "validate_token"}` and
+  `{kind: "range", start_line: 10, end_line: 40}`
+- **AND** a file listed without a `--region` SHALL stay a bare path string
+
+#### Scenario: a malformed region is refused
+
+- **WHEN** `broker.sh intent "x" src/a.rs --region 'src/a.rs#loop=foo'` is invoked
+- **THEN** the helper SHALL exit non-zero with a diagnostic on stderr
+- **AND** SHALL NOT publish anything
+
+Test: `tests/helper_publish_contract.rs::a_malformed_region_is_refused_unpublished`
+
+#### Scenario: a region containing a newline is refused
+
+- **WHEN** `broker.sh intent` is given a `--region` value containing a newline
+- **THEN** the helper SHALL exit non-zero naming the newline and SHALL NOT publish anything
+
+Test: `tests/helper_publish_contract.rs::malformed_region_newline_and_poll_cursor_are_refused`
+
+#### Scenario: a region whose path contains # splits at the kind marker
+
+- **WHEN** `broker.sh intent docs docs/c#.md --region 'docs/c#.md#block=## Setup'` is invoked
+- **THEN** the published file SHALL be `docs/c#.md` with region `{kind: "block", anchor: "## Setup"}`
+
+Test: `tests/helper_publish_contract.rs::a_region_path_containing_a_hash_keeps_it`
+
 ### Requirement: Helper poll subcommand
 
 The `broker.sh` helper SHALL expose a `poll` subcommand that performs a
 read of the agent's own broker inbox so the agent can observe peer
 artifacts and any feedback/inbox messages routed to it. The read SHALL
 target `GET <broker-url>/messages/<agent-id>` and SHALL accept an
-optional `since` cursor.
+optional `since` cursor. After the messages it SHALL print a
+`last_seq: <n>` line carrying the broker's `last_seq`, so the agent can pass
+it as the next `since` without reading the raw response. A `since` cursor that
+is not a non-negative integer SHALL be rejected (non-zero exit, stderr) before
+any request is made.
 
 #### Scenario: poll reads the agent inbox
 
@@ -198,6 +248,21 @@ optional `since` cursor.
 - **WHEN** `broker.sh poll <n>` is invoked
 - **THEN** the request SHALL include `since=<n>` so only messages newer
   than the cursor are returned
+
+#### Scenario: poll prints the next cursor
+
+- **GIVEN** a broker whose `/messages/<agent-id>` response carries `last_seq = 7`
+- **WHEN** `broker.sh poll` is invoked
+- **THEN** its output SHALL end with the line `last_seq: 7`
+
+Test: `tests/helper_publish_contract.rs::poll_prints_the_next_cursor`
+
+#### Scenario: poll refuses a non-numeric cursor
+
+- **WHEN** `broker.sh poll abc` (or any cursor that is not a non-negative integer) is invoked
+- **THEN** the helper SHALL exit non-zero with a diagnostic and SHALL NOT query the broker
+
+Test: `tests/helper_publish_contract.rs::malformed_region_newline_and_poll_cursor_are_refused`
 
 ### Requirement: Helper convention discipline
 

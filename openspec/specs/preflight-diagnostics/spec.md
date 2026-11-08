@@ -514,7 +514,7 @@ Test: `cli_setup::doctor::tests::an_unparseable_file_is_reported_without_its_con
 
 ### Requirement: Spec-workflow reachability check
 
-`git paw doctor` SHALL include, in its "Spec system" group, a check that the workflow command the boot task prompt instructs spec-driven agents to run is reachable from the repository's worktrees. The check SHALL be a pure function of a probe recording: the resolved spec format, the workflow command that format's task prompt names (if any), the configured worktree placement (`PawConfig::worktree_placement()`), the effective spec-driven worker CLIs — the deduplicated list the discovered specs resolve to, as already surfaced by the spec-worker CLI check, empty when no specs are discovered — and, for each of those CLIs and each location where that CLI's definition of the command can live (as recorded in a per-CLI table with a generic unknown fallback), whether the file exists at the main checkout and whether it is committed there. "Committed" SHALL mean present at the main checkout's `HEAD`, because `git worktree add` populates a new worktree from a commit: a definition that is ignored, untracked, or merely staged does not travel. Each resolved CLI SHALL be judged on its own:
+`git paw doctor` SHALL include, in its "Spec system" group, a check that the workflow command the boot task prompt instructs spec-driven agents to run is reachable from the repository's worktrees. The check SHALL be a pure function of a probe recording: the resolved spec format, the workflow command that format's task prompt names (if any), the configured worktree placement (`PawConfig::worktree_placement()`), the effective spec-driven worker CLIs — the deduplicated list the discovered specs resolve to, as already surfaced by the spec-worker CLI check, empty when no specs are discovered — and, for each of those CLIs and each location where that CLI's definition of the command can live (as recorded in a table keyed by the CLI's provider family — so a `[clis.<name>]` entry declaring a `family` uses that family's locations — with a generic unknown fallback), whether the file exists at the main checkout and whether it is committed there. "Committed" SHALL mean present at the main checkout's `HEAD`, because `git worktree add` populates a new worktree from a commit: a definition that is ignored, untracked, or merely staged does not travel. Each resolved CLI SHALL be judged on its own:
 
 - reachable when a definition is committed, or when placement is `child` and a definition exists at the main checkout;
 - unreachable when its locations are known and either placement is `sibling` and every definition found is uncommitted, or no definition is found;
@@ -524,7 +524,8 @@ The verdict SHALL be:
 
 - `Ok` (not applicable) when the format's task prompt names no workflow command, or when no spec-driven worker CLI resolves (an empty list);
 - `Warn` when at least one resolved CLI is unreachable — naming the command, every unreachable CLI (and only those), the locations checked, and a remedy appropriate to the placement: under `sibling` placement both fixes (commit the definitions, or set `worktree_placement = "child"`), and under `child` placement — where the definitions are simply absent, so naming `child` would contradict the finding — installing the definitions at the repository root and committing them;
-- otherwise `Ok`, with a detail stating that reachability could not be verified for each unverified CLI, and scoping any reachability claim to the CLIs it covers.
+- `Warn` when no resolved CLI is unreachable but at least one is unverified — the detail stating that reachability could not be verified for each unverified CLI and scoping any reachability claim to the CLIs it covers, and the remedy naming `[worktree.env] copy` in `.git-paw/config.toml` as the way to provision that CLI's workflow command files into each new worktree;
+- otherwise `Ok`.
 
 The check SHALL never be `Fail`, SHALL be read-only, and SHALL appear in `--json` output.
 
@@ -610,10 +611,19 @@ Test: `doctor::tests::spec_workflow_check_warns_naming_only_the_unreachable_cli`
 
 - **GIVEN** an OpenSpec repository whose spec-driven worker CLI has no entry in the location table
 - **WHEN** `git paw doctor` runs
-- **THEN** the spec-workflow check SHALL be `Ok` with a detail stating reachability could not be verified
+- **THEN** the spec-workflow check SHALL be `Warn` (not `Ok`) with a detail stating reachability could not be verified
+- **AND** its remedy SHALL name `[worktree.env] copy`
 - **AND** when another resolved CLI is reachable, the detail SHALL name that CLI as the one the reachability claim covers
 
-Test: `doctor::tests::spec_workflow_check_reports_an_unknown_cli_without_warning, doctor::tests::a_reachable_and_an_unknown_cli_each_scope_the_detail_to_themselves`
+Test: `doctor::tests::spec_workflow_check_warns_on_an_unknown_cli, doctor::tests::a_reachable_and_an_unknown_cli_each_scope_the_detail_to_themselves, tests/doctor_e2e.rs::an_unverifiable_workflow_cli_warns_with_a_provisioning_remedy`
+
+#### Scenario: An unverified CLI never shows as passing
+
+- **GIVEN** an OpenSpec repository whose only spec-driven worker CLI has no entry in the location table
+- **WHEN** `git paw doctor --json` runs
+- **THEN** the spec-workflow check's status SHALL be the warning status, not the ok status
+
+Test: `tests/doctor_e2e.rs::an_unverifiable_workflow_cli_warns_with_a_provisioning_remedy`
 
 #### Scenario: The check is in the JSON report
 
@@ -621,6 +631,14 @@ Test: `doctor::tests::spec_workflow_check_reports_an_unknown_cli_without_warning
 - **THEN** the output SHALL contain the spec-workflow check with its status and detail
 
 Test: `tests/doctor_e2e.rs::an_uncommitted_workflow_definition_warns_under_sibling_placement, tests/doctor_e2e.rs::json_document_carries_the_required_fields_on_every_check`
+
+#### Scenario: A family variant uses its family's locations
+
+- **GIVEN** an OpenSpec repository whose spec-driven worker CLI is `[clis.claude-opus]` with `family = "claude"`, and whose `.claude/commands/opsx/apply.md` is committed
+- **WHEN** `git paw doctor` runs
+- **THEN** the spec-workflow check SHALL be `Ok` and name `claude-opus` as reachable
+
+Test: `tests/doctor_e2e.rs::a_family_variant_finds_its_familys_workflow_definitions`
 
 ### Requirement: Doctor warns about dangerous grant residue in the project's CLI settings
 
@@ -769,3 +787,23 @@ the effective level the native-sandbox rule would refuse.
 - **GIVEN** `agent_approval = "full-auto"`, `default_cli = "codex"` and `[clis.codex] sandbox = "native"`
 - **WHEN** `git paw doctor` runs
 - **THEN** the sandbox-mode check SHALL report ✗ naming `[clis.codex].approval_args`
+
+### Requirement: Doctor flags an out-of-date orchestrator pointer
+
+`git paw doctor` SHALL include in its "Hygiene" group an "orchestrator pointer" check that is `Warn` when the root `AGENTS.md` carries the orchestrator pointer section but not the section the running binary writes (for example one written before the section was scoped to the root session), with a remedy to re-run `git paw init`; and `Ok` when the section is current or absent. It SHALL be read-only and never `Fail`.
+
+#### Scenario: An out-of-date pointer section warns
+
+- **GIVEN** a root `AGENTS.md` whose pointer section was written by an earlier binary
+- **WHEN** `git paw doctor` runs
+- **THEN** the orchestrator-pointer check SHALL be `Warn` with a remedy naming `git paw init`
+
+Test: `doctor::tests::an_out_of_date_orchestrator_pointer_warns_with_the_init_remedy`, `tests/doctor_e2e.rs::an_out_of_date_orchestrator_pointer_warns`
+
+#### Scenario: A current or absent pointer passes
+
+- **GIVEN** a repository just initialised by the running binary, or one with no pointer section
+- **WHEN** `git paw doctor` runs
+- **THEN** the orchestrator-pointer check SHALL be `Ok`
+
+Test: `agents::tests::orchestrator_pointer_currency_is_detected`, `doctor::tests::a_clean_repository_passes_every_hygiene_check`
