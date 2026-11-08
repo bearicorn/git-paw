@@ -367,7 +367,7 @@ Direct file writes to `openspec/changes/<change>/{proposal,design,tasks}.md` or 
 
 ### Four Layers
 1. `--help` text — comprehensive with examples
-2. README.md — landing page with badges, quick starts, CLI table
+2. README.md — landing page with badges, highlights, quick start, command table
 3. mdBook site — full user guide at `https://bearicorn.github.io/git-paw/`
 4. `just api-docs` / Rustdoc — API docs for contributors
 

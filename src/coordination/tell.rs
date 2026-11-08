@@ -20,7 +20,8 @@ pub struct TellCommand {
     pub prompt: String,
 }
 
-/// Parses a `/tell` directive typed in the supervisor pane.
+/// Parses a `/tell` directive typed to the orchestrator, which runs outside
+/// the session.
 ///
 /// The agent identifier is the first whitespace-delimited token after
 /// `/tell`; the prompt is the rest of the input (which may span multiple

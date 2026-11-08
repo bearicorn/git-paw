@@ -135,7 +135,7 @@ Options:
 | `--preset` | preset name from config | Use a named `[presets.<name>]` entry. |
 | `--supervisor` | (flag) | Force supervisor mode on. Mutually exclusive with `--no-supervisor`. |
 | `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
-| `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. |
+| `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. The check runs only for a spec-mode launch without supervisor mode, so `start --force` has no effect under supervisor mode. |
 | `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. The rebase always runs inside the branch's own worktree, never in the main checkout: a branch with no worktree gets its worktree first and is rebased there. Without `--no-rebase`, a branch is still never rebased over uncommitted work: when its worktree has changes besides git-paw's own `.git-paw/` files, or its status cannot be read, `start` launches the branch on its current HEAD, leaves the changes untouched and prints one stderr notice, `notice: rebase skipped for '<branch>': <reason>. Pass --no-rebase to launch without a rebase.` With `--no-rebase` there is no check and no notice. |
 | `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. On a repository that already has a live supervised session, binds a new drive loop to it instead of launching. Mutually exclusive with `--no-supervisor`. |
 
@@ -287,7 +287,7 @@ A branch whose broker `agent_id` is already taken by an agent in the session is 
 
 Detaches a single agent from any active session: closes its tmux pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `git paw purge`'s per-worktree teardown), and drops it from the session. The other agents are untouched; the orchestrator notices the departure on its next poll (the agent stops heartbeating) and a running drive loop stops driving it on its next sweep.
 
-Safe by default: `remove` refuses to delete a worktree with uncommitted changes — listing the changed files — unless `--force` is passed. `--keep-worktree` detaches the pane and session entry but leaves the worktree and branch on disk (and skips the uncommitted-work check, since nothing is deleted). `git paw remove supervisor` is refused — use `git paw stop` to end the whole session.
+Safe by default: `remove` refuses to delete a worktree with uncommitted changes — listing the changed files — unless `--force` is passed. `--keep-worktree` detaches the pane and session entry but leaves the worktree and branch on disk (and skips the uncommitted-work check, since nothing is deleted). `git paw remove supervisor` is refused with a pointer to `git paw stop`: the session has no supervisor pane to detach (the orchestrator runs outside it), so `git paw stop` is how you end the whole session.
 
 ```
 Usage: git-paw remove [OPTIONS] <BRANCH>

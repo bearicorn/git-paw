@@ -23,4 +23,4 @@ The README is written with the `tone-of-voice` skill's technical-docs rules: lea
 ## Risks / Trade-offs
 
 - [`git paw remove supervisor` sentence] → the brief calls it a v0.18 leftover, but `src/commands/remove.rs:65` still refuses `remove supervisor` with a pointer to `git paw stop`. Keep the refusal fact and reword the reason: no supervisor pane exists, and the orchestrator runs outside the session. Do not delete the sentence as if the behaviour were gone.
-- [A reader who wants every feature on one page] → the Highlights link `docs/src/introduction.md` and the user-guide index, which keep the full list.
+- [A reader who wants every feature on one page] → `docs/src/introduction.md`'s Key Features was a v0.6-era list. This change refreshes it to the current surface, one line and one link per feature with no version tags, and the first Highlight links it.
