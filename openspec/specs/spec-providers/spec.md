@@ -868,18 +868,6 @@ The system SHALL skip plan files that cannot produce a `SpecEntry` — a fully-`
 - **AND** the other two plan files still produce their entries
 - **AND** the scan does not return an error
 
-### Requirement: README documents `[specs] type` accepts all three backends
-
-The README's configuration excerpt for the `[specs]` section SHALL
-document `type` as accepting `"openspec"`, `"markdown"`, AND
-`"speckit"`. The previous v0.4 listing of only `"openspec"` and
-`"markdown"` SHALL be replaced.
-
-#### Scenario: README specs example lists all three backends
-
-- **WHEN** the README's `[specs]` configuration excerpt is inspected
-- **THEN** it contains the substrings `"openspec"`, `"markdown"`, AND `"speckit"` as documented values of `type`
-
 ### Requirement: Spec-driven launch chapter documents the Spec Kit backend
 
 `docs/src/user-guide/spec-driven-launch.md` SHALL include a

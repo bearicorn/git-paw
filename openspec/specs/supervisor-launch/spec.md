@@ -2,7 +2,9 @@
 
 ## Purpose
 Orchestrates the full supervisor session launch via `cmd_supervisor()` — computing the layout, creating worktrees and the tmux pane structure (supervisor, dashboard, coding-agent grid), injecting the broker URL and per-pane boot prompts, and branching between the return-with-attach-hint and `--unattended` in-process drive-loop paths. It also resolves whether `git paw start` enters supervisor mode from CLI flags, config, and interactive prompts (with launch- and purge-time git safety guards warning on uncommitted specs before `--from-specs` launch and on unmerged worktree commits before `purge`); ensures the first coding agent's pane runs its CLI in that agent's own worktree rather than the supervisor's repo root (assigning split-time `-c <cwd>` values to compensate for the pane-1/2 swap); and applies tmux visual affordances (double-line pane borders, per-pane role labels via a stable `@paw_role` option, a reverse-video border-format header bar, and active-pane border styling) gated by the `[layout].border_affordances` config field and degrading gracefully on older tmux.
+
 ## Requirements
+
 ### Requirement: Supervisor auto-start flow
 
 The system SHALL implement `cmd_supervisor()` (in `src/commands/supervisor.rs`) that orchestrates the full supervised-session launch. The function SHALL execute the following steps in order:
@@ -746,21 +748,18 @@ tmux session regardless of supervisor mode. The
 
 ### Requirement: README Supervisor Mode quick start documents the flags
 
-The README's "Quick Start: Supervisor Mode" section SHALL
-document the `--no-supervisor` opt-out flag and the
-`start --force` flag for bypassing the uncommitted-spec validation
-warning. Each flag SHALL appear at least once in a command-line
-example within the section.
+The README's Quick start SHALL link `docs/src/quick-start-orchestrator.md`, and that page SHALL document the `--no-supervisor` opt-out flag and the `start --force` flag for bypassing the uncommitted-spec validation warning, noting that `--force` has no effect under supervisor mode. Each flag SHALL appear at least once in a command-line example on that page.
 
 #### Scenario: Quick start supervisor mentions --no-supervisor
 
-- **WHEN** the README's Quick Start: Supervisor Mode section is inspected
-- **THEN** it contains the substring `--no-supervisor`
+- **WHEN** `docs/src/quick-start-orchestrator.md` is inspected
+- **THEN** it contains the substring `--no-supervisor` in a command-line example
 
 #### Scenario: Quick start supervisor mentions --force
 
-- **WHEN** the README's Quick Start: Supervisor Mode section is inspected
+- **WHEN** `docs/src/quick-start-orchestrator.md` is inspected
 - **THEN** it contains the substring `--force` (in the context of `start --force`)
+- **AND** it states that `--force` has no effect under supervisor mode
 
 ### Requirement: Architecture chapter pins the supervisor-as-pane layout
 
@@ -936,4 +935,3 @@ The documentation SHALL include a chapter, `docs/src/user-guide/remote-control.m
 
 - **WHEN** the chapter is inspected
 - **THEN** it SHALL NOT contain the phrase `supervisor pane`
-
