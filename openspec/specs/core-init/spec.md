@@ -1,7 +1,9 @@
 ## Purpose
 
 Bootstrap a repository for git-paw by creating the `.git-paw/` directory structure, generating a default config file, updating `.gitignore`, and reporting actions taken, with idempotent behavior on repeated runs.
+
 ## Requirements
+
 ### Requirement: Init creates .git-paw directory structure
 
 The system SHALL create the `.git-paw/` directory and the
@@ -354,7 +356,7 @@ The system SHALL, when `git paw init` runs, write the resolved `cli-setup` skill
 
 ### Requirement: Init injects an orchestrator pointer section into the root AGENTS.md
 
-The system SHALL, when `git paw init` runs, inject into `<repo>/AGENTS.md` (creating the file when absent) a section delimited by `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->` whose prose comes from the bundled asset `assets/agents-md-orchestrator-section.md` and tells an agent reading the file that, when a git-paw session is active, it is the session's orchestrator and should read `.git-paw/skills/orchestrator/SKILL.md` and `.git-paw/AGENTS.local.md`. Injection SHALL be idempotent (a second run replaces the section in place, leaving all other content byte-identical). The section SHALL carry no broker URL, no secret, no stack or toolchain token, and no vendor product name or path. `git paw stop` and `git paw purge` SHALL NOT remove this section.
+The system SHALL, when `git paw init` runs, inject into `<repo>/AGENTS.md` (creating the file when absent) a section delimited by `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->` whose prose comes from the bundled asset `assets/agents-md-orchestrator-section.md` and tells an agent reading the file that, when a git-paw session is active, it is the session's orchestrator and should read `.git-paw/skills/orchestrator/SKILL.md` and `.git-paw/AGENTS.local.md`. Because every worktree checks out the tracked `AGENTS.md`, the section SHALL state that it applies only to the agent session running at the repository root (the main checkout), and that a coding agent running in a worktree SHALL ignore it and follow its own session assignment instead. Injection SHALL be idempotent (a second run replaces the section in place, leaving all other content byte-identical). The section SHALL carry no broker URL, no secret, no stack or toolchain token, and no vendor product name or path. `git paw stop` and `git paw purge` SHALL NOT remove this section.
 
 #### Scenario: Init injects the pointer into an existing AGENTS.md
 
@@ -382,6 +384,15 @@ The system SHALL, when `git paw init` runs, inject into `<repo>/AGENTS.md` (crea
 - **WHEN** `git paw stop` and then `git paw purge --force` run
 - **THEN** the pointer section SHALL still be present
 
+#### Scenario: The pointer is scoped to the root session
+
+- **WHEN** `git paw init` has injected the pointer section
+- **THEN** the section SHALL state that it applies only to the session at the repository root
+- **AND** SHALL state that a coding agent running in a worktree ignores it
+- **AND** SHALL NOT address its reader as the orchestrator without that condition
+
+Test: `agents::tests::pointer_is_scoped_to_the_root_session`
+
 ### Requirement: Init reports updates only when content changed, and its closing line agrees
 
 `git paw init` SHALL report a binary-managed file it writes — a bundled helper script under `.git-paw/scripts/`, an exported skill under `.git-paw/skills/`, or the root `AGENTS.md` pointer section — as `Updated` only when the content on disk differed from what it wrote, and SHALL NOT report a file whose content was already byte-identical as updated. Its closing line SHALL be `Initialized git-paw.` whenever anything was created or changed (a directory, the config, `.gitignore`, a helper script, an exported skill or the pointer section), and `Already initialized. Nothing to do.` only when nothing was created or changed. Init SHALL NOT print an `Updated …` line followed by `Already initialized. Nothing to do.`.
@@ -401,3 +412,21 @@ The system SHALL, when `git paw init` runs, inject into `<repo>/AGENTS.md` (crea
 - **AND** its closing line SHALL be `Initialized git-paw.`
 - **AND** stdout SHALL NOT contain `Already initialized. Nothing to do.`
 
+### Requirement: Each worker's sidecar disclaims the orchestrator section
+
+The session-assignment section git-paw writes into every worker's `.git-paw/AGENTS.local.md` SHALL carry one line telling the worker that it is a coding agent in a worktree and must ignore the `git-paw orchestrator` section of `AGENTS.md`. The context git-paw writes at the repository root itself (the orchestrator's) SHALL NOT carry that line.
+
+#### Scenario: Each worker's sidecar disclaims the orchestrator section
+
+- **WHEN** git-paw writes a worker's session-assignment section (at start or on `git paw add`)
+- **THEN** it SHALL contain "You are a coding agent in a worktree; ignore the 'git-paw orchestrator' section of AGENTS.md."
+
+Test: `agents::tests::worktree_section_tells_the_worker_to_ignore_the_orchestrator_section`, `tests/emptied_session_refill_e2e.rs::add_refills_a_live_session_emptied_by_remove`
+
+#### Scenario: The root session's context carries no worker role line
+
+- **WHEN** git-paw writes the orchestrator's context into `.git-paw/AGENTS.local.md` at the repository root (a supervised start)
+- **THEN** that context SHALL NOT contain the worker role line
+- **AND** a worker's sidecar written in the same session SHALL still contain it
+
+Test: `agents::tests::the_repository_roots_own_context_carries_no_worker_role_line`, `tests/emptied_session_refill_e2e.rs::add_refills_a_live_session_emptied_by_remove`
