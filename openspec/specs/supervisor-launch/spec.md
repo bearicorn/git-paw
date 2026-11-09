@@ -746,7 +746,7 @@ tmux session regardless of supervisor mode. The
 - **THEN** all the documented affordances SHALL be applied
   to the non-supervisor session's panes
 
-### Requirement: README Supervisor Mode quick start documents the flags
+### Requirement: Orchestrator quick-start page documents the flags
 
 The README's Quick start SHALL link `docs/src/quick-start-orchestrator.md`, and that page SHALL document the `--no-supervisor` opt-out flag and the `start --force` flag for bypassing the uncommitted-spec validation warning, noting that `--force` has no effect under supervisor mode. Each flag SHALL appear at least once in a command-line example on that page.
 

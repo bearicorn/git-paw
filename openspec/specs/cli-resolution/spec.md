@@ -378,7 +378,7 @@ CLI), and SHALL retry the launch once if the first attempt did not take.
 - **THEN** git-paw SHALL send the launch command once more before giving up,
   so a single swallowed attempt does not permanently strand the pane
 
-### Requirement: README Supported AI CLIs table matches `src/detect.rs`
+### Requirement: README Supported CLIs line matches `src/detect.rs`
 
 The README's Supported CLIs line SHALL name every CLI binary in `src/detect.rs`'s known-CLI roster, each as a `` `<binary>` `` code span, and SHALL NOT name a binary that the roster does not auto-detect. The mdBook `docs/src/supported-clis.md` table SHALL carry the same binary set.
 
