@@ -382,6 +382,44 @@ fn merge_landing_is_checked_before_archive_and_publish() {
     );
 }
 
+// skill-agent "Supervisor skill — Merge orchestration": the merge section
+// names its trigger and computes the order from agent.blocked edges.
+#[test]
+fn merge_section_names_its_trigger_and_the_topological_order() {
+    let s = section("### Merge orchestration");
+    assert!(
+        s.contains("agent.verified"),
+        "the trigger is every agent verified"
+    );
+    assert!(
+        s.contains("`agent.blocked`"),
+        "the order comes from agent.blocked events"
+    );
+    assert!(
+        s.contains("`payload.from = y`"),
+        "an edge names its payload.from"
+    );
+    assert!(s.contains("x depends on y"), "the edge direction is stated");
+    assert!(
+        s.contains("topologically sort"),
+        "the graph is topologically sorted"
+    );
+}
+
+// skill-agent "Supervisor skill — Merge orchestration", scenario "Supervisor
+// skill describes the per-branch merge + test loop": the loop merges the
+// resolved agent branch, confirms it landed, and names no literal branch.
+#[test]
+fn per_branch_merge_loop_names_no_literal_branch_and_confirms_the_merge() {
+    let s = section("### Merge orchestration");
+    assert!(s.contains("git merge --ff-only"));
+    assert!(s.contains("git merge-base --is-ancestor"));
+    assert!(s.contains("git reset --hard"));
+    assert!(s.contains("agent.feedback"));
+    assert!(!s.contains("git checkout main"), "{s}");
+    assert!(!s.contains("git merge --ff-only feat/"), "{s}");
+}
+
 // Same requirement: an archive that writes the tracked tree re-runs the tests
 // before the merge is announced.
 #[test]

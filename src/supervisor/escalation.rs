@@ -1065,7 +1065,7 @@ mod tests {
         let source = include_str!("escalation.rs");
         assert!(source.contains("include_str!(\"../../assets/escalation-framing.md\")"));
         assert!(FRAMING.contains("Never run `sweep.sh approve`"));
-        let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let production = crate::source_scan::production_code(source);
         assert!(
             !production.contains("never answer a permission prompt"),
             "framing sentences must not be compiled literals"

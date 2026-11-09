@@ -206,6 +206,12 @@ The loop keeps polling until one of:
 4. **Session torn down** — the loop's own session instance is purged, stopped,
    or replaced (see [Session-instance lifecycle](#session-instance-lifecycle)
    below).
+5. **Budget exhausted** — with `[supervisor] budget_on_exhausted = "abandon"`,
+   a breached `budget_max_tokens` or `budget_max_cost` cap ends the run with
+   outcome `budget-exhausted` and a non-zero exit status, leaving every worker
+   running (see [Usage and the budget guardrail](#usage-and-the-budget-guardrail)).
+   Under the default `"escalate"` a breach is escalated and the loop keeps
+   sweeping.
 
 On exit it prints a summary: the outcome (`completed` /
 `escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down` /
@@ -1766,24 +1772,38 @@ events: each event from agent X with `payload.from = Y` is an edge "X
 depends on Y". The supervisor then topologically sorts the graph: agents
 with no incoming edges merge first; dependents follow.
 
-**Per-branch merge.** For each branch in topological order, the supervisor
-checks out `main` and runs:
+**Per-branch merge.** For each branch in topological order, the orchestrator
+checks out the merge target (the integration branch the session merges into,
+resolved at run time — the repository's default branch unless it was told
+otherwise), records the agent branch's tip, and fast-forwards the agent's
+resolved branch:
 
 ```bash
-git merge --ff-only feat/<branch>
+git checkout <merge-target>
+git rev-parse <agent-branch>
+git merge --ff-only <agent-branch>
 ```
 
-Never a merge commit — fast-forward only. If `--ff-only` fails (the branch
-diverges from `main`, or there is a conflict), the supervisor SKIPS that
-branch and publishes `agent.feedback` to the owning agent asking them to
-rebase or resolve. On a successful fast-forward, the supervisor runs the
-configured `{{TEST_COMMAND}}`; if tests fail, the supervisor reverts the
-merge with `git reset --hard <prev-HEAD>` and publishes `agent.feedback`
-tagged `[regression]`. If tests pass, it publishes `agent.advanced-main`
-with `sweep.sh advanced-main <merged-branch> <summary>` — the helper resolves
-the new default-branch SHA and the base branch name itself — so every dependent agent learns the base moved on its next inbox poll —
-see [When Main Advances](coordination.md#when-main-advances) — then moves on to
-the next branch.
+Never a merge commit — fast-forward only. Every git and test step in the loop
+runs bare, never piped: a pipeline's exit status is its last stage's, so a
+failed merge piped into `tail` would look like a success. If `--ff-only` fails
+(the branch diverges from the target, or there is a conflict), the orchestrator
+SKIPS that branch and publishes `agent.feedback` to the owning agent asking
+them to rebase or resolve.
+
+After a fast-forward it confirms the merge landed with
+`git merge-base --is-ancestor <recorded-tip> HEAD`. A failed check means the
+merge did not land: it archives nothing and publishes nothing for that branch.
+On a landed merge it runs `[supervisor] test_command`; if tests fail, it
+reverts with `git reset --hard <prev-HEAD>` and publishes `agent.feedback`
+tagged `[regression]`. Only after a passing run does it archive the branch's
+spec (when there is one) and re-run `test_command` if that archive step
+wrote to the tracked tree. It then publishes `agent.advanced-main` with
+`sweep.sh advanced-main <merged-branch> <summary>` — the helper resolves the
+new default-branch SHA and the base branch name itself — so every dependent
+agent learns the base moved on its next inbox poll (see
+[When Main Advances](coordination.md#when-main-advances)), and moves on to the
+next branch.
 
 **Cycle handling.** If the dependency graph has a cycle, the supervisor
 does NOT merge any branch in the cycle. Instead, it publishes

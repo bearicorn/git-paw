@@ -111,6 +111,12 @@ pub struct CliPromptProfile {
     /// orchestrator pane is a loud, explicit `cli-unavailable` exit; in a
     /// coding pane it is a deduped escalation.
     pub cli_unavailable_markers: Vec<String>,
+    /// Glyphs that mark a selection menu's selected option, e.g. `❯`.
+    /// Consulted by `__send` before it presses a key.
+    pub menu_cursor_glyphs: Vec<String>,
+    /// Footer phrases that mark a selection menu, e.g. `enter to select`.
+    /// Matched case-insensitively.
+    pub menu_footer_markers: Vec<String>,
 }
 
 /// A partial per-CLI prompt-shape profile override, configured under
@@ -169,6 +175,12 @@ pub struct CliPromptProfileOverride {
     /// See [`CliPromptProfile::cli_unavailable_markers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_unavailable_markers: Option<Vec<String>>,
+    /// See [`CliPromptProfile::menu_cursor_glyphs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu_cursor_glyphs: Option<Vec<String>>,
+    /// See [`CliPromptProfile::menu_footer_markers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu_footer_markers: Option<Vec<String>>,
 }
 
 /// Returns the embedded Claude Code prompt-shape profile — the compiled
@@ -258,6 +270,8 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "Invalid API key".to_string(),
             "org's monthly spend limit".to_string(),
         ],
+        menu_cursor_glyphs: vec!["❯".to_string(), "›".to_string(), ">".to_string()],
+        menu_footer_markers: vec!["enter to select".to_string()],
     })
 }
 
@@ -453,11 +467,24 @@ pub(crate) fn validate_override_patterns(
             "cli_unavailable_markers",
             &override_.cli_unavailable_markers,
         ),
+        ("menu_cursor_glyphs", &override_.menu_cursor_glyphs),
+        ("menu_footer_markers", &override_.menu_footer_markers),
     ] {
         if set.iter().flatten().any(|m| m.trim().is_empty()) {
             return fail(
                 field,
                 "a marker is empty, and would match every line".to_string(),
+            );
+        }
+    }
+    for (field, set) in [
+        ("menu_cursor_glyphs", &override_.menu_cursor_glyphs),
+        ("menu_footer_markers", &override_.menu_footer_markers),
+    ] {
+        if set.as_ref().is_some_and(Vec::is_empty) {
+            return fail(
+                field,
+                "the list is empty, which would turn off the selection-menu guard".to_string(),
             );
         }
     }
@@ -563,6 +590,14 @@ pub(crate) fn merge_prompt_profile(
             .cli_unavailable_markers
             .clone()
             .unwrap_or_else(|| default.cli_unavailable_markers.clone()),
+        menu_cursor_glyphs: override_
+            .menu_cursor_glyphs
+            .clone()
+            .unwrap_or_else(|| default.menu_cursor_glyphs.clone()),
+        menu_footer_markers: override_
+            .menu_footer_markers
+            .clone()
+            .unwrap_or_else(|| default.menu_footer_markers.clone()),
     }
 }
 

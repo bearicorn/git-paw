@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+#[path = "helpers/source_scan.rs"]
+mod source_scan;
+use source_scan::production_code;
+
 /// Repository root (the crate directory).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,52 +67,9 @@ fn scanned_files() -> Vec<(String, String)> {
                 .replace('\\', "/");
             let body =
                 std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", rel.clone()));
-            (rel, strip_test_modules(&body))
+            (rel, production_code(&body))
         })
         .collect()
-}
-
-/// Blanks out every `#[cfg(test)]` item, leaving exactly the production code
-/// the rule governs.
-///
-/// Each block is removed by walking the braces of the item that follows the
-/// attribute, so a module with SEVERAL test modules (e.g.
-/// `src/commands/supervisor.rs`) keeps every line between them. Truncating at
-/// the first attribute instead would silently drop most of that file —
-/// including the whole supervised launch path.
-///
-/// Removed lines are replaced by blank lines so reported line numbers still
-/// match the file on disk.
-fn strip_test_modules(src: &str) -> String {
-    let mut out = src.to_string();
-    while let Some(attr) = out.find("#[cfg(test)]") {
-        let Some(open_rel) = out[attr..].find('{') else {
-            // No braced item follows — nothing more to strip.
-            break;
-        };
-        let open = attr + open_rel;
-        let mut depth: usize = 0;
-        let mut end = out.len();
-        for (i, ch) in out[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = open + i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let blanked: String = out[attr..end]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect();
-        out.replace_range(attr..end, &blanked);
-    }
-    out
 }
 
 /// Whether `line` is a comment — prose that names a constant decides

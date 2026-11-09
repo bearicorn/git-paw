@@ -120,6 +120,30 @@ pub(crate) fn compose_launch_prompt(
     parts.join("\n\n")
 }
 
+/// The launch warnings one launch has emitted. A launch resolves the same CLI
+/// more than once (pre-flight, then per pane), so each CLI warns once per
+/// launch, through that launch's own output sink.
+#[derive(Debug, Default)]
+pub(crate) struct LaunchWarnings {
+    warned: std::collections::HashSet<String>,
+}
+
+impl LaunchWarnings {
+    /// The profile `resolved` carries, after emitting its warning through
+    /// `out` unless this launch already emitted it for that CLI.
+    pub(crate) fn admit(
+        &mut self,
+        resolved: crate::agent_cli::Resolved,
+        out: &mut dyn Output,
+    ) -> CliProfile {
+        resolved.into_profile(|profile, warning| {
+            if self.warned.insert(profile.id().to_string()) {
+                out.warn(&warning);
+            }
+        })
+    }
+}
+
 /// Per-session context for [`attach_agent`] — the values shared across every
 /// agent attached to a single session. `supervisor` builds it once before
 /// its per-branch loop; `add` builds it once for the single new agent.
@@ -162,6 +186,8 @@ pub(crate) struct AttachContext<'a> {
     pub(crate) worktree_runtime: &'a crate::config::WorktreeConfig,
     /// The full `[clis.<name>]` table `agent_cli` resolves its record from.
     pub(crate) clis: &'a std::collections::HashMap<String, config::CustomCli>,
+    /// The launch's emitted warnings, shared with its pre-flight resolution.
+    pub(crate) warnings: &'a std::cell::RefCell<LaunchWarnings>,
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -213,7 +239,9 @@ pub(crate) fn attach_agent(
     runtime_slot: u16,
     out: &mut dyn Output,
 ) -> Result<AttachedAgent, PawError> {
-    let profile = crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis, ctx.approval)?;
+    let resolved =
+        crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis, ctx.approval, ctx.repo_root)?;
+    let profile = ctx.warnings.borrow_mut().admit(resolved, &mut *out);
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
 
     // Provision the worktree's runtime state — the declared env-file copies,
@@ -343,9 +371,13 @@ pub(crate) fn dry_run_launch_line(
     cli: &str,
     approval: config::ApprovalLevel,
     clis: &std::collections::HashMap<String, config::CustomCli>,
+    cwd: &Path,
+    warnings: &mut LaunchWarnings,
+    out: &mut dyn Output,
 ) -> Result<String, PawError> {
-    let command = crate::agent_cli::resolve_for_launch(cli, clis, &approval)?
-        .launch_command(&approval, LaunchSession::None);
+    let resolved = crate::agent_cli::resolve_for_launch(cli, clis, &approval, cwd)?;
+    let profile = warnings.admit(resolved, out);
+    let command = profile.launch_command(&approval, LaunchSession::None);
     Ok(format!("      runs: {command}"))
 }
 
@@ -509,6 +541,119 @@ pub(crate) fn write_repo_discovery_file_with_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNSANDBOXED: &str = "runs at full-auto with no declared sandbox";
+
+    /// One dry-run launch of two `claude` workers at full-auto, captured.
+    fn captured_dry_run() -> crate::commands::CaptureOutput {
+        let mut out = crate::commands::CaptureOutput::default();
+        let mut warnings = LaunchWarnings::default();
+        let clis = std::collections::HashMap::new();
+        for _ in 0..2 {
+            dry_run_launch_line(
+                "claude",
+                config::ApprovalLevel::FullAuto,
+                &clis,
+                Path::new("/"),
+                &mut warnings,
+                &mut out,
+            )
+            .expect("dry-run line");
+        }
+        out
+    }
+
+    /// Spec scenario "An unsandboxed full-auto launch warns once per launch
+    /// through the sink".
+    #[test]
+    fn an_unsandboxed_full_auto_launch_warns_once_through_the_sink() {
+        let out = captured_dry_run();
+        let warned = out.warnings.iter().filter(|w| w.contains(UNSANDBOXED));
+        assert_eq!(warned.count(), 1, "{:?}", out.warnings);
+    }
+
+    /// Spec scenario "An earlier CLI's warning survives a later refusal": the
+    /// first CLI's warning is emitted as it resolves, before the second CLI is
+    /// refused.
+    #[test]
+    fn an_earlier_cli_warning_survives_a_later_refusal() {
+        let mut out = crate::commands::CaptureOutput::default();
+        let mut warnings = LaunchWarnings::default();
+        let mut clis = std::collections::HashMap::new();
+        clis.insert(
+            "codex".to_string(),
+            config::CustomCli {
+                command: "codex".to_string(),
+                sandbox: Some("native".to_string()),
+                ..config::CustomCli::default()
+            },
+        );
+        let lines: Result<Vec<_>, _> = ["claude", "codex"]
+            .iter()
+            .map(|cli| {
+                dry_run_launch_line(
+                    cli,
+                    config::ApprovalLevel::FullAuto,
+                    &clis,
+                    Path::new("/"),
+                    &mut warnings,
+                    &mut out,
+                )
+            })
+            .collect();
+        let err = lines.expect_err("codex at full-auto under a native sandbox is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("codex") && msg.contains("full-auto"), "{msg}");
+        assert_eq!(
+            out.warnings
+                .iter()
+                .filter(|w| w.contains(UNSANDBOXED))
+                .count(),
+            1,
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// Spec scenario "Two launches in one process each warn".
+    #[test]
+    fn two_launches_in_one_process_each_warn() {
+        for _ in 0..2 {
+            let out = captured_dry_run();
+            assert_eq!(
+                out.warnings
+                    .iter()
+                    .filter(|w| w.contains(UNSANDBOXED))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    /// Spec scenario "A captured launch does not write the warning to stderr":
+    /// re-runs [`captured_dry_run`] in a child test process with output
+    /// uncaptured and checks the child's stderr.
+    #[test]
+    fn a_captured_launch_does_not_write_the_warning_to_stderr() {
+        const CHILD: &str = "GIT_PAW_CAPTURED_LAUNCH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let out = captured_dry_run();
+            assert!(out.warnings.iter().any(|w| w.contains(UNSANDBOXED)));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::launch::tests::a_captured_launch_does_not_write_the_warning_to_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains(UNSANDBOXED), "{stderr}");
+    }
 
     // Byte-identical safety net (D1 / task 1.3): each per-backend boot-prompt
     // framing sentence, relocated from a compiled match arm into its own
@@ -1201,6 +1346,7 @@ mod permission_seeding_removed_tests {
             placement: WorktreePlacement::Sibling,
             worktree_runtime,
             clis,
+            warnings: Box::leak(Box::default()),
         }
     }
 
@@ -1442,6 +1588,7 @@ mod permission_seeding_removed_tests {
             placement: WorktreePlacement::Sibling,
             worktree_runtime: &worktree_runtime,
             clis: &clis,
+            warnings: &std::cell::RefCell::default(),
         };
 
         let attached = attach_agent(
@@ -1484,6 +1631,7 @@ mod permission_seeding_removed_tests {
             placement: WorktreePlacement::Sibling,
             worktree_runtime: &worktree_runtime,
             clis: &clis,
+            warnings: &std::cell::RefCell::default(),
         };
 
         let attached = attach_agent(

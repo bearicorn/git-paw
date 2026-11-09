@@ -177,7 +177,7 @@ fn a_known_cli_resolves_its_record() {
     assert_eq!(profile.id(), "claude");
     assert_eq!(profile.family(), CliFamily::Claude);
     assert_eq!(
-        profile.executable_in(Some(bin.as_os_str())),
+        profile.executable_in(Some(bin.as_os_str()), &std::env::temp_dir()),
         Some(bin.join("claude"))
     );
 }
@@ -190,7 +190,10 @@ fn a_custom_entry_resolves_its_record() {
     let map = clis(&[("my-agent", entry(&command.to_string_lossy()))]);
     let profile = CliProfile::resolve("my-agent", &map);
     assert_eq!(profile.id(), "my-agent");
-    assert_eq!(profile.executable_in(Some(&OsString::new())), Some(command));
+    assert_eq!(
+        profile.executable_in(Some(&OsString::new()), &std::env::temp_dir()),
+        Some(command)
+    );
 }
 
 /// Scenario "The launch command's leading token is never the id".
@@ -202,7 +205,7 @@ fn the_launch_commands_leading_token_is_never_the_id() {
     assert_eq!(profile.id(), "foo");
     assert_eq!(profile.family(), CliFamily::Generic);
     assert_eq!(
-        profile.executable_in(Some(bin.as_os_str())),
+        profile.executable_in(Some(bin.as_os_str()), &std::env::temp_dir()),
         Some(bin.join("claude"))
     );
 }
@@ -566,7 +569,7 @@ fn an_approval_args_override_carrying_a_disabling_flag_is_refused() {
         "--dangerously-bypass-approvals-and-sandbox".to_string(),
     )]);
     let map = clis(&[("codex", codex)]);
-    let msg = resolve_for_launch("codex", &map, &ApprovalLevel::Auto)
+    let msg = launch("codex", &map, &ApprovalLevel::Auto)
         .expect_err("a disabling flag is refused whatever its source")
         .to_string();
     for needle in [
@@ -585,14 +588,14 @@ fn sandbox_args_conflicting_with_the_approval_flags_are_refused() {
     let mut codex = sandboxed("codex", None, "native");
     codex.sandbox_args = Some("--sandbox read-only".to_string());
     let map = clis(&[("codex", codex)]);
-    let msg = resolve_for_launch("codex", &map, &ApprovalLevel::Auto)
+    let msg = launch("codex", &map, &ApprovalLevel::Auto)
         .expect_err("two --sandbox values must not both reach the CLI")
         .to_string();
     assert!(
         msg.contains("--sandbox") && msg.contains("sandbox_args"),
         "{msg}"
     );
-    let manual = resolve_for_launch("codex", &map, &ApprovalLevel::Manual)
+    let manual = launch("codex", &map, &ApprovalLevel::Manual)
         .expect("no approval flag sets the sandbox at manual");
     assert_eq!(
         manual.launch_command(&ApprovalLevel::Manual, LaunchSession::None),
@@ -670,7 +673,7 @@ fn native_sandbox_arguments_sit_after_args_and_before_approval_flags() {
 #[test]
 fn codex_full_auto_under_a_native_sandbox_is_refused() {
     let map = clis(&[("codex", sandboxed("codex", None, "native"))]);
-    let err = resolve_for_launch("codex", &map, &ApprovalLevel::FullAuto)
+    let err = launch("codex", &map, &ApprovalLevel::FullAuto)
         .expect_err("a sandbox-disabling row must be refused");
     let msg = err.to_string();
     for needle in [
@@ -682,7 +685,7 @@ fn codex_full_auto_under_a_native_sandbox_is_refused() {
         assert!(msg.contains(needle), "should name {needle}: {msg}");
     }
     for level in [ApprovalLevel::Manual, ApprovalLevel::Auto] {
-        resolve_for_launch("codex", &map, &level).expect("lower levels launch");
+        launch("codex", &map, &level).expect("lower levels launch");
     }
 }
 
@@ -693,7 +696,7 @@ fn an_approval_args_override_is_used_as_given_under_a_native_sandbox() {
     codex.approval_args =
         HashMap::from([("full-auto".to_string(), "--example-no-prompts".to_string())]);
     let map = clis(&[("codex", codex)]);
-    let profile = resolve_for_launch("codex", &map, &ApprovalLevel::FullAuto)
+    let profile = launch("codex", &map, &ApprovalLevel::FullAuto)
         .expect("an explicit override is the user's choice");
     assert_eq!(
         profile.launch_command(&ApprovalLevel::FullAuto, LaunchSession::None),
@@ -714,7 +717,7 @@ fn a_wrapper_declaration_changes_neither_the_command_nor_the_level() {
     plain_entry.family = Some("claude".to_string());
     let plain = clis(&[("sbx", plain_entry)]);
     for level in LEVELS {
-        let profile = resolve_for_launch("sbx", &declared, &level).expect("never refused");
+        let profile = launch("sbx", &declared, &level).expect("never refused");
         assert_eq!(
             profile.launch_command(&level, LaunchSession::None),
             CliProfile::resolve("sbx", &plain).launch_command(&level, LaunchSession::None),
@@ -748,7 +751,7 @@ fn an_ambiguous_shim_is_refused_naming_both_paths() {
     let (_dir, bin) = bin_dir(&["claude", "claude-oss-sonnet"]);
     let map = clis(&[("claude-oss-sonnet", entry("claude"))]);
     let err = CliProfile::resolve("claude-oss-sonnet", &map)
-        .ensure_unambiguous_in(Some(bin.as_os_str()))
+        .ensure_unambiguous_in(Some(bin.as_os_str()), &std::env::temp_dir())
         .expect_err("ambiguous shim must be refused");
     let msg = err.to_string();
     assert!(
@@ -771,7 +774,7 @@ fn a_known_name_may_point_at_another_install() {
     let map = clis(&[("claude", entry(&alt_claude.to_string_lossy()))]);
     let profile = CliProfile::resolve("claude", &map);
     profile
-        .ensure_unambiguous_in(Some(bin.as_os_str()))
+        .ensure_unambiguous_in(Some(bin.as_os_str()), &std::env::temp_dir())
         .expect("a known name is an explicit override");
     assert!(
         profile
@@ -786,7 +789,7 @@ fn a_shim_that_is_the_same_file_as_command_is_not_ambiguous() {
     std::os::unix::fs::symlink(bin.join("agent"), bin.join("wrapped")).expect("symlink");
     let map = clis(&[("wrapped", entry(&bin.join("agent").to_string_lossy()))]);
     CliProfile::resolve("wrapped", &map)
-        .ensure_unambiguous_in(Some(bin.as_os_str()))
+        .ensure_unambiguous_in(Some(bin.as_os_str()), &std::env::temp_dir())
         .expect("same file after resolving symlinks");
 }
 
@@ -795,7 +798,7 @@ fn a_key_not_on_path_is_not_ambiguous() {
     let (_dir, bin) = bin_dir(&["bar"]);
     let map = clis(&[("foo", entry("bar"))]);
     CliProfile::resolve("foo", &map)
-        .ensure_unambiguous_in(Some(bin.as_os_str()))
+        .ensure_unambiguous_in(Some(bin.as_os_str()), &std::env::temp_dir())
         .expect("no foo on PATH");
 }
 
@@ -817,7 +820,7 @@ fn with_live_marker(command: &str, marker: &str) -> CustomCli {
 #[test]
 fn an_agent_without_a_recorded_cli_resolves_generic() {
     let mut profiles = AgentProfiles::new(clis(&[("mycli", with_live_marker("mycli", "go?"))]));
-    profiles.record("feat-blank", "  ");
+    assert!(profiles.record("feat-blank", "  ").is_none());
     let generic = CliProfile::for_family(CliFamily::Generic);
     for agent in ["feat-unseen", "feat-blank"] {
         let resolved = profiles.get(agent);
@@ -835,9 +838,9 @@ fn an_agent_without_a_recorded_cli_resolves_generic() {
 fn an_agent_resolves_its_recorded_cli() {
     let map = clis(&[("mycli", with_live_marker("mycli", "go?"))]);
     let mut profiles = AgentProfiles::new(map);
-    profiles.record("feat-a", "mycli");
-    profiles.record("feat-b", "claude");
-    profiles.record("feat-a", "mycli");
+    assert!(profiles.record("feat-a", "mycli").is_none());
+    assert!(profiles.record("feat-b", "claude").is_none());
+    assert!(profiles.record("feat-a", "mycli").is_none());
     assert_eq!(
         profiles.get("feat-a").prompt.live_prompt_markers,
         vec!["go?"]
@@ -853,15 +856,15 @@ fn an_agent_resolves_its_recorded_cli() {
 fn an_agent_re_recorded_with_another_cli_is_re_resolved() {
     let map = clis(&[("mycli", with_live_marker("mycli", "go?"))]);
     let mut profiles = AgentProfiles::new(map);
-    profiles.record("feat-a", "claude");
-    profiles.record("feat-a", "mycli");
+    assert!(profiles.record("feat-a", "claude").is_none());
+    assert!(profiles.record("feat-a", "mycli").is_none());
     assert_eq!(
         profiles.get("feat-a").prompt.live_prompt_markers,
         vec!["go?"]
     );
-    profiles.record("feat-a", "claude");
+    assert!(profiles.record("feat-a", "claude").is_none());
     assert_eq!(*profiles.get("feat-a").prompt, *claude_prompt_profile());
-    profiles.record("feat-a", "");
+    assert!(profiles.record("feat-a", "").is_none());
     let generic = CliProfile::for_family(CliFamily::Generic);
     assert_eq!(*profiles.get("feat-a").prompt, generic.prompt_profile());
 }
@@ -907,4 +910,84 @@ fn an_uncompilable_override_pattern_is_an_error_naming_the_field() {
             .contains("[clis.mycli].prompt_profile.paste_buffer_pattern"),
         "{err}"
     );
+}
+
+/// Spec scenario "A profile that fails to compile is reported to the
+/// caller": the record call returns a warning naming the agent instead of
+/// printing it, and the agent resolves `generic`.
+#[test]
+fn a_profile_that_fails_to_compile_is_reported_to_the_caller() {
+    let broken = CustomCli {
+        prompt_profile: Some(crate::config::CliPromptProfileOverride {
+            option_line_pattern: Some("^[0-9".to_string()),
+            ..Default::default()
+        }),
+        ..entry("broken")
+    };
+    let mut profiles = AgentProfiles::new(clis(&[("broken", broken)]));
+    let warning = profiles
+        .record("feat-a", "broken")
+        .expect("a warning for the uncompilable profile");
+    assert!(warning.contains("feat-a"), "{warning}");
+    let generic = CliProfile::for_family(CliFamily::Generic);
+    assert_eq!(*profiles.get("feat-a").prompt, generic.prompt_profile());
+}
+
+/// [`resolve_for_launch`] from the test's working directory, dropping the
+/// warning (the warning has its own tests).
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn launch(
+    identity: &str,
+    clis: &HashMap<String, CustomCli>,
+    level: &ApprovalLevel,
+) -> Result<CliProfile, PawError> {
+    resolve_for_launch(identity, clis, level, &std::env::current_dir().unwrap())
+        .map(|resolved| resolved.into_profile(|_, _| {}))
+}
+
+/// A command with a slash is found with no working directory, so `doctor`
+/// still lists it when the working directory was deleted.
+#[test]
+fn a_slash_command_is_located_without_a_working_directory() {
+    assert_eq!(
+        super::profile::locate("/bin/sh", None, None),
+        Some(std::path::PathBuf::from("/bin/sh"))
+    );
+    assert_eq!(super::profile::locate("sh", None, None), None);
+}
+
+/// Resolves against the given directory, so no readable process working
+/// directory is needed.
+#[test]
+fn a_launch_resolves_with_the_given_working_directory() {
+    // A custom entry runs the shim check, which looks `x` up with the given
+    // cwd; its `/` command is found without one.
+    let map = clis(&[("x", entry("/bin/sh"))]);
+    let resolved = resolve_for_launch(
+        "x",
+        &map,
+        &ApprovalLevel::Auto,
+        std::path::Path::new("/nonexistent/git-paw-test-cwd"),
+    )
+    .expect("resolves without the process cwd");
+    assert_eq!(resolved.into_profile(|_, _| {}).id(), "x");
+}
+
+/// The full-auto warning comes back with the resolved profile instead of
+/// being printed.
+#[test]
+fn the_resolved_value_carries_the_full_auto_warning() {
+    let none = HashMap::new();
+    let resolved = resolve_for_launch(
+        "claude",
+        &none,
+        &ApprovalLevel::FullAuto,
+        &std::env::current_dir().unwrap(),
+    )
+    .unwrap();
+    assert!(resolved.warning().is_some_and(|w| w.contains("claude")));
+    let mut warned = Vec::new();
+    let profile = resolved.into_profile(|_, w| warned.push(w));
+    assert_eq!(profile.id(), "claude");
+    assert_eq!(warned.len(), 1);
 }

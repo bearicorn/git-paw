@@ -16,6 +16,8 @@ This requirement adds no exit condition. The loop keeps running until completion
 - **AND** SHALL send no keystroke to the prompting pane
 - **AND** the other agent's work SHALL complete and the wave SHALL be reported `escalated-for-review`
 
+Test: `tests/unattended_drive_e2e.rs::unattended_escalates_live_prompt_without_blocking_other_agent`, `src/supervisor/drive.rs::loop_escalates_live_prompts_without_blocking_either_agent`
+
 #### Scenario: The escalation reaches the broker, the summary and the decision log
 
 - **GIVEN** an `--unattended` session whose agent `feat-a` shows a live permission prompt
@@ -24,11 +26,15 @@ This requirement adds no exit condition. The loop keeps running until completion
 - **AND** the exit summary's escalation list SHALL contain the prompt
 - **AND** the session's manual-decision log SHALL gain one entry for it
 
+Test: `tests/unattended_drive_e2e.rs::unattended_escalates_live_prompt_without_blocking_other_agent`
+
 #### Scenario: A permission-prompt escalation is never typed into a surface
 
 - **GIVEN** an `--unattended` session whose agent `feat-a` shows a live permission prompt
 - **WHEN** the drive loop escalates it
 - **THEN** no keystroke carrying the escalation SHALL be sent to any surface
+
+Test: `src/supervisor/drive.rs::escalation_is_recorded_as_a_broker_review_item_only`, `tests/unattended_drive_e2e.rs::unattended_records_the_escalation_on_the_broker_and_types_nothing`
 
 #### Scenario: A prompt drawn on the dashboard is not escalated
 
@@ -36,11 +42,15 @@ This requirement adds no exit condition. The loop keeps running until completion
 - **WHEN** the drive loop sweeps the session
 - **THEN** no `permission-prompt` escalation SHALL be attributed to the dashboard
 
+Test: `src/supervisor/drive.rs::a_prompt_drawn_on_the_dashboard_is_not_escalated`
+
 #### Scenario: A file-edit prompt is escalated by its target path
 
 - **GIVEN** a live write-permission prompt with no command header, whose target is `src/lib.rs`
 - **WHEN** the drive loop escalates it
 - **THEN** the escalation's command SHALL be the target path `src/lib.rs`
+
+Test: `src/supervisor/drive.rs::file_edit_prompt_is_escalated_by_its_target_path`
 
 #### Scenario: A prompt nobody answers does not end the run
 
@@ -49,11 +59,15 @@ This requirement adds no exit condition. The loop keeps running until completion
 - **THEN** the loop SHALL NOT exit for that reason alone
 - **AND** it SHALL exit only on completion, the heartbeat, or another existing exit reason
 
+Test: `src/supervisor/drive.rs::a_prompt_nobody_answers_does_not_end_the_run`
+
 #### Scenario: An unevaluable cost cap alone leaves a finished wave completed
 
 - **GIVEN** `budget_max_cost` set, no worker CLI reporting cost, and agents that all finish with no other escalation
 - **WHEN** the drive loop ends the run
 - **THEN** the wave SHALL be reported `completed`, not `escalated-for-review`
+
+Test: `src/supervisor/drive.rs::an_unevaluable_cost_cap_leaves_a_clean_wave_completed`
 
 ### Requirement: The drive loop detects a budget breach
 
@@ -68,6 +82,8 @@ one `budget-exhausted` escalation naming the cap and the total.
 - **WHEN** the loop reads usage on several sweeps
 - **THEN** it SHALL record exactly one `budget-exhausted` escalation naming the cap and the total
 
+Test: `src/supervisor/drive.rs::a_breach_under_escalate_escalates_once_and_sends_nothing`, `src/supervisor/drive.rs::usage_is_read_only_every_n_sweeps_and_breaches_once`
+
 #### Scenario: The token cap counts every token kind
 
 - **GIVEN** `budget_max_tokens = 1000` and one worker with 1 input, 1 output, 900 cache-read and 98
@@ -75,14 +91,20 @@ one `budget-exhausted` escalation naming the cap and the total.
 - **WHEN** the loop compares usage with the cap
 - **THEN** the cap SHALL be reached
 
+Test: `src/supervisor/drive.rs::the_token_cap_counts_cache_tokens_too`
+
 #### Scenario: Headless orchestrator spend counts toward the breach
 
 - **GIVEN** `budget_max_tokens = 1000`, workers whose known usage totals 700 tokens, and a headless orchestrator invocation the loop started this run that used 400 tokens
 - **WHEN** the loop next reads usage
 - **THEN** it SHALL record one `budget-exhausted` escalation naming a total of 1100 tokens
 
+Test: `src/supervisor/drive.rs::headless_orchestrator_spend_counts_toward_the_breach`
+
 #### Scenario: A cost cap is breached by reported cost alone
 
 - **GIVEN** `budget_max_cost = 5.0`, `budget_max_tokens` absent, and workers whose CLIs report a total cost of 6.0
 - **WHEN** the loop next reads usage
 - **THEN** it SHALL record one `budget-exhausted` escalation naming `budget_max_cost` and the cost total
+
+Test: `src/supervisor/drive.rs::a_cost_cap_is_breached_only_by_a_reported_cost`

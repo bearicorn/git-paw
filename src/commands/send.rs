@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::command_runner::CommandRunner;
 use crate::commands::output::Output;
-use crate::config::{CompiledPromptProfile, CustomCli, resolve_submit_delay_ms};
+use crate::config::{CompiledPromptProfile, CustomCli};
 use crate::error::PawError;
 use crate::supervisor::approval_gate::live_prompt_in_tail;
 use crate::supervisor::claim::PaneClaim;
@@ -21,8 +21,7 @@ use crate::supervisor::drive::{
     Clock, INJECTED_TEXT_MAX_CHARS, PaneCapture, SubmitPort, SubmitResult,
     input_box_shows_placeholder, input_box_text, pane_is_responsive, submit_and_verify,
 };
-use crate::supervisor::keys::KeyDispatcher;
-use crate::supervisor::permission_prompt::is_option_line;
+use crate::supervisor::screen::{composer_text_is_dim, menu_showing};
 use crate::terminal::TerminalBackend;
 
 /// Exit status of a delivered message.
@@ -66,32 +65,6 @@ impl SendResult {
     }
 }
 
-/// How many trailing non-blank lines are searched for a selection menu.
-const MENU_TAIL_LINES: usize = 15;
-
-/// Whether `capture` shows a selection menu: a cursor (`❯`, `›` or `>`) on a
-/// numbered option, or an `Enter to select` footer. An `Enter` typed into one
-/// picks an option instead of submitting text.
-fn menu_showing(capture: &str, profile: &CompiledPromptProfile) -> bool {
-    let lines: Vec<&str> = capture.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = &lines[lines.len().saturating_sub(MENU_TAIL_LINES)..];
-    tail.iter().any(|line| {
-        let trimmed = strip_decoration_keep_cursor(line);
-        let cursor = trimmed
-            .strip_prefix('❯')
-            .or_else(|| trimmed.strip_prefix('›'))
-            .or_else(|| trimmed.strip_prefix('>'));
-        cursor.is_some_and(|rest| is_option_line(rest.trim_start(), profile))
-            || line.to_ascii_lowercase().contains("enter to select")
-    })
-}
-
-/// Trims box-drawing borders and whitespace but keeps a cursor glyph, which
-/// is what marks a numbered line as a live menu.
-fn strip_decoration_keep_cursor(line: &str) -> &str {
-    line.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '|'))
-}
-
 /// The reason a fresh capture makes the pane unsafe to press a key on.
 fn unsafe_to_press(capture: &str, profile: &CompiledPromptProfile) -> Option<String> {
     if live_prompt_in_tail(capture, profile) {
@@ -101,93 +74,6 @@ fn unsafe_to_press(capture: &str, profile: &CompiledPromptProfile) -> Option<Str
     } else {
         None
     }
-}
-
-/// Whether the first input-box row is drawn dim or grey in `styled` — a
-/// CLI's prompt suggestion, not text anyone typed.
-fn composer_text_is_dim(styled: &str, first_row: &str) -> bool {
-    let Some(line) = styled
-        .lines()
-        .rev()
-        .find(|l| crate::replay::strip_ansi(l).contains(first_row))
-    else {
-        return false;
-    };
-    let cells = styled_cells(line);
-    let plain: String = cells.iter().map(|(c, _)| *c).collect();
-    let Some(byte_at) = plain.find(first_row) else {
-        return false;
-    };
-    let start = plain[..byte_at].chars().count();
-    cells
-        .iter()
-        .skip(start)
-        .take(first_row.chars().count())
-        .filter(|(c, _)| !c.is_whitespace())
-        .all(|(_, dim)| *dim)
-}
-
-/// Each visible character of `line` with whether it is drawn dim or grey.
-fn styled_cells(line: &str) -> Vec<(char, bool)> {
-    let mut cells = Vec::new();
-    let mut dim = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            cells.push((c, dim));
-            continue;
-        }
-        if chars.peek() != Some(&'[') {
-            chars.next();
-            continue;
-        }
-        chars.next();
-        let mut params = String::new();
-        let mut final_byte = None;
-        for p in chars.by_ref() {
-            if ('@'..='~').contains(&p) {
-                final_byte = Some(p);
-                break;
-            }
-            params.push(p);
-        }
-        if final_byte == Some('m') {
-            dim = apply_sgr(dim, &params);
-        }
-    }
-    cells
-}
-
-/// Applies one SGR parameter list to the dim/grey state.
-fn apply_sgr(mut dim: bool, params: &str) -> bool {
-    let codes: Vec<u16> = params.split(';').map(|p| p.parse().unwrap_or(0)).collect();
-    let mut i = 0;
-    while i < codes.len() {
-        match codes[i] {
-            2 | 90 => dim = true,
-            0 | 22 | 39 | 30..=37 | 91..=97 => dim = false,
-            38 => match codes.get(i + 1) {
-                Some(5) => {
-                    let n = codes.get(i + 2).copied().unwrap_or(0);
-                    dim = n == 8 || (232..=250).contains(&n);
-                    i += 2;
-                }
-                Some(2) => {
-                    let (r, g, b) = (
-                        codes.get(i + 2).copied().unwrap_or(0),
-                        codes.get(i + 3).copied().unwrap_or(0),
-                        codes.get(i + 4).copied().unwrap_or(0),
-                    );
-                    dim = r == g && g == b && r < 200;
-                    i += 4;
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-        i += 1;
-    }
-    dim
 }
 
 /// Evidence of a submitted user turn: how many lines of `capture` show
@@ -283,9 +169,9 @@ pub fn deliver<B: TerminalBackend>(
             "no live surface for agent `{agent_id}`"
         )));
     };
-    let profile =
-        crate::agent_cli::CliProfile::resolve(&agent.cli, target.clis).compiled_prompt_profile()?;
-    let settle_delay = Duration::from_millis(resolve_submit_delay_ms(&agent.cli, target.clis));
+    let cli = crate::agent_cli::CliProfile::resolve(&agent.cli, target.clis);
+    let profile = cli.compiled_prompt_profile()?;
+    let settle_delay = Duration::from_millis(cli.submit_delay_ms());
 
     let Some(_claim) = PaneClaim::try_acquire(target.repo_root, pane_index) else {
         return Ok(SendResult::Refused("pane busy".to_string()));
@@ -317,10 +203,9 @@ pub fn deliver<B: TerminalBackend>(
     let evidence_before = turn_evidence(&capture, &message, &profile);
 
     let guard = |capture: &str| unsafe_to_press(capture, &profile);
-    let mut dispatcher = BackendDispatcher(backend);
     let mut port = SubmitPort {
         capturer: backend,
-        dispatcher: &mut dispatcher,
+        dispatcher: backend,
         clock,
         guard: Some(&guard),
     };
@@ -374,20 +259,6 @@ fn surface_of<B: TerminalBackend>(
                 .is_some_and(|owner| crate::surface::resolve_agent(owner, roster).is_some())
         })
         .map(|s| s.position)
-}
-
-/// Lends a shared backend as the actuator's keystroke dispatcher; the port's
-/// operations take `&self`, so the same backend is also the capturer.
-struct BackendDispatcher<'a, B: TerminalBackend>(&'a B);
-
-impl<B: TerminalBackend> KeyDispatcher for BackendDispatcher<'_, B> {
-    fn send_key(&mut self, session: &str, pane_index: usize, key: &str) -> std::io::Result<()> {
-        crate::supervisor::keys::dispatch_key(self.0, session, pane_index, key)
-    }
-
-    fn send_text(&mut self, session: &str, pane_index: usize, text: &str) -> std::io::Result<()> {
-        crate::supervisor::keys::dispatch_text(self.0, session, pane_index, text)
-    }
 }
 
 /// Runs `git paw __send` from `cwd`: refuses from a linked worktree, resolves
@@ -479,6 +350,7 @@ fn notes(result: &SendResult, message: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CliPromptProfileOverride;
     use crate::terminal::fake::{FakeBackend, Operation};
     use std::time::Instant;
 
@@ -568,6 +440,41 @@ mod tests {
         format!("> {message}\n\n{}", empty_box())
     }
 
+    /// Spec scenario "A send uses the backend as capturer and dispatcher":
+    /// the text and its `Enter` reach the same fake the screen was read from,
+    /// in that order.
+    #[test]
+    fn a_send_uses_the_backend_as_capturer_and_dispatcher() {
+        let done = submitted("please continue");
+        let fx = fixture(&[
+            Some(&empty_box()),
+            Some(&empty_box()),
+            Some(&done),
+            Some(&done),
+        ]);
+        assert_eq!(
+            send(&fx, "feat-x", "please continue"),
+            SendResult::Delivered
+        );
+        let keys = keystrokes(&fx);
+        let text_at = keys
+            .iter()
+            .position(
+                |op| matches!(op, Operation::SendText { text, .. } if text == "please continue"),
+            )
+            .expect("the text was typed");
+        assert!(
+            keys[text_at + 1..]
+                .iter()
+                .any(|op| matches!(op, Operation::SendKey { .. })),
+            "an Enter follows the text: {keys:?}"
+        );
+        assert!(
+            fx.backend.operations().iter().any(|op| !op.is_keystroke()),
+            "the same backend was read"
+        );
+    }
+
     /// Spec scenario "A paragraph-length message is submitted".
     #[test]
     fn a_paragraph_length_message_is_delivered() {
@@ -608,8 +515,54 @@ mod tests {
         assert_eq!(result.exit_code(), 2);
     }
 
-    /// Spec scenario "A selection menu blocks the send": an `Enter` would
-    /// pick an option, so nothing is typed.
+    /// A fixture whose agent runs `mycli` with `override_` as its profile.
+    fn a_custom_profile_fixture(screen: &str, override_: CliPromptProfileOverride) -> Fixture {
+        let mut fx = fixture(&[Some(screen)]);
+        fx.roster[0].cli = "mycli".to_string();
+        fx.clis.insert(
+            "mycli".to_string(),
+            CustomCli {
+                command: "mycli".to_string(),
+                prompt_profile: Some(override_),
+                ..CustomCli::default()
+            },
+        );
+        fx
+    }
+
+    /// Spec scenario "An overridden cursor glyph is honoured".
+    #[test]
+    fn an_overridden_cursor_glyph_is_honoured() {
+        let fx = a_custom_profile_fixture(
+            "Cache is cold. Send anyway?\n» 1. Send\n  2. Wait",
+            CliPromptProfileOverride {
+                menu_cursor_glyphs: Some(vec!["»".to_string()]),
+                ..CliPromptProfileOverride::default()
+            },
+        );
+        let result = send(&fx, "feat-x", "please continue");
+        assert_eq!(result.line(), "refused: selection menu showing");
+        assert!(keystrokes(&fx).is_empty());
+    }
+
+    /// Spec scenario "An overridden footer replaces the default".
+    #[test]
+    fn an_overridden_footer_replaces_the_default() {
+        let fx = a_custom_profile_fixture(
+            "Pick a model\n  1. Fast\n  2. Slow\nPress space to choose",
+            CliPromptProfileOverride {
+                menu_footer_markers: Some(vec!["press space to choose".to_string()]),
+                ..CliPromptProfileOverride::default()
+            },
+        );
+        let result = send(&fx, "feat-x", "please continue");
+        assert_eq!(result.line(), "refused: selection menu showing");
+        assert!(keystrokes(&fx).is_empty());
+    }
+
+    /// Spec scenarios "The default profile detects a menu as before" and
+    /// "A selection menu blocks the send": an `Enter` would pick an option,
+    /// so nothing is typed.
     #[test]
     fn a_selection_menu_blocks_the_send() {
         for menu in [
@@ -711,18 +664,6 @@ mod tests {
         assert!(notes(&SendResult::Refused("x".into()), "a\nb").is_empty());
         let wedged = notes(&SendResult::Wedged("still on the input line".into()), "m");
         assert_eq!(wedged, ["note: still on the input line"]);
-    }
-
-    #[test]
-    fn grey_sgr_forms_read_as_dim() {
-        for sgr in ["2", "90", "38;5;244", "38;2;128;128;128", "1;2"] {
-            let line = format!("> \x1b[{sgr}mhint\x1b[0m");
-            assert!(composer_text_is_dim(&line, "hint"), "{sgr}");
-        }
-        for sgr in ["0", "97", "38;5;15", "38;2;200;100;100"] {
-            let line = format!("> \x1b[{sgr}mtext\x1b[0m");
-            assert!(!composer_text_is_dim(&line, "text"), "{sgr}");
-        }
     }
 
     /// Spec scenario "A live permission prompt blocks the send".

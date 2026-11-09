@@ -24,7 +24,6 @@ use super::launch::{
     write_repo_discovery_file,
 };
 use super::{CommandContext, Output};
-use crate::config::resolve_submit_delay_ms;
 
 /// Options for [`add`]: the `git paw add` arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -287,6 +286,7 @@ pub fn add(
         placement: config.worktree_placement(),
         worktree_runtime: &worktree_runtime,
         clis: &config.clis,
+        warnings: &std::cell::RefCell::default(),
     };
 
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.
@@ -413,7 +413,7 @@ pub fn add(
             &pane.launch_command,
             &config.clis,
         )?;
-        let delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
+        let delay = agent_profile.submit_delay_ms();
         submit_prompt_to_pane(
             &backend,
             &updated.session_name,

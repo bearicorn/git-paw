@@ -2361,9 +2361,13 @@ fn add_skips_the_rebase_over_a_modified_tracked_file() {
         assert!(out.status.success(), "add failed; stderr:\n{stderr}");
         assert_eq!(git_ok(&wt, &["rev-parse", "HEAD"]), head_before);
         assert_eq!(fs::read_to_string(wt.join("README.md")).unwrap(), edited);
+        // Spec scenario "add keeps its notice text" (git-operations).
         assert!(
-            stderr.contains("rebase skipped for 'feat/x'") && stderr.contains("--no-rebase"),
-            "stderr must carry the skip notice:\n{stderr}"
+            stderr.contains(
+                "notice: rebase skipped for 'feat/x': its worktree has uncommitted changes, \
+                 which are left untouched. Pass --no-rebase to attach without a rebase."
+            ),
+            "stderr must carry the exact skip notice:\n{stderr}"
         );
     }));
     kill(&tmux_env, &session);

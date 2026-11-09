@@ -476,7 +476,9 @@ returns structured JSON with the command's output lines and warnings.
   command would otherwise put to a picker is refused with the parameter to
   pass. `supervisor` absent means the repository's `[supervisor]` config
   decides, as a non-interactive `git paw start` does. `dry_run` reports the plan
-  and creates nothing.
+  and creates nothing. A rebase skipped for a branch whose worktree has
+  uncommitted changes is returned in `warnings`, naming the branch and the
+  reason.
 - **`stop_session` takes no confirmation.** Stopping is recoverable (the
   worktrees, branches and state stay; `start_session` recovers it), as with
   `git paw stop`.

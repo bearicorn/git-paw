@@ -1092,7 +1092,7 @@ pub struct DriveDeps<'a> {
     /// Captures pane content.
     pub capturer: &'a dyn PaneCapture,
     /// Dispatches nudge and input-recovery keystrokes.
-    pub dispatcher: &'a mut dyn KeyDispatcher,
+    pub dispatcher: &'a dyn KeyDispatcher,
     /// Fetches broker `/status`.
     pub status: &'a dyn StatusFetcher,
     /// Observes newly published broker messages (gate-failure feedback).
@@ -1366,7 +1366,9 @@ pub fn drive_loop_logged(
     // resolved on first sight below.
     let mut profiles = AgentProfiles::new(config.clis.clone());
     for agent in &agents {
-        profiles.record(&agent.agent_id, &agent.cli);
+        if let Some(warning) = profiles.record(&agent.agent_id, &agent.cli) {
+            eprintln!("{warning}");
+        }
     }
     let mut dedup = DedupWindow::new(config.dedup_window);
     let mut correction = CorrectionState::new();
@@ -1435,7 +1437,9 @@ pub fn drive_loop_logged(
         {
             coding_ids = fresh.iter().map(|a| a.agent_id.clone()).collect();
             for agent in &fresh {
-                profiles.record(&agent.agent_id, &agent.cli);
+                if let Some(warning) = profiles.record(&agent.agent_id, &agent.cli) {
+                    eprintln!("{warning}");
+                }
             }
             agents = fresh;
         }
@@ -2305,7 +2309,7 @@ fn send_nudge(
 
     let mut port = SubmitPort {
         capturer: deps.capturer,
-        dispatcher: &mut *deps.dispatcher,
+        dispatcher: deps.dispatcher,
         clock: deps.clock,
         guard: None,
     };
@@ -2326,7 +2330,7 @@ pub struct SubmitPort<'a> {
     /// Reads the surface to verify the submission.
     pub capturer: &'a dyn PaneCapture,
     /// Types the text and its separate `Enter`.
-    pub dispatcher: &'a mut dyn KeyDispatcher,
+    pub dispatcher: &'a dyn KeyDispatcher,
     /// Waits out the settle delay.
     pub clock: &'a dyn Clock,
     /// When set, a prompt or menu that appears mid-sequence stops it before
@@ -2484,7 +2488,7 @@ fn recover_stale_input(
     } = *target;
     let mut port = SubmitPort {
         capturer: deps.capturer,
-        dispatcher: &mut *deps.dispatcher,
+        dispatcher: deps.dispatcher,
         clock: deps.clock,
         guard: None,
     };
@@ -3306,7 +3310,7 @@ pub fn run_drive_loop(
     let backend = crate::terminal::tmux::TmuxBackend::new();
     let enumerator = backend;
     let capturer = backend;
-    let mut dispatcher = backend;
+    let dispatcher = backend;
     let status = HttpStatusFetcher {
         broker_url: broker_url.clone(),
     };
@@ -3361,7 +3365,7 @@ pub fn run_drive_loop(
     let mut deps = DriveDeps {
         enumerator: &enumerator,
         capturer: &capturer,
-        dispatcher: &mut dispatcher,
+        dispatcher: &dispatcher,
         status: &status,
         messages: &messages,
         clock: &clock,
@@ -3709,27 +3713,33 @@ mod tests {
     /// assert not just *what* was typed but *by which* path.
     #[derive(Default)]
     struct RecordingDispatcher {
-        events: Vec<(usize, String)>,
-        literal_sends: Vec<(usize, String)>,
+        events_log: RefCell<Vec<(usize, String)>>,
+        literal_log: RefCell<Vec<(usize, String)>>,
+    }
+    impl RecordingDispatcher {
+        /// Every key and text sent, in order.
+        fn events(&self) -> Vec<(usize, String)> {
+            self.events_log.borrow().clone()
+        }
+        /// Every text sent literally, in order.
+        fn literal_sends(&self) -> Vec<(usize, String)> {
+            self.literal_log.borrow().clone()
+        }
     }
     impl KeyDispatcher for RecordingDispatcher {
-        fn send_key(
-            &mut self,
-            _session: &str,
-            pane_index: usize,
-            key: &str,
-        ) -> std::io::Result<()> {
-            self.events.push((pane_index, key.to_string()));
+        fn send_key(&self, _session: &str, pane_index: usize, key: &str) -> std::io::Result<()> {
+            self.events_log
+                .borrow_mut()
+                .push((pane_index, key.to_string()));
             Ok(())
         }
-        fn send_text(
-            &mut self,
-            _session: &str,
-            pane_index: usize,
-            text: &str,
-        ) -> std::io::Result<()> {
-            self.events.push((pane_index, text.to_string()));
-            self.literal_sends.push((pane_index, text.to_string()));
+        fn send_text(&self, _session: &str, pane_index: usize, text: &str) -> std::io::Result<()> {
+            self.events_log
+                .borrow_mut()
+                .push((pane_index, text.to_string()));
+            self.literal_log
+                .borrow_mut()
+                .push((pane_index, text.to_string()));
             Ok(())
         }
     }
@@ -4155,7 +4165,7 @@ mod tests {
     fn sweep_probe(capture: &str, agent_id: &str, pane_index: usize) -> SweepProbe {
         let enumerator = FakeEnumerator { panes: Vec::new() };
         let capturer = FakeCapturer::new(&[(pane_index, capture)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![Vec::new()]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -4168,7 +4178,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -4194,7 +4204,7 @@ mod tests {
         };
         SweepProbe {
             outcome,
-            keys: dispatcher.events,
+            keys: dispatcher.events(),
             escalations: alerts.escalations,
             learnings: learnings.records,
         }
@@ -4331,7 +4341,7 @@ mod tests {
     ) -> Vec<Escalation> {
         let enumerator = FakeEnumerator { panes: Vec::new() };
         let capturer = FakeCapturer::new(&[(pane_index, capture)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![Vec::new()]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -4343,7 +4353,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -4465,7 +4475,7 @@ mod tests {
         // No live prompt on the pane: the only escalations are the correction
         // loop's own.
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
         let messages = ScriptedMessages::new(
             (0..6)
@@ -4481,7 +4491,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -4697,7 +4707,7 @@ mod tests {
     #[test]
     fn a_raw_send_of_a_long_message_leaves_a_paste_placeholder_unsubmitted() {
         use crate::terminal::fake::FakeBackend;
-        let mut fake = FakeBackend::new();
+        let fake = FakeBackend::new();
         let surface = fake.surface_at("paw-x", 2);
         fake.script_screens(
             &surface,
@@ -4705,8 +4715,8 @@ mod tests {
         );
         let message = four_hundred_char_message();
 
-        KeyDispatcher::send_text(&mut fake, "paw-x", 2, &message).unwrap();
-        KeyDispatcher::send_key(&mut fake, "paw-x", 2, "Enter").unwrap();
+        KeyDispatcher::send_text(&fake, "paw-x", 2, &message).unwrap();
+        KeyDispatcher::send_key(&fake, "paw-x", 2, "Enter").unwrap();
 
         let after = PaneCapture::capture(&fake, "paw-x", 2);
         assert!(
@@ -4727,6 +4737,8 @@ mod tests {
 
     /// The actuator recovers the same placeholder: it re-types and submits,
     /// then sees the input box empty and reports the message delivered.
+    /// Spec scenario "Drive-loop keystrokes are unchanged": the fake is both
+    /// capturer and dispatcher, with no adapter between them.
     #[test]
     fn submit_and_verify_recovers_a_paste_placeholder_and_reports_delivered() {
         use crate::terminal::Key;
@@ -4742,10 +4754,10 @@ mod tests {
         );
         let message = four_hundred_char_message();
         let clock = FakeClock::new();
-        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let dispatcher = &fake;
         let mut port = SubmitPort {
             capturer: &fake,
-            dispatcher: &mut dispatcher,
+            dispatcher,
             clock: &clock,
             guard: None,
         };
@@ -4804,10 +4816,10 @@ mod tests {
             &[Some(&idle_input_box("[Pasted text #1 +3 lines]"))],
         );
         let clock = FakeClock::new();
-        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let dispatcher = &fake;
         let mut port = SubmitPort {
             capturer: &fake,
-            dispatcher: &mut dispatcher,
+            dispatcher,
             clock: &clock,
             guard: None,
         };
@@ -4841,7 +4853,7 @@ mod tests {
             ],
         );
         let clock = FakeClock::new();
-        let mut dispatcher = SharedFakeDispatcher(&fake);
+        let dispatcher = &fake;
         let guard = |capture: &str| {
             capture
                 .contains("Do you want to proceed?")
@@ -4849,7 +4861,7 @@ mod tests {
         };
         let mut port = SubmitPort {
             capturer: &fake,
-            dispatcher: &mut dispatcher,
+            dispatcher,
             clock: &clock,
             guard: Some(&guard),
         };
@@ -4985,7 +4997,7 @@ mod tests {
                 owner: "/repo-feat-a".to_string(),
             }],
         };
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
@@ -4995,7 +5007,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status,
             messages: &messages,
             clock: &clock,
@@ -5013,7 +5025,7 @@ mod tests {
             ..DriveConfig::default()
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        (dispatcher.events, alerts)
+        (dispatcher.events(), alerts)
     }
 
     /// Spec scenario "A buffered directive on an idle pane is submitted": the
@@ -5260,7 +5272,7 @@ mod tests {
         // wedges on both sweeps.
         let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
         let capturer = FakeCapturer::new(&[(1, &placeholder)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![], vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -5271,7 +5283,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -5315,7 +5327,7 @@ mod tests {
         ];
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Tick 1: feat-a reaches its terminal artifact, feat-b is only
         // committed (awaiting merge) — no completion yet either way. Tick 2:
         // the supervisor's own verdict fires completion, but feat-a's row has
@@ -5339,7 +5351,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -5400,7 +5412,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Never completes on its own — the instance teardown is what ends it.
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
         let clock = FakeClock::new();
@@ -5412,7 +5424,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -5453,9 +5465,9 @@ mod tests {
             alerts.escalations
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no pane is typed into either way: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -5485,7 +5497,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Never completes on its own — only the lost binding ends it.
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
         let clock = FakeClock::new();
@@ -5497,7 +5509,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -5556,9 +5568,9 @@ mod tests {
             alerts.escalations
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no keystroke reaches a session this loop no longer drives: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -5572,7 +5584,7 @@ mod tests {
         }];
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -5583,7 +5595,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -5619,25 +5631,6 @@ mod tests {
 
     const FAKE_SESSION: &str = "paw-test";
 
-    /// Lends a shared [`FakeBackend`] to the loop as its dispatcher; the
-    /// port's operations take `&self`, so the same fake is also the
-    /// enumerator and capturer. Delegates to the production key mapping.
-    struct SharedFakeDispatcher<'a, B: TerminalBackend + ?Sized>(&'a B);
-
-    impl<B: TerminalBackend + ?Sized> KeyDispatcher for SharedFakeDispatcher<'_, B> {
-        fn send_key(&mut self, session: &str, pane_index: usize, key: &str) -> std::io::Result<()> {
-            super::super::keys::dispatch_key(self.0, session, pane_index, key)
-        }
-        fn send_text(
-            &mut self,
-            session: &str,
-            pane_index: usize,
-            text: &str,
-        ) -> std::io::Result<()> {
-            super::super::keys::dispatch_text(self.0, session, pane_index, text)
-        }
-    }
-
     fn agent_pane(agent_id: &str, worktree: &str) -> AgentPane {
         AgentPane {
             agent_id: agent_id.to_string(),
@@ -5667,7 +5660,7 @@ mod tests {
         agents: &[AgentPane],
         status: &ScriptedStatus,
     ) -> (DriveSummary, RecordingAlerts) {
-        let mut dispatcher = SharedFakeDispatcher(fake);
+        let dispatcher = fake;
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
@@ -5678,7 +5671,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: fake,
                 capturer: fake,
-                dispatcher: &mut dispatcher,
+                dispatcher,
                 status,
                 messages: &messages,
                 clock: &clock,
@@ -5985,7 +5978,7 @@ mod tests {
             (2, "working...\n$ "),
             (3, "stray shell\n$ "),
         ]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Complete on the first poll so exactly one sweep runs.
         let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
@@ -5997,7 +5990,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6052,7 +6045,7 @@ mod tests {
             (0, ""), // dashboard: never captured
             (2, &live_safe_capture("cargo test")),
         ]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // The agent's task is verified by the first status poll, so the loop
         // escalates the live prompt once, detects completion, and exits.
         // (The fake capture never clears, so completing on the first sweep
@@ -6067,7 +6060,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6092,9 +6085,9 @@ mod tests {
         // Pane 2 is the prompting pane: it receives nothing, and nothing is
         // typed anywhere else for the escalation either.
         assert!(
-            !dispatcher.events.iter().any(|(p, _)| *p == 2),
+            !dispatcher.events().iter().any(|(p, _)| *p == 2),
             "the prompting pane must receive no keystroke; dispatched: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
         assert_eq!(alerts.escalations.len(), 1, "one escalation recorded");
         assert_eq!(alerts.escalations[0].verdict, PERMISSION_PROMPT_VERDICT);
@@ -6143,7 +6136,7 @@ mod tests {
             (2, &idle_input_box("please continue with task 3")),
             (3, &idle_input_box("please continue with task 3")),
         ]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Both agents are terminal on the first poll, so exactly one sweep runs
         // and the keystroke count is deterministic.
         let status = ScriptedStatus::new(vec![vec![
@@ -6159,7 +6152,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6194,14 +6187,14 @@ mod tests {
         );
 
         assert!(
-            !dispatcher.literal_sends.iter().any(|(p, _)| *p == 2),
+            !dispatcher.literal_sends().iter().any(|(p, _)| *p == 2),
             "the claimed pane must have no free text typed into it; literal sends were {:?}",
-            dispatcher.literal_sends
+            dispatcher.literal_sends()
         );
         assert!(
-            dispatcher.literal_sends.iter().any(|(p, _)| *p == 3),
+            dispatcher.literal_sends().iter().any(|(p, _)| *p == 3),
             "the unclaimed pane is still recovered; literal sends were {:?}",
-            dispatcher.literal_sends
+            dispatcher.literal_sends()
         );
         assert!(
             claimed.exists(),
@@ -6248,7 +6241,7 @@ mod tests {
             (2, &live_safe_capture("git push --force origin main")),
             (3, &live_safe_capture("cargo build")),
         ]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Complete on the second poll so we can observe one full sweep.
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working"), row("feat-b", "working")],
@@ -6263,7 +6256,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6299,9 +6292,9 @@ mod tests {
             "both panes escalate, under one verdict"
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "neither prompting pane may receive a keystroke, got {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
         assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
         // A friction learning was recorded opportunistically + at wind-down.
@@ -6326,7 +6319,7 @@ mod tests {
         };
         // Agent iterates (no live prompt) forever — never completes.
         let capturer = FakeCapturer::new(&[(2, "working on it...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Always "working": completion never fires.
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
         let clock = FakeClock::new();
@@ -6338,7 +6331,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6359,7 +6352,7 @@ mod tests {
         assert_eq!(summary.outcome, DriveOutcome::Heartbeat);
         // No keystrokes and no escalation for a plainly-iterating agent
         // (feedback-cycle tolerance, task 5.4).
-        assert!(dispatcher.events.is_empty());
+        assert!(dispatcher.events().is_empty());
         assert!(alerts.escalations.is_empty());
     }
 
@@ -6393,7 +6386,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(2, capture)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(statuses);
         let messages = ScriptedMessages::new(message_batches);
         let clock = FakeClock::new();
@@ -6405,7 +6398,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6808,7 +6801,7 @@ mod tests {
         };
         // The prompt never clears, and the agent never leaves `working`.
         let capturer = FakeCapturer::new(&[(2, &live_safe_capture("ls -la"))]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -6819,7 +6812,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6852,9 +6845,9 @@ mod tests {
             "the prompt was escalated at least once"
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "and never answered: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -6905,7 +6898,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(2, &live_safe_capture("cargo test"))]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // First poll: empty roster (no broker record). Second: supervisor done.
         let status = ScriptedStatus::new(vec![vec![], vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
@@ -6917,7 +6910,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6966,7 +6959,7 @@ mod tests {
         let scrollback =
             "Do you want to proceed?\n(esc to cancel)\nran it\nline b\nline c\nline d\n$ ";
         let capturer = FakeCapturer::new(&[(2, scrollback)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -6977,7 +6970,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -6996,7 +6989,7 @@ mod tests {
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "a scrollback prompt must not trigger keystrokes"
         );
     }
@@ -7137,7 +7130,7 @@ mod tests {
         let agents = correction_agents();
         let enumerator = correction_panes();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working")],
             vec![row("supervisor", "done")],
@@ -7155,7 +7148,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -7178,8 +7171,12 @@ mod tests {
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
-        assert_eq!(dispatcher.events.len(), 2, "one text keystroke + one Enter");
-        let (pane, text) = &dispatcher.events[0];
+        assert_eq!(
+            dispatcher.events().len(),
+            2,
+            "one text keystroke + one Enter"
+        );
+        let (pane, text) = &dispatcher.events()[0];
         assert_eq!(*pane, 2, "sent to the resolved pane");
         assert!(
             text.contains("testing") && text.contains("3 unit tests fail"),
@@ -7189,12 +7186,12 @@ mod tests {
             !text.contains('\n'),
             "the text keystroke carries no newline; Enter is separate"
         );
-        assert_eq!(dispatcher.events[1], (2, "Enter".to_string()));
+        assert_eq!(dispatcher.events()[1], (2, "Enter".to_string()));
         // The feedback is free text git-paw did not choose word-by-word, so it
         // goes out LITERALLY (`send-keys -l`); the submitting `Enter` does NOT,
         // because it must resolve through tmux's key table.
         assert_eq!(
-            dispatcher.literal_sends,
+            dispatcher.literal_sends(),
             vec![(2, text.clone())],
             "the feedback is the only literal send; Enter stays a key name"
         );
@@ -7291,7 +7288,7 @@ mod tests {
     /// `-l`, a bare `C-c` would fire an interrupt in the worker's pane.
     #[test]
     fn reengagement_text_is_never_interpreted_as_a_tmux_key_name() {
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
         let enumerator = FakeEnumerator { panes: vec![] };
         let status = ScriptedStatus::new(vec![]);
@@ -7304,7 +7301,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -7330,12 +7327,12 @@ mod tests {
         .expect("dispatch succeeds");
         assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
-            dispatcher.literal_sends,
+            dispatcher.literal_sends(),
             vec![(2, "C-c".to_string())],
             "a key-name-shaped payload is sent literally, not as a key"
         );
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![(2, "C-c".to_string()), (2, "Enter".to_string())],
             "text then a SEPARATE Enter (D6)"
         );
@@ -7351,7 +7348,7 @@ mod tests {
         text: &str,
         settle_delay: Duration,
     ) -> (NudgeOutcome, RecordingDispatcher, RecordingAlerts, Duration) {
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let enumerator = FakeEnumerator { panes: vec![] };
         let status = ScriptedStatus::new(vec![]);
         let messages = ScriptedMessages::none();
@@ -7366,7 +7363,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -7410,7 +7407,7 @@ mod tests {
              between the text send and Enter, got {elapsed:?}"
         );
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![(2, "please continue".to_string()), (2, "Enter".to_string())],
             "text then a separate Enter, with the settle delay slept in between"
         );
@@ -7432,7 +7429,7 @@ mod tests {
             call_send_reengagement(&capturer, "please continue", Duration::ZERO);
         assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![
                 (2, "please continue".to_string()),
                 (2, "Enter".to_string()),
@@ -7463,11 +7460,11 @@ mod tests {
         assert_eq!(outcome, NudgeOutcome::Wedged);
         let expected_len = 2 + usize::from(NUDGE_RECOVERY_ATTEMPTS) * 3;
         assert_eq!(
-            dispatcher.events.len(),
+            dispatcher.events().len(),
             expected_len,
             "bounded recovery: one initial send + {NUDGE_RECOVERY_ATTEMPTS} \
              clear+retype+Enter rounds, events were {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
         assert_eq!(alerts.escalations.len(), 1, "escalated exactly once");
         assert_eq!(alerts.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
@@ -7490,7 +7487,7 @@ mod tests {
             call_send_reengagement(&capturer, text, Duration::ZERO);
         assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![
                 (2, text.to_string()),
                 (2, "Enter".to_string()),
@@ -7516,7 +7513,7 @@ mod tests {
             call_send_reengagement(&capturer, text, Duration::ZERO);
         assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![
                 (2, text.to_string()),
                 (2, "Enter".to_string()),
@@ -7539,7 +7536,7 @@ mod tests {
             call_send_reengagement(&capturer, "please continue", Duration::ZERO);
         assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
-            dispatcher.events,
+            dispatcher.events(),
             vec![(2, "please continue".to_string()), (2, "Enter".to_string())],
             "an already-empty box needs no recovery keystrokes"
         );
@@ -7571,7 +7568,7 @@ mod tests {
         let agents = correction_agents();
         let enumerator = correction_panes();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working")],
             vec![row("supervisor", "done")],
@@ -7589,7 +7586,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -7611,7 +7608,7 @@ mod tests {
         let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no re-engagement keystrokes when auto_loopback is off"
         );
         assert!(summary.exhausted.is_empty(), "no correction cycle ran");
@@ -7631,7 +7628,7 @@ mod tests {
         // sweep1 (idle) → re-confirm1 (live, blocks) → sweep2 (idle) →
         // re-confirm2 (idle, sends). The last capture repeats thereafter.
         let capturer = SequencedCapturer::new(&[idle, live, idle, idle]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working")],
             vec![row("feat-a", "working")],
@@ -7650,7 +7647,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -7674,11 +7671,11 @@ mod tests {
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert_eq!(
-            dispatcher.events.len(),
+            dispatcher.events().len(),
             2,
             "exactly one re-engagement, delivered on the sweep after the guard fired"
         );
-        assert!(dispatcher.events[0].1.contains("doc audit"));
+        assert!(dispatcher.events()[0].1.contains("doc audit"));
     }
 
     /// Builds the fixture for the bounded-cycle tests: a branch that fails its
@@ -7714,7 +7711,7 @@ mod tests {
         let agents = correction_agents();
         let enumerator = correction_panes();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![status_rows]);
         let messages = ScriptedMessages::new(
             (0..rounds)
@@ -7730,7 +7727,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -7777,7 +7774,7 @@ mod tests {
             vec![row("feat-a", "working")],
         );
         assert_eq!(
-            dispatcher.events.len(),
+            dispatcher.events().len(),
             6,
             "exactly max_cycles (3) re-engagements, each a text + Enter pair"
         );
@@ -7848,7 +7845,7 @@ mod tests {
             "abandon sends no escalation-as-recoverable"
         );
         assert_eq!(
-            dispatcher.events.len(),
+            dispatcher.events().len(),
             4,
             "re-engaged exactly max_cycles (2) times"
         );
@@ -7881,7 +7878,7 @@ mod tests {
         assert_eq!(early.len(), 1, "the early heads-up fires exactly once");
         assert_eq!(early[0].agent_id, "feat-a");
         assert_eq!(
-            dispatcher.events.len(),
+            dispatcher.events().len(),
             10,
             "re-engagement continues past the early flag until max_cycles (5)"
         );
@@ -7942,7 +7939,7 @@ mod tests {
         let agents = correction_agents();
         let enumerator = correction_panes();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // Fails on the first sweep, then reaches a terminal PASS.
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working")],
@@ -7961,7 +7958,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -7985,7 +7982,7 @@ mod tests {
         };
         let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
-        assert_eq!(dispatcher.events.len(), 2, "re-engaged once");
+        assert_eq!(dispatcher.events().len(), 2, "re-engaged once");
         assert!(
             summary.exhausted.is_empty(),
             "a branch that passes never reaches the exhaustion policy"
@@ -8040,7 +8037,7 @@ mod tests {
     ) -> (RecordingDispatcher, RecordingAlerts) {
         let enumerator = FakeEnumerator { panes };
         let capturer = FakeCapturer::new(pane_text);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(statuses);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -8050,7 +8047,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages,
             clock: &clock,
@@ -8080,7 +8077,7 @@ mod tests {
     ) -> (DriveSummary, RecordingDispatcher) {
         let enumerator = FakeEnumerator { panes };
         let capturer = FakeCapturer::new(pane_text);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(statuses);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -8091,7 +8088,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -8162,9 +8159,9 @@ mod tests {
             summary.escalations
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no surface may receive keystrokes for unmerged entries: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -8324,9 +8321,9 @@ mod tests {
         // The escalations are broker records only — no surface receives a
         // keystroke.
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no surface may be typed into: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -8497,7 +8494,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![pane(2, "/repo-feat-a")],
         };
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
@@ -8507,7 +8504,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &ScriptedMessages::default(),
             clock: &clock,
@@ -8563,7 +8560,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![pane(2, "/repo-feat-a")],
         };
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
@@ -8573,7 +8570,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &ScriptedMessages::default(),
             clock: &clock,
@@ -8644,7 +8641,7 @@ mod tests {
             summary.escalations
         );
         assert_eq!(summary.outcome, DriveOutcome::Completed);
-        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(dispatcher.events().is_empty(), "{:?}", dispatcher.events());
     }
 
     /// Spec scenario (GP-50) "The embedded profile recognises an organisation
@@ -8710,24 +8707,24 @@ mod tests {
     /// immediately after — the D6 nudge discipline.
     fn assert_text_then_separate_enter(d: &RecordingDispatcher, pane_index: usize, needle: &str) {
         let pos = d
-            .events
+            .events()
             .iter()
             .position(|(p, t)| *p == pane_index && t.contains(needle))
             .unwrap_or_else(|| {
                 panic!(
                     "expected a send containing {needle:?} to pane {pane_index}; \
                      events were {:?}",
-                    d.events
+                    d.events()
                 )
             });
         assert!(
-            d.literal_sends
+            d.literal_sends()
                 .iter()
                 .any(|(p, t)| *p == pane_index && t.contains(needle)),
             "the body must go out literally (send-keys -l), never through tmux's key table"
         );
         assert_eq!(
-            d.events.get(pos + 1),
+            d.events().get(pos + 1),
             Some(&(pane_index, "Enter".to_string())),
             "the submitting Enter must be its own keystroke, right after the text"
         );
@@ -8735,7 +8732,7 @@ mod tests {
 
     /// Whether any literal send to `pane_index` contains `needle`.
     fn injected(d: &RecordingDispatcher, pane_index: usize, needle: &str) -> bool {
-        d.literal_sends
+        d.literal_sends()
             .iter()
             .any(|(p, t)| *p == pane_index && t.contains(needle))
     }
@@ -8786,7 +8783,7 @@ mod tests {
                 .collect(),
             seen: RefCell::new(Vec::new()),
         };
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![Vec::new()]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -8804,7 +8801,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -8822,7 +8819,7 @@ mod tests {
         let mut swept = capturer.seen.borrow().clone();
         swept.sort_unstable();
         swept.dedup();
-        let mut keyed: Vec<usize> = dispatcher.events.iter().map(|(p, _)| *p).collect();
+        let mut keyed: Vec<usize> = dispatcher.events().iter().map(|(p, _)| *p).collect();
         keyed.sort_unstable();
         keyed.dedup();
         LoopTrace {
@@ -9127,9 +9124,9 @@ mod tests {
             alerts.escalations
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no surface receives a keystroke; events were {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -9196,7 +9193,7 @@ mod tests {
     ) -> (DriveSummary, RecordingDispatcher, RecordingAlerts) {
         let enumerator = FakeEnumerator { panes };
         let capturer = FakeCapturer::new(pane_text);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(statuses);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
@@ -9207,7 +9204,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -9272,9 +9269,9 @@ mod tests {
             alerts.escalations
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no keystroke answers the escalated prompt; events were {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -9316,9 +9313,9 @@ mod tests {
             "the removed agent must not appear in the exit summary; summary: {rendered}"
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no keystroke is attributed to the removed agent; events were {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -9405,7 +9402,7 @@ mod tests {
             },
         );
 
-        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(dispatcher.events().is_empty(), "{:?}", dispatcher.events());
         assert!(alerts.escalations.is_empty(), "{:?}", alerts.escalations);
     }
 
@@ -9445,10 +9442,10 @@ mod tests {
             },
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no re-engagement keystrokes once the wave completes on the same \
              tick the gate failure was observed; events were {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -9489,9 +9486,9 @@ mod tests {
                 },
             );
             assert!(
-                dispatcher.events.is_empty(),
+                dispatcher.events().is_empty(),
                 "{status}: no surface may be typed into; events were {:?}",
-                dispatcher.events
+                dispatcher.events()
             );
             assert!(
                 alerts.escalations.is_empty(),
@@ -9561,7 +9558,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(2, capture)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![first_tick_status, vec![row("supervisor", "done")]]);
         let messages = ScriptedMessages::new(messages_batches);
         let clock = FakeClock::new();
@@ -9572,7 +9569,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -9863,7 +9860,7 @@ mod tests {
 
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[(2, IDLE_PANE)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![]);
         let messages = ScriptedMessages::none();
         let clock = FakeClock::new();
@@ -9878,7 +9875,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -10027,7 +10024,7 @@ mod tests {
 
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[(2, IDLE_PANE)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![]);
         let messages = ScriptedMessages::none();
         let clock = FakeClock::new();
@@ -10042,7 +10039,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -10111,9 +10108,9 @@ mod tests {
         );
 
         assert!(
-            dispatcher.literal_sends.is_empty(),
+            dispatcher.literal_sends().is_empty(),
             "a supervisor-authored question is not a worker judgment call; sends were {:?}",
-            dispatcher.literal_sends
+            dispatcher.literal_sends()
         );
     }
 
@@ -10238,7 +10235,7 @@ mod tests {
         assert!(
             !injected(&dispatcher, 2, "Supervisor gate"),
             "a finished (verified) worker receives no nudge; sends were {:?}",
-            dispatcher.literal_sends
+            dispatcher.literal_sends()
         );
         assert_text_then_separate_enter(&dispatcher, 3, "Supervisor gate 'testing' failed");
     }
@@ -10316,7 +10313,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(1, &live_safe_capture("ls -la"))]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         // The first fetch already shows the wave complete, so the run is one
         // sweep and the wind-down.
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
@@ -10331,7 +10328,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -10381,9 +10378,9 @@ mod tests {
             ]
         );
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "no keystroke for a live prompt: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
         assert_eq!(
             run.summary,
@@ -10393,7 +10390,7 @@ mod tests {
                 &mut DriveDeps {
                     enumerator: &enumerator,
                     capturer: &capturer,
-                    dispatcher: &mut RecordingDispatcher::default(),
+                    dispatcher: &RecordingDispatcher::default(),
                     status: &ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]),
                     messages: &ScriptedMessages::none(),
                     clock: &FakeClock::new(),
@@ -10428,7 +10425,7 @@ mod tests {
             }],
         };
         let capturer = FakeCapturer::new(&[(1, "● Done.\n  ? for shortcuts")]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working")],
             vec![row("feat-a", "verified")],
@@ -10447,7 +10444,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -10481,7 +10478,7 @@ mod tests {
                 outcome: EffectOutcome::Noted,
             }]
         );
-        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(dispatcher.events().is_empty(), "{:?}", dispatcher.events());
         assert!(alerts.escalations.is_empty(), "{:?}", alerts.escalations);
     }
     // --- headless hand-off (orchestrator-escalation-handoff) ---------------
@@ -10587,7 +10584,7 @@ mod tests {
         };
         let prompt = live_safe_capture("rm -rf build");
         let capturer = FakeCapturer::new(&[(1, "● Done.\n  ? for shortcuts"), (2, &prompt)]);
-        let mut dispatcher = RecordingDispatcher::default();
+        let dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![
             vec![row("feat-a", "working"), row("feat-b", "working")],
             vec![row("feat-a", "working"), row("feat-b", "working")],
@@ -10615,7 +10612,7 @@ mod tests {
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
-            dispatcher: &mut dispatcher,
+            dispatcher: &dispatcher,
             status: &status,
             messages: &messages,
             clock: &clock,
@@ -10664,7 +10661,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(&e.effect, DriveEffect::RecordManualDecision { agent_id, .. } if agent_id == "feat-b"))
         );
-        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(dispatcher.events().is_empty(), "{:?}", dispatcher.events());
 
         assert_eq!(outcomes.0.borrow().len(), 1, "the outcome is published");
         assert_eq!(
@@ -10748,7 +10745,7 @@ mod tests {
             &mut DriveDeps {
                 enumerator: &FakeEnumerator { panes: Vec::new() },
                 capturer: &FakeCapturer::new(&[]),
-                dispatcher: &mut RecordingDispatcher::default(),
+                dispatcher: &RecordingDispatcher::default(),
                 status: &ScriptedStatus::new(vec![Vec::new()]),
                 messages: &ScriptedMessages::none(),
                 clock: &FakeClock::new(),
@@ -10816,7 +10813,7 @@ mod tests {
             &mut DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut RecordingDispatcher::default(),
+                dispatcher: &RecordingDispatcher::default(),
                 status: &ScriptedStatus::new(vec![vec![row("feat-a", "working")]]),
                 messages: &messages,
                 clock: &FakeClock::new(),
@@ -10936,9 +10933,9 @@ mod tests {
         );
         assert_eq!(prompt_escalations(&summary), vec!["feat-a"]);
         assert!(
-            dispatcher.events.is_empty(),
+            dispatcher.events().is_empty(),
             "an escalated prompt gets no keystroke: {:?}",
-            dispatcher.events
+            dispatcher.events()
         );
     }
 
@@ -11172,7 +11169,7 @@ mod tests {
                 panes: vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
             };
             let capturer = FakeCapturer::new(&[(2, IDLE_PANE), (3, IDLE_PANE)]);
-            let mut dispatcher = RecordingDispatcher::default();
+            let dispatcher = RecordingDispatcher::default();
             let status = ScriptedStatus::new(vec![vec![
                 row("feat-a", "working"),
                 row("feat-b", "working"),
@@ -11198,7 +11195,7 @@ mod tests {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
                 capturer: &capturer,
-                dispatcher: &mut dispatcher,
+                dispatcher: &dispatcher,
                 status: &status,
                 messages: &messages,
                 clock: &clock,
@@ -11221,8 +11218,8 @@ mod tests {
             Run {
                 summary: run.summary,
                 effects: run.effect_log,
-                sends: dispatcher.literal_sends.clone(),
-                keys: dispatcher.events.clone(),
+                sends: dispatcher.literal_sends().clone(),
+                keys: dispatcher.events().clone(),
                 alerts: alerts.escalations.clone(),
                 spawns: runner.spawns().len(),
             }
@@ -11367,7 +11364,8 @@ mod tests {
             assert_eq!(budget_alerts(&r), 0);
         }
 
-        /// Scenario "An unevaluable cost cap does not change the outcome".
+        /// Scenarios "An unevaluable cost cap does not change the outcome" and
+        /// "An unevaluable cost cap alone leaves a finished wave completed".
         #[test]
         fn an_unevaluable_cost_cap_leaves_a_clean_wave_completed() {
             let agents = two_agents();
@@ -11399,6 +11397,23 @@ mod tests {
             assert_eq!(notices, 1, "{:?}", summary.escalations);
         }
 
+        /// Scenario "Headless orchestrator spend counts toward the breach".
+        #[test]
+        fn headless_orchestrator_spend_counts_toward_the_breach() {
+            let caps = tokens_cap(1000, OnExhausted::Escalate);
+            let workers = [worker("sonnet", "feat/a", "s-a", known(300, 400))];
+            assert_eq!(budget::breach(caps, &snapshot_of(&workers)), None);
+            let mut with_headless = workers.to_vec();
+            with_headless.push(Attributed {
+                role: UsageRole::Orchestrator,
+                ..worker("sonnet", "orchestrator", "s-h", known(200, 200))
+            });
+            let reason = budget::breach(caps, &snapshot_of(&with_headless))
+                .expect("worker plus headless spend reaches the cap");
+            assert!(reason.contains("1100 tokens"), "{reason}");
+        }
+
+        /// Scenario "A cost cap is breached by reported cost alone".
         #[test]
         fn a_cost_cap_is_breached_only_by_a_reported_cost() {
             let costed = UsageReport::Known(UsageTotals {
@@ -11526,12 +11541,12 @@ mod tests {
             let profiles = AgentProfiles::new(HashMap::new());
 
             for exhausted in [false, true] {
-                let mut dispatcher = RecordingDispatcher::default();
+                let dispatcher = RecordingDispatcher::default();
                 let mut refresher = RecordingRefresher::default();
                 let mut deps = DriveDeps {
                     enumerator: &enumerator,
                     capturer: &capturer,
-                    dispatcher: &mut dispatcher,
+                    dispatcher: &dispatcher,
                     status: &status,
                     messages: &messages,
                     clock: &clock,

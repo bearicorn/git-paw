@@ -30,7 +30,7 @@ use super::helpers::{
     warn_if_broker_is_exposed,
 };
 use super::launch::{
-    LaunchOutcome, build_task_prompt, compose_launch_prompt, dry_run_launch_line,
+    LaunchOutcome, LaunchWarnings, build_task_prompt, compose_launch_prompt, dry_run_launch_line,
     gate_pane_or_fail_on_dialog, submit_prompt_to_pane, write_repo_discovery_file,
     write_repo_discovery_file_with_agents,
 };
@@ -216,12 +216,15 @@ pub fn start(
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
         let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
+        let mut warnings = LaunchWarnings::default();
         // Resolve all launch lines first, so a refusal is reported before any
         // worker header is printed.
         let launch_lines = selection
             .mappings
             .iter()
-            .map(|(_, cli)| dry_run_launch_line(cli, approval, &config.clis))
+            .map(|(_, cli)| {
+                dry_run_launch_line(cli, approval, &config.clis, &repo_root, &mut warnings, out)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         for ((branch, cli), launch_line) in selection.mappings.iter().zip(&launch_lines) {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
@@ -283,10 +286,16 @@ pub fn start(
     // Resolve every CLI record before any worktree exists, so an ambiguous
     // PATH shim or a disabled native sandbox refuses the launch with nothing
     // created.
+    // Each warning prints as its CLI resolves, so an earlier CLI's warning
+    // still shows when a later one is refused.
+    let mut warnings = LaunchWarnings::default();
     let profiles = selection
         .mappings
         .iter()
-        .map(|(_, cli)| resolve_for_launch(cli, &config.clis, approval))
+        .map(|(_, cli)| {
+            resolve_for_launch(cli, &config.clis, approval, &repo_root)
+                .map(|resolved| warnings.admit(resolved, out))
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     for ((branch, cli), profile) in selection.mappings.iter().zip(&profiles) {
@@ -683,9 +692,12 @@ pub fn start_with_specs(
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
         let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
+        let mut warnings = LaunchWarnings::default();
         let launch_lines = mappings
             .iter()
-            .map(|(_, cli)| dry_run_launch_line(cli, approval, &config.clis))
+            .map(|(_, cli)| {
+                dry_run_launch_line(cli, approval, &config.clis, &repo_root, &mut warnings, out)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         for ((branch, cli), launch_line) in mappings.iter().zip(&launch_lines) {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
@@ -795,9 +807,13 @@ fn launch_spec_session(
         .unwrap_or(&default_sup)
         .agent_approval;
 
+    let mut warnings = LaunchWarnings::default();
     let profiles = mappings
         .iter()
-        .map(|(_, cli)| resolve_for_launch(cli, &config.clis, approval))
+        .map(|(_, cli)| {
+            resolve_for_launch(cli, &config.clis, approval, repo_root)
+                .map(|resolved| warnings.admit(resolved, out))
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     for ((branch, cli), profile) in mappings.iter().zip(&profiles) {
@@ -1415,6 +1431,8 @@ fn submit_held_boot_prompts(
         .agent_approval;
     let mut blocked: Vec<String> = Vec::new();
     let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
+    let mut warnings = LaunchWarnings::default();
+    let repo_root = updated.repo_path.clone();
 
     for wt in &mut updated.worktrees {
         if wt.pending_boot_prompt.is_none() {
@@ -1431,8 +1449,11 @@ fn submit_held_boot_prompts(
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
-        let resolved = resolve_for_launch(&wt.cli, &config.clis, &approval)
-            .and_then(|profile| Ok((profile.compiled_prompt_profile()?, profile)));
+        let resolved =
+            resolve_for_launch(&wt.cli, &config.clis, &approval, &repo_root).and_then(|resolved| {
+                let profile = warnings.admit(resolved, out);
+                Ok((profile.compiled_prompt_profile()?, profile))
+            });
         let (prompt_profile, profile) = match resolved {
             Ok(resolved) => resolved,
             Err(e) => {

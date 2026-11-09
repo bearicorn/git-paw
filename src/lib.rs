@@ -57,6 +57,10 @@ pub mod selftest;
 pub mod session;
 mod skill_frontmatter;
 pub mod skills;
+/// The production-code filter shared with the integration-test source audits.
+#[cfg(test)]
+#[path = "../tests/helpers/source_scan.rs"]
+pub(crate) mod source_scan;
 pub mod specs;
 mod static_regex;
 pub mod supervisor;

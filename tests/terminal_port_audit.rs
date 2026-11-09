@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+#[path = "helpers/source_scan.rs"]
+mod source_scan;
+use source_scan::production_code;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -39,40 +43,6 @@ fn relative(path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-/// Blanks out every `#[cfg(test)]` item (walking the braces of the item that
-/// follows the attribute), keeping line numbers. A test may drive a private
-/// tmux server directly; the rule governs production code.
-fn strip_test_modules(src: &str) -> String {
-    let mut out = src.to_string();
-    while let Some(attr) = out.find("#[cfg(test)]") {
-        let Some(open_rel) = out[attr..].find('{') else {
-            break;
-        };
-        let open = attr + open_rel;
-        let mut depth: usize = 0;
-        let mut end = out.len();
-        for (i, ch) in out[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = open + i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let blanked: String = out[attr..end]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect();
-        out.replace_range(attr..end, &blanked);
-    }
-    out
 }
 
 /// Where direct tmux invocation is allowed: the command-building substrate
@@ -115,7 +85,7 @@ fn violations(rel: &str, body: &str) -> Vec<String> {
     if is_allowed(rel) {
         return Vec::new();
     }
-    let code = strip_test_modules(body);
+    let code = production_code(body);
     let shapes = invocation_shapes();
     // The enclosing `fn` of each line: the nearest declaration at or above it.
     let decl = Regex::new(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)").expect("fn-decl regex compiles");
@@ -205,7 +175,7 @@ fn declared_identifiers(src: &str) -> Vec<String> {
     let field = Regex::new(r"^\s*pub\s+([a-z_][a-z0-9_]*)\s*:").expect("field regex");
     let variant = Regex::new(r"^\s{4}([A-Z][A-Za-z0-9]*)\s*[,({]").expect("variant regex");
     let mut out = Vec::new();
-    for line in strip_test_modules(src).lines() {
+    for line in production_code(src).lines() {
         if line.trim_start().starts_with("//") {
             continue;
         }
@@ -324,7 +294,12 @@ fn the_drive_loop_source_never_names_the_multiplexer_path_variable() {
     // Production code only: the loop's argv-parity test names tmux's own
     // listing format to pin what the tmux backend emits.
     let src = std::fs::read_to_string(repo_root().join("src/supervisor/drive.rs")).expect("read");
-    assert!(!strip_test_modules(&src).contains("pane_current_path"));
+    let code = production_code(&src);
+    assert!(
+        code.contains("pub fn drive_loop_logged("),
+        "the filter must keep drive.rs production code"
+    );
+    assert!(!code.contains("pane_current_path"));
 }
 
 /// Scenario "Text and keys are separate operations": no port operation takes

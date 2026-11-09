@@ -99,7 +99,10 @@ pub enum Command {
                       stands when active, revived first when paused, recovered first when \
                       stopped. Launch-selection flags are not applied to a live session, so \
                       re-running the command that launched a wave drives it again after its \
-                      loop exits. Only one drive loop may drive a session at a time.\n\n\
+                      loop exits. Only one drive loop may drive a session at a time. With \
+                      `[supervisor] budget_max_tokens` / `budget_max_cost` set, the loop stops \
+                      starting work on a breach; `budget_on_exhausted = \"abandon\"` ends the \
+                      run non-zero.\n\n\
                       By default, every existing agent branch is rebased onto the repository's \
                       default branch (whatever `origin/HEAD` tracks — typically `main`) before \
                       its worktree is opened, so agents always start from current main. Pass \
@@ -289,6 +292,10 @@ pub enum Command {
         /// the holding process. A binding left by a killed loop lapses, so
         /// there is nothing to clear by hand; `git paw stop` revokes it.
         ///
+        /// With `[supervisor] budget_max_tokens` / `budget_max_cost` set, the
+        /// loop stops starting work on a breach; `budget_on_exhausted =
+        /// "abandon"` ends the run non-zero.
+        ///
         /// Mutually exclusive with `--no-supervisor` (they express opposing
         /// intents). May be combined with `--supervisor`, `--from-all-specs`,
         /// `--specs`, `--cli`, and `--branches`.
@@ -296,7 +303,7 @@ pub enum Command {
             long,
             default_value_t = false,
             conflicts_with = "no_supervisor",
-            help = "Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching"
+            help = "Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching. With `[supervisor] budget_max_tokens` / `budget_max_cost` set, the loop stops starting work on a breach; `budget_on_exhausted = \"abandon\"` ends the run non-zero."
         )]
         unattended: bool,
     },

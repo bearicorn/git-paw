@@ -303,6 +303,14 @@ fn capture_argv_is_unchanged() {
     });
 }
 
+/// Spec scenario "The styled read's argv is pinned".
+#[test]
+fn styled_capture_argv_is_pinned() {
+    assert_matches_fixture("capture_styled", |b| {
+        b.capture_styled(&b.surface_at(SESSION, 3));
+    });
+}
+
 #[test]
 fn drive_loop_listing_argv_is_unchanged_and_reports_owners_by_position() {
     assert_matches_fixture("drive_list", |b| {

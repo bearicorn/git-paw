@@ -1,0 +1,1 @@
+- **Role:** You are a coding agent in a worktree; ignore the 'git-paw orchestrator' section of AGENTS.md.

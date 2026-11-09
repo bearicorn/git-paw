@@ -13,11 +13,15 @@ rejected at config load naming the accepted set. It SHALL be independent of
 - **WHEN** the config is loaded and saved back
 - **THEN** each policy SHALL keep its own value
 
+Test: `src/config/supervisor.rs::budget_on_exhausted_round_trips_independently_of_the_correction_policy`
+
 #### Scenario: An unknown budget policy is rejected
 
 - **GIVEN** `[supervisor] budget_on_exhausted = "stop"`
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error naming `escalate` and `abandon`
+
+Test: `src/config/supervisor.rs::an_unknown_budget_on_exhausted_is_rejected_naming_the_accepted_values`
 
 ### Requirement: Doctor flags a cost cap no worker CLI can satisfy
 
@@ -28,3 +32,5 @@ When `budget_max_cost` is set and not every configured CLI reports cost, `git pa
 - **GIVEN** `budget_max_cost = 25.0` and only Claude-family worker CLIs, which report no cost
 - **WHEN** `git paw doctor` runs
 - **THEN** it SHALL report a warning for `budget_max_cost`, not a failure
+
+Test: `src/doctor_tests.rs::the_probe_flags_a_cost_cap_over_a_claude_fleet`, `src/doctor_tests.rs::a_cost_cap_no_worker_cli_reports_is_a_warning_not_a_failure`

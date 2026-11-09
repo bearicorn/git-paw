@@ -828,10 +828,8 @@ mod tests {
     #[test]
     fn decisions_perform_no_io() {
         let source = include_str!("decide.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the module has production code before its tests");
+        let production = crate::source_scan::production_code(source);
+        assert!(production.contains("fn decide_prompt("));
         for forbidden in [
             "TerminalBackend",
             "PaneEnumerator",
