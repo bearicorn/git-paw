@@ -18,7 +18,7 @@ use crate::tmux;
 use super::helpers::{
     dashboard_command, launch_session, start_broker_host, warn_if_broker_is_exposed,
 };
-use super::launch::LaunchOutcome;
+use super::launch::{LaunchOutcome, LaunchWarnings};
 use super::{CommandContext, Output};
 
 /// Builds the pane command that resumes `entry`'s recorded session id. A CLI
@@ -31,12 +31,17 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     entry: &WorktreeEntry,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
+    repo_root: &Path,
+    warnings: &mut LaunchWarnings,
+    out: &mut dyn Output,
 ) -> Result<String, PawError> {
     let session = entry
         .cli_session_id
         .as_deref()
         .map_or(LaunchSession::None, LaunchSession::Resume);
-    Ok(resolve_for_launch(&entry.cli, clis, &approval)?.launch_command(&approval, session))
+    let resolved = resolve_for_launch(&entry.cli, clis, &approval, repo_root)?;
+    let profile = warnings.admit(resolved, out);
+    Ok(profile.launch_command(&approval, session))
 }
 
 /// Options for [`recover`].
@@ -75,6 +80,7 @@ pub fn recover(
 ///
 /// Returns an error when tmux is missing, the recorded broker port is held by
 /// another repository, or the session cannot be rebuilt or saved.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn recover_session_detached(
     repo_root: &Path,
     existing: &Session,
@@ -158,9 +164,14 @@ pub(crate) fn recover_session_detached(
         .agent_approval;
 
     let (plan, layout) = match mode {
-        SessionMode::Supervisor => {
-            recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
-        }
+        SessionMode::Supervisor => recover_supervisor_session(
+            repo_root,
+            existing,
+            &config,
+            broker_url.as_deref(),
+            mouse,
+            out,
+        )?,
         SessionMode::Bare => recover_bare_session(
             repo_root,
             existing,
@@ -169,6 +180,7 @@ pub(crate) fn recover_session_detached(
             config.border_affordances_enabled(),
             bare_approval,
             &config.clis,
+            out,
         )?,
     };
 
@@ -255,6 +267,7 @@ pub(crate) fn recover_session_detached(
 /// Returns the built session together with the layout record of what it
 /// rebuilt, so [`recover_session_detached`] can re-save the session and rewrite the
 /// per-repo discovery file against the layout it actually produced.
+#[allow(clippy::too_many_arguments)]
 fn recover_bare_session<S: std::hash::BuildHasher>(
     repo_root: &Path,
     existing: &Session,
@@ -263,7 +276,9 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     border_affordances: bool,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
+    out: &mut dyn Output,
 ) -> Result<(SessionPlan, SessionLayout), PawError> {
+    let mut warnings = LaunchWarnings::default();
     let plan = SessionPlan {
         name: existing.session_name.clone(),
         mode: SessionMode::Bare,
@@ -279,7 +294,14 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
                 Ok(SurfaceSpec {
                     label: entry.branch.clone(),
                     owner: entry.worktree_path.clone(),
-                    launch_command: cli_command_for_recovery(entry, approval, clis)?,
+                    launch_command: cli_command_for_recovery(
+                        entry,
+                        approval,
+                        clis,
+                        repo_root,
+                        &mut warnings,
+                        out,
+                    )?,
                 })
             })
             .collect::<Result<_, PawError>>()?,
@@ -320,7 +342,9 @@ fn recover_supervisor_session(
     config: &PawConfig,
     broker_url: Option<&str>,
     mouse: bool,
+    out: &mut dyn Output,
 ) -> Result<(SessionPlan, SessionLayout), PawError> {
+    let mut warnings = LaunchWarnings::default();
     // Fall back to a default config when [supervisor] is absent so a
     // re-launched session does not error on a config the prior boot
     // already accepted.
@@ -350,6 +374,9 @@ fn recover_supervisor_session(
                     entry,
                     supervisor_cfg.agent_approval,
                     &config.clis,
+                    repo_root,
+                    &mut warnings,
+                    out,
                 )?,
             })
         })
@@ -378,6 +405,22 @@ fn recover_supervisor_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recovery_command(
+        e: &WorktreeEntry,
+        level: ApprovalLevel,
+        clis: &HashMap<String, CustomCli>,
+    ) -> String {
+        cli_command_for_recovery(
+            e,
+            level,
+            clis,
+            Path::new("/"),
+            &mut LaunchWarnings::default(),
+            &mut crate::commands::CaptureOutput::default(),
+        )
+        .unwrap()
+    }
     use std::path::PathBuf;
 
     fn entry(cli: &str, cli_session_id: Option<&str>) -> WorktreeEntry {
@@ -404,7 +447,7 @@ mod tests {
         let e = entry("claude", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::Manual, &clis),
             "claude --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
@@ -414,10 +457,7 @@ mod tests {
     fn entry_without_an_id_launches_fresh() {
         let e = entry("claude", None);
         let clis = HashMap::new();
-        assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
-            "claude"
-        );
+        assert_eq!(recovery_command(&e, ApprovalLevel::Manual, &clis), "claude");
     }
 
     /// Spec scenario "CLI without a resume template launches fresh".
@@ -426,7 +466,7 @@ mod tests {
         let e = entry("my-agent", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::Manual, &clis),
             "my-agent"
         );
     }
@@ -440,7 +480,7 @@ mod tests {
         let e = entry("claude", None);
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::Auto, &clis),
             "claude --permission-mode acceptEdits"
         );
     }
@@ -472,7 +512,7 @@ mod tests {
             },
         );
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::FullAuto, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::FullAuto, &clis),
             "my-agent --my-flag --continue 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
@@ -482,7 +522,7 @@ mod tests {
     fn recovery_carries_approval_flags_then_resume_args() {
         let e = entry("claude", Some("abc-123"));
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &HashMap::new()).unwrap(),
+            recovery_command(&e, ApprovalLevel::Auto, &HashMap::new()),
             "claude --permission-mode acceptEdits --resume abc-123"
         );
     }
@@ -501,7 +541,7 @@ mod tests {
             },
         )]);
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::Auto, &clis),
             "claude --model sonnet --permission-mode acceptEdits --resume abc-123"
         );
     }
@@ -514,7 +554,7 @@ mod tests {
         let e = entry("unmapped-cli", None);
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis).unwrap(),
+            recovery_command(&e, ApprovalLevel::Auto, &clis),
             "unmapped-cli"
         );
     }
@@ -559,6 +599,7 @@ mod tests {
             true,
             ApprovalLevel::Manual,
             &clis,
+            &mut crate::commands::CaptureOutput::default(),
         )
         .expect("a two-agent plan builds");
 

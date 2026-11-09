@@ -13,12 +13,11 @@ The v0.19 conformance audit compared the code to `docs/src/architecture-directio
 
 **Non-Goals:**
 - The `agent_cli` ↔ `config` module cycle (roadmap F12).
-- Moving `doctor.rs`'s per-CLI workflow-definition table into `agent_cli` (roadmap F10). It is allowlisted.
 - Any change to the `config::resolve_submit_delay_ms` shim's other callers (`commands/supervisor.rs`), or removing the shim.
 
 ## Decisions
 
-**D1 — Share the audit filter through `tests/helpers/`.** Each integration test is its own crate, so `production_code` moves into a module in `tests/helpers/` (already used by other tests through `mod helpers;`). Both `source_audit.rs` and `command_library_audit.rs` use it, and `production_part` is deleted. Two fixes go in while it moves:
+**D1 — Share the audit filter through `tests/helpers/source_scan.rs`.** Each integration test is its own crate, so `production_code` moves into `tests/helpers/source_scan.rs`, included by `#[path]` so an audit does not compile all of `helpers`. `source_audit.rs` (every splitter in it), `command_library_audit.rs`, `terminal_port_audit.rs` and `surface_role_audit.rs` use it; `production_part` and the two `strip_test_modules` copies are deleted. Two fixes go in while it moves:
 - A `#[cfg(test)]` that appears inside a `//` comment (as on `src/main.rs:7`) must not start a blank-out. Strip comment lines before scanning for the marker; the line count is kept so reported line numbers stay right.
 - An attribute applied to a `;`-terminated item (`#[cfg(test)] mod tests;`, `#[cfg(test)] use …;`) blanks only up to its `;`. The current loop already does this.
 
@@ -31,20 +30,17 @@ Alternative considered: keep `production_part` and teach it to resume after the 
 - a match arm: `"name"\s*(=>|\|)`, or a tuple arm whose first element is the name, `\(\s*"name"\s*,[^)]*\)\s*=>`
 - inside `matches!(…)`
 
-A bare literal used as an argument or a default value (for example `detect`'s known-binary list) is not a comparison and is not flagged. Files under `src/agent_cli/` and `*_tests.rs` are skipped. The allowlist is a `(path, trimmed line)` list holding the `src/doctor.rs` `("claude", "/opsx:apply") =>` arm, with a comment pointing at roadmap item F10. A stale allowlist entry (one that no longer matches any line) fails the test, so the list cannot rot.
+A bare literal used as an argument or a default value (for example `detect`'s known-binary list) is not a comparison and is not flagged. Files under `src/agent_cli/` and `#[path]` test files (`*tests.rs`) are skipped. After the rebase the `doctor.rs` table matches on `CliFamily`, so there is no allowlist.
 
 **D4 — Menu-shape fields.** `CliPromptProfile` gains `menu_cursor_glyphs: Vec<String>` (default `["❯", "›", ">"]`) and `menu_footer_markers: Vec<String>` (default `["enter to select"]`). The override struct gains matching `Option<Vec<String>>` fields with `#[serde(default, skip_serializing_if = "Option::is_none")]`. These fields follow the same per-field fallback as the existing marker lists, and the empty-marker load check from `v019-review-followups` applies to them. They are literals, not regexes, so the `grep -E` subset check does not apply. `sweep.sh` does not read them, so no shell-side change is needed. The helper command can print them because it prints any marker-list field.
 
 The pure readers `menu_showing`, `strip_decoration_keep_cursor`, `composer_text_is_dim`, `styled_cells` and `apply_sgr` move to a new `src/supervisor/screen.rs`. `permission_prompt.rs` stays focused on the live-prompt gate. `menu_showing` takes the profile and matches a cursor as any glyph in `menu_cursor_glyphs` followed by an option line. A footer matches when any marker is a case-insensitive substring of a tail line. The `send.rs` unit tests that cover these readers move with them. `send.rs` keeps the decisions about refusing a send.
 
 **D5 — Warnings as values (F3).**
-- `resolve_for_launch` returns `Result<Launchable, PawError>`, where `Launchable { profile: CliProfile, warning: Option<String> }`, or the tuple equivalent. The `static SEEN` and `first_warning_for` are deleted.
-- Each launch path collects warnings into a per-launch `BTreeSet<String>` (or checks before emitting) and emits each one once through `out.warn(…)`. `start` resolves the same CLI in pre-flight and then per pane, so the dedupe set is owned by the launch, not by the function.
-- `recover.rs` and `supervisor.rs` emit through their `Output`. `launch.rs` threads the warning back to its caller rather than printing.
-- `AgentProfiles::record` returns `Option<String>`. The drive-loop shell, which already prints its diagnostics with `eprintln!`, prints it.
-- `locate(command, path, cwd: &Path)` takes the working directory. `ensure_unambiguous_in` takes it too. `ensure_unambiguous` keeps its signature by reading `current_dir` at that one shell-side wrapper, or its callers pass the repo root. Pick whichever keeps the diff smaller; the core function no longer reads it.
-
-A CLI run still shows the warning on stderr through `TerminalOutput::warn`, the same text once per run as today. The stderr-leak test runs a launch path through `CaptureOutput` in a child process (`assert_cmd` on a test binary, or a test that spawns `git paw` with the hidden MCP path) and asserts that stderr is empty while the captured warnings hold the line.
+- `resolve_for_launch(identity, clis, level, cwd)` returns a `#[must_use]` `Resolved`: the profile is reachable only through `Resolved::into_profile`, which hands the warning to the caller first. `first_warning_for` and its `static` are deleted.
+- A per-launch `commands::launch::LaunchWarnings::admit` takes a `Resolved`, emits its warning once per CLI through the launch's `Output`, and returns the profile. `start` (plain and spec-driven pre-flight, dry runs, held boot prompts), `supervisor` (pre-flight, dry run) and `recover` each own one, and emit each warning as its CLI resolves, so an earlier CLI's warning still shows when a later one is refused. `attach_agent` shares the launch's through `AttachContext::warnings` (a `RefCell`).
+- `AgentProfiles::record` returns `Option<String>`; the drive-loop shell prints it.
+- The launch path passes the repository root as `cwd`; `locate` takes `Option<&Path>` and finds a `/`-containing command without one. Relative `PATH` entries resolve against the repository root on purpose, not the process working directory: every launch runs in the repository. Only `doctor`'s `executable()` and `ensure_unambiguous()` read the process working directory.
 
 **D6 — One resolution (F4).** `send::deliver` resolves `let cli = CliProfile::resolve(&agent.cli, target.clis)` once and reads `cli.compiled_prompt_profile()?` and `cli.submit_delay_ms()`. `add.rs` already holds `agent_profile` (~178) and uses `agent_profile.submit_delay_ms()` at ~416. Both are byte-identical: the shim delegates to the same resolution.
 

@@ -163,3 +163,20 @@ fn reference_documents_governance_with_all_five_fields() {
         "the [governance] subsection must list all five fields; missing: {missing:?}"
     );
 }
+
+/// Requirement *Configuration reference documents the specs type value*: the
+/// `[specs]` example names every value `--specs-format` accepts.
+#[test]
+fn the_specs_example_lists_every_specs_type_value() {
+    let doc = reference();
+    let line = doc
+        .lines()
+        .find(|l| l.trim_start().starts_with("# type = ") && l.contains("\"openspec\""))
+        .expect("the commented [specs] type example");
+    for value in ["openspec", "markdown", "speckit", "superpowers"] {
+        assert!(
+            line.contains(&format!("\"{value}\"")),
+            "missing {value}: {line}"
+        );
+    }
+}

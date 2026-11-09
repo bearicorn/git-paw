@@ -20,10 +20,14 @@ The embedded orchestrator skill (`assets/agent-skills/orchestrator.md`, formerly
 - **WHEN** the embedded supervisor skill is inspected
 - **THEN** it contains a heading or section identifying merge orchestration (e.g. `Merge orchestration`)
 
+Test: `src/skills.rs::supervisor_skill_has_merge_orchestration_section`
+
 #### Scenario: Supervisor skill names the trigger condition
 
 - **WHEN** the embedded supervisor skill's merge-orchestration section is inspected
 - **THEN** it states that merge orchestration runs when all expected agents have published `agent.verified` (or on user request)
+
+Test: `tests/orchestrator_skill_content.rs::merge_section_names_its_trigger_and_the_topological_order`
 
 #### Scenario: An unattended merge follows the trigger without asking first
 
@@ -32,10 +36,14 @@ The embedded orchestrator skill (`assets/agent-skills/orchestrator.md`, formerly
 - **AND** it SHALL name the only escalations: a conflict (non-fast-forward or dependency cycle), an exhausted correction cycle, and a regression
 - **AND** the skill SHALL NOT contain an unconditional "ask the human before merging" rule
 
+Test: `tests/orchestrator_skill_content.rs::unattended_merge_follows_the_trigger`
+
 #### Scenario: An attended merge may confirm with the human
 
 - **WHEN** the merge-orchestration section is inspected
 - **THEN** it SHALL state that in an attended run the orchestrator may confirm the merge order with the human before merging
+
+Test: `tests/orchestrator_skill_content.rs::attended_merge_may_confirm_with_the_human`
 
 #### Scenario: Supervisor skill describes the topological-order computation
 
@@ -43,6 +51,8 @@ The embedded orchestrator skill (`assets/agent-skills/orchestrator.md`, formerly
 - **THEN** it instructs the supervisor to read `agent.blocked` messages
 - **AND** it states that an `agent.blocked` from X with `payload.from = Y` defines a dependency edge (X depends on Y)
 - **AND** it instructs the supervisor to topologically sort the resulting dependency graph
+
+Test: `tests/orchestrator_skill_content.rs::merge_section_names_its_trigger_and_the_topological_order`
 
 #### Scenario: Supervisor skill describes the per-branch merge + test loop
 
@@ -54,14 +64,20 @@ The embedded orchestrator skill (`assets/agent-skills/orchestrator.md`, formerly
 - **AND** it instructs the supervisor to skip and publish `agent.feedback` on merge conflict / non-FF
 - **AND** it SHALL NOT contain `git checkout main` or `git merge --ff-only feat/<branch>`
 
+Test: `tests/orchestrator_skill_content.rs::per_branch_merge_loop_names_no_literal_branch_and_confirms_the_merge`
+
 #### Scenario: Supervisor skill describes cycle handling
 
 - **WHEN** the merge-orchestration section is inspected
 - **THEN** it instructs the supervisor to escalate via `agent.question` when the dependency graph has cycles
 - **AND** it instructs the supervisor NOT to merge cycle members until the user resolves the cycle
 
+Test: `src/skills.rs::supervisor_skill_merge_cycle_uses_agent_question`
+
 #### Scenario: Supervisor skill describes the final summary
 
 - **WHEN** the merge-orchestration section is inspected
 - **THEN** it instructs the supervisor to publish a final `agent.status` summary after merge orchestration completes
 - **AND** the summary covers what was merged, what was skipped, and any regressions
+
+Test: `src/skills.rs::supervisor_skill_merge_publishes_final_status_summary`

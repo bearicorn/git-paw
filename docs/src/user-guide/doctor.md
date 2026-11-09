@@ -240,7 +240,9 @@ agent quietly replaces the spec workflow with an ad-hoc one. The **spec
 workflow** check surfaces that before you launch.
 
 Each spec-driven worker CLI the discovered specs resolve to is judged on its
-own:
+own. Where a CLI keeps its command definitions is looked up by its CLI family,
+so a custom `[clis.<name>]` entry of the `claude` family is checked at the same
+locations as `claude` itself:
 
 - ✓ when a definition is **committed** at the main checkout's `HEAD` — every
   new worktree checks it out, whatever the placement. Staging it is not

@@ -32,8 +32,8 @@ use super::helpers::{
     session_has_live_agents, start_broker_host, to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::launch::{
-    AttachContext, LaunchOutcome, attach_agent, dry_run_launch_line, gate_pane_or_fail_on_dialog,
-    submit_prompt_to_pane, write_repo_discovery_file,
+    AttachContext, LaunchOutcome, LaunchWarnings, attach_agent, dry_run_launch_line,
+    gate_pane_or_fail_on_dialog, submit_prompt_to_pane, write_repo_discovery_file,
 };
 use super::purge::invalidate_if_stale;
 use super::recover::recover_session_detached;
@@ -597,12 +597,20 @@ pub fn supervisor(
             out.line(&format!("  Broker URL: {}", broker_config.url()));
         }
         out.line("");
+        let mut dry_run_warnings = LaunchWarnings::default();
         for branch in &branches {
             let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
             let cli = effective_agent_cli(branch);
             // Refuse before printing anything for this worker, so the plan
             // never shows a command the launch would refuse to run.
-            let runs = dry_run_launch_line(&cli, *agent_approval, &config.clis)?;
+            let runs = dry_run_launch_line(
+                &cli,
+                *agent_approval,
+                &config.clis,
+                repo_root,
+                &mut dry_run_warnings,
+                out,
+            )?;
             let flags = config::resolve_approval_flags(&cli, agent_approval, &config.clis);
             let cmd = if flags.is_empty() {
                 cli
@@ -623,12 +631,15 @@ pub fn supervisor(
 
     // Resolve every branch's CLI first, so an ambiguous PATH shim or a
     // disabled native sandbox refuses the launch before any worktree exists.
+    let warnings = std::cell::RefCell::new(LaunchWarnings::default());
     for branch in &branches {
-        crate::agent_cli::resolve_for_launch(
+        let resolved = crate::agent_cli::resolve_for_launch(
             &effective_agent_cli(branch),
             &config.clis,
             agent_approval,
+            repo_root,
         )?;
+        warnings.borrow_mut().admit(resolved, out);
     }
     git::prune_worktrees(repo_root)?;
 
@@ -732,6 +743,7 @@ pub fn supervisor(
             placement: config.worktree_placement(),
             worktree_runtime: &worktree_runtime,
             clis: &config.clis,
+            warnings: &warnings,
         };
 
         // Each agent takes the lowest slot not held by an already-attached

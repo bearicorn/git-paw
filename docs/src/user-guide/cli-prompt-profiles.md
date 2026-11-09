@@ -110,10 +110,14 @@ A detector therefore never meets an invalid pattern at run time.
 | `stream_error_markers` | Phrases indicating the CLI's API call failed mid-turn (transport error, timeout, disconnect). | the bundled `sweep.sh` helper's stuck-shape detector |
 | `context_bloat_pattern` | Regex source matching a context-bloat clear/compact hint, capturing the token count in thousands. | the bundled `sweep.sh` helper's stuck-shape detector |
 | `paste_buffer_pattern` | Regex source matching a paste-aware CLI's "pasted text" acknowledgement. | the bundled `sweep.sh` helper's stuck-shape detector |
+| `menu_cursor_glyphs` | Glyphs that mark a selection menu's selected option (default `"❯"`, `"›"`, `">"`); a line starting with one, followed by an option line, is a menu cursor. | `sweep.sh tell` (`git paw __send`, `supervisor::screen::menu_showing`): refuses to press a key while a menu shows |
+| `menu_footer_markers` | Footer phrases that mark a selection menu (default `"enter to select"`), matched case-insensitively. | `sweep.sh tell` (`git paw __send`, `supervisor::screen::menu_showing`) |
 | `cli_unavailable_markers` | Substrings/phrases indicating the CLI itself has stopped serving — a usage/session limit (`"You've hit your session limit"`), an organisation spend limit (`"org's monthly spend limit"`), or an expired/missing login — rather than a worker being merely stuck. | the unattended drive loop (`supervisor::drive::cli_unavailable_line`), resolved per pane for its own CLI: an orchestrator-pane match is an immediate `cli-unavailable` exit, a coding-pane match a deduped escalation |
 
 Every marker-list field is matched as a case-insensitive substring, mirroring
-the behaviour each site had before profiles existed. Pattern fields are
+the behaviour each site had before profiles existed, except
+`menu_cursor_glyphs`, which must start the line (after any box border) and be
+followed by an option line. Pattern fields are
 Rust `regex` crate syntax.
 
 ## Authoring a profile for a new CLI

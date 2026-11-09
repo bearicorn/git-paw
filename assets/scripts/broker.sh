@@ -155,8 +155,7 @@ usage: $0 [--agent <id>] <subcommand> [args]
   blocked <needs> <from>                 publish agent.blocked with dependency info
   question <text>                        publish agent.question
   intent <summary> <files> [ttl]         publish agent.intent (files: comma-separated;
-         [--region <path>#<kind>=<value>]...
-                                         ttl: valid_for_seconds, default ${DEFAULT_INTENT_TTL_SECONDS};
+    [--region <path>#<kind>=<value>]...  ttl: valid_for_seconds, default ${DEFAULT_INTENT_TTL_SECONDS};
                                          --region scopes a path to a function, class, block or
                                          range (range value: <start>-<end>); repeatable)
   poll [since]                           GET <broker>/messages/<agent-id>?since=<n>, print the inbox,

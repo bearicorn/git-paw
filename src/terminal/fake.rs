@@ -95,6 +95,8 @@ pub enum Operation {
     },
     /// [`TerminalBackend::capture_tail`].
     CaptureTail(SurfaceId),
+    /// [`TerminalBackend::capture_styled`].
+    CaptureStyled(SurfaceId),
     /// [`TerminalBackend::foreground_process`].
     ForegroundProcess(SurfaceId),
     /// [`TerminalBackend::stream_to`].
@@ -144,6 +146,7 @@ impl Operation {
         match self {
             Operation::Kill(s)
             | Operation::CaptureTail(s)
+            | Operation::CaptureStyled(s)
             | Operation::ForegroundProcess(s)
             | Operation::Label { surface: s, .. }
             | Operation::SendText { surface: s, .. }
@@ -195,6 +198,18 @@ pub struct FakeBackend {
 }
 
 impl FakeBackend {
+    /// The surface's next scripted screen: each read consumes one, and the
+    /// last repeats.
+    fn next_screen(&self, surface: &SurfaceId) -> Option<String> {
+        let mut state = self.state.borrow_mut();
+        let queue = state.screens.get_mut(surface)?;
+        if queue.len() > 1 {
+            queue.pop_front().flatten()
+        } else {
+            queue.front().cloned().flatten()
+        }
+    }
+
     /// An empty fake: no sessions, no surfaces.
     #[must_use]
     pub fn new() -> Self {
@@ -454,13 +469,12 @@ impl TerminalBackend for FakeBackend {
 
     fn capture_tail(&self, surface: &SurfaceId) -> Option<String> {
         self.record(Operation::CaptureTail(surface.clone()));
-        let mut state = self.state.borrow_mut();
-        let queue = state.screens.get_mut(surface)?;
-        if queue.len() > 1 {
-            queue.pop_front().flatten()
-        } else {
-            queue.front().cloned().flatten()
-        }
+        self.next_screen(surface)
+    }
+
+    fn capture_styled(&self, surface: &SurfaceId) -> Option<String> {
+        self.record(Operation::CaptureStyled(surface.clone()));
+        self.next_screen(surface)
     }
 
     fn foreground_process(&self, surface: &SurfaceId) -> Option<String> {
@@ -556,6 +570,22 @@ mod tests {
         assert_eq!(fake.capture_tail(&s), None, "a scripted failed read");
         assert_eq!(fake.capture_tail(&s).as_deref(), Some("idle"));
         assert_eq!(fake.capture_tail(&s).as_deref(), Some("idle"));
+    }
+
+    /// Spec scenario "The fake records a styled read".
+    #[test]
+    fn a_styled_read_is_recorded_as_its_own_operation() {
+        let fake = FakeBackend::new();
+        let s = fake.add_surface("paw-x", 1, Some(Path::new("/wt/a")));
+        fake.script_screens(&s, &[Some("\x1b[2mhint\x1b[0m")]);
+        assert_eq!(
+            fake.capture_styled(&s).as_deref(),
+            Some("\x1b[2mhint\x1b[0m")
+        );
+        assert_eq!(
+            fake.operations_on(&s),
+            vec![Operation::CaptureStyled(s.clone())]
+        );
     }
 
     #[test]

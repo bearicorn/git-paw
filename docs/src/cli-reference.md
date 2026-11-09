@@ -120,7 +120,7 @@ Options:
       --no-supervisor                Disable supervisor for this session, overriding any [supervisor] enabled = true in config
       --force                        Bypass uncommitted-spec validation warning
       --no-rebase                    Skip rebasing existing agent branches onto the default branch before opening worktrees
-      --unattended                   Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching
+      --unattended                   Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching. With `[supervisor] budget_max_tokens` / `budget_max_cost` set, the loop stops starting work on a breach; `budget_on_exhausted = "abandon"` ends the run non-zero.
   -h, --help                         Print help
 ```
 
@@ -137,7 +137,7 @@ Options:
 | `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
 | `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. The check runs only for a spec-mode launch without supervisor mode, so `start --force` has no effect under supervisor mode. |
 | `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. The rebase always runs inside the branch's own worktree, never in the main checkout: a branch with no worktree gets its worktree first and is rebased there. Without `--no-rebase`, a branch is still never rebased over uncommitted work: when its worktree has changes besides git-paw's own `.git-paw/` files, or its status cannot be read, `start` launches the branch on its current HEAD, leaves the changes untouched and prints one stderr notice, `notice: rebase skipped for '<branch>': <reason>. Pass --no-rebase to launch without a rebase.` With `--no-rebase` there is no check and no notice. |
-| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. On a repository that already has a live supervised session, binds a new drive loop to it instead of launching. Mutually exclusive with `--no-supervisor`. |
+| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. On a repository that already has a live supervised session, binds a new drive loop to it instead of launching. With `[supervisor] budget_max_tokens` / `budget_max_cost` set, the loop stops starting work on a breach; `budget_on_exhausted = "abandon"` ends the run non-zero. Mutually exclusive with `--no-supervisor`. |
 
 `--from-all-specs` and `--specs` are mutually exclusive — one launches every
 discovered spec, the other narrows to a subset or opens the picker.

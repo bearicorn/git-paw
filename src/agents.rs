@@ -181,8 +181,8 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// The worker-side half of the orchestrator pointer's scoping: every worktree
 /// checks out the tracked `AGENTS.md`, so its sidecar says plainly which
 /// section is not addressed to it.
-pub const WORKER_ROLE_LINE: &str = "- **Role:** You are a coding agent in a worktree; ignore the \
-                                    'git-paw orchestrator' section of AGENTS.md.";
+pub(crate) const WORKER_ROLE_LINE: &str =
+    include_str!("../assets/worker-role-line.md").trim_ascii_end();
 
 /// Generates a marker-delimited assignment section for a worker worktree's
 /// AGENTS.md, including [`WORKER_ROLE_LINE`].
@@ -2758,19 +2758,24 @@ mod tests {
     /// before the section tells its reader it is the orchestrator.
     #[test]
     fn pointer_is_scoped_to_the_root_session() {
-        let section = orchestrator_pointer_section();
+        // Match on whitespace-normalised prose, so re-wrapping the asset's
+        // lines cannot break the test.
+        let section = orchestrator_pointer_section()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let scope = section
-            .find("applies only to the agent session running at the repository\nroot")
+            .find("applies only to the agent session running at the repository root")
             .expect("the pointer should say it applies only to the root session");
         let ignore = section
-            .find("coding agent working in a git-paw\nworktree, ignore this section")
+            .find("coding agent working in a git-paw worktree, ignore this section")
             .expect("the pointer should tell worktree coding agents to ignore it");
         let role = section
             .find("you are its orchestrator")
             .expect("the pointer still names the orchestrator role");
         assert!(scope < role && ignore < role);
         assert!(
-            section.contains("and you are that root\nsession, you are its orchestrator"),
+            section.contains("and you are that root session, you are its orchestrator"),
             "the orchestrator claim should be conditional on being the root session"
         );
     }

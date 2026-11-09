@@ -96,10 +96,35 @@ fn highlights_mention_conflict_detection() {
         &["conflict detection"],
     );
     assert_contains_all(
-        "docs/src/user-guide/coordination.md",
-        &read("docs/src/user-guide/coordination.md"),
+        "README Highlights",
+        &highlights_section(),
+        &["conflict-detection.md"],
+    );
+    assert_contains_all(
+        "docs/src/user-guide/conflict-detection.md",
+        &read("docs/src/user-guide/conflict-detection.md"),
         &["agent.intent"],
     );
+}
+
+/// Scenario: Every Highlights bullet links a docs page.
+#[test]
+fn every_highlights_bullet_links_a_page() {
+    let section = highlights_section();
+    let bullets: Vec<&str> = section
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- "))
+        .collect();
+    assert!(
+        bullets.len() >= 5,
+        "Highlights has too few bullets:\n{section}"
+    );
+    for bullet in bullets {
+        assert!(
+            bullet.contains("]("),
+            "a Highlights bullet links no page: {bullet}"
+        );
+    }
 }
 
 /// Scenario: README Features section mentions learnings mode.
@@ -315,6 +340,12 @@ fn security_note_names_the_trust_model_and_links_both_pages() {
             "sandbox.md",
         ],
     );
+    let lines = readme_section("Security")
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert!(lines <= 6, "the Security note has {lines} non-blank lines");
 }
 
 // --- supervisor-launch: README Supervisor Mode quick start documents the

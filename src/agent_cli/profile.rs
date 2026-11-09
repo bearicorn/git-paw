@@ -405,16 +405,23 @@ impl CliProfile {
     }
 
     /// The executable the launch runs, resolved against `path` (a PATH-style
-    /// list; `None` uses the process `PATH`), or `None` when it is not found.
+    /// list; `None` uses the process `PATH`) with relative entries taken from
+    /// `cwd`, or `None` when it is not found.
     #[must_use]
-    pub fn executable_in(&self, path: Option<&OsStr>) -> Option<PathBuf> {
-        locate(self.command(), path)
+    pub fn executable_in(&self, path: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
+        locate(self.command(), path, Some(cwd))
     }
 
-    /// [`Self::executable_in`] against the process `PATH`.
+    /// [`Self::executable_in`] against the process `PATH` and working
+    /// directory, for `doctor`. A command containing `/` is found without a
+    /// working directory, so a deleted one cannot hide it.
     #[must_use]
     pub fn executable(&self) -> Option<PathBuf> {
-        self.executable_in(None)
+        locate(
+            self.command(),
+            None,
+            std::env::current_dir().ok().as_deref(),
+        )
     }
 
     /// Refuses the ambiguous PATH shim: a `[clis.<id>]` key that is not a
@@ -425,11 +432,14 @@ impl CliProfile {
     ///
     /// [`PawError::ConfigError`] naming both paths and the fix. A known
     /// name, a CLI without an entry, or a key not on `path` is never refused.
-    pub fn ensure_unambiguous_in(&self, path: Option<&OsStr>) -> Result<(), PawError> {
+    pub fn ensure_unambiguous_in(&self, path: Option<&OsStr>, cwd: &Path) -> Result<(), PawError> {
         if self.entry.is_none() || self.is_known() {
             return Ok(());
         }
-        let (Some(shim), Some(command)) = (locate(&self.id, path), self.executable_in(path)) else {
+        let (Some(shim), Some(command)) = (
+            locate(&self.id, path, Some(cwd)),
+            self.executable_in(path, cwd),
+        ) else {
             return Ok(());
         };
         if canonical(&shim) == canonical(&command) {
@@ -445,24 +455,57 @@ impl CliProfile {
         )))
     }
 
-    /// [`Self::ensure_unambiguous_in`] against the process `PATH`.
+    /// [`Self::ensure_unambiguous_in`] against the process `PATH` and working
+    /// directory, for `doctor`. Without a working directory nothing can be
+    /// located, so nothing is refused.
     ///
     /// # Errors
     ///
     /// As [`Self::ensure_unambiguous_in`].
     pub fn ensure_unambiguous(&self) -> Result<(), PawError> {
-        self.ensure_unambiguous_in(None)
+        match std::env::current_dir() {
+            Ok(cwd) => self.ensure_unambiguous_in(None, &cwd),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+/// A CLI record resolved for a launch, with the warning the launch must show.
+///
+/// The profile is reached only through [`Self::into_profile`], which hands
+/// the warning to the caller first, so a launch path cannot drop it.
+#[must_use = "a launch warning must be emitted"]
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    profile: CliProfile,
+    warning: Option<String>,
+}
+
+impl Resolved {
+    /// The launch warning, if any
+    /// ([`CliProfile::unsandboxed_full_auto_warning`]).
+    #[must_use]
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// The resolved profile, after passing any warning to `warn`.
+    pub fn into_profile(self, warn: impl FnOnce(&CliProfile, String)) -> CliProfile {
+        if let Some(warning) = self.warning {
+            warn(&self.profile, warning);
+        }
+        self.profile
     }
 }
 
 /// Resolves the record for `identity` for a launch at `level`, refusing the
-/// ambiguous PATH shim ([`CliProfile::ensure_unambiguous`]) and a level that
-/// would switch a declared native sandbox off
-/// ([`CliProfile::ensure_sandbox_kept`]). Every worker launch path goes
-/// through this before it creates a worktree or builds a pane command.
+/// ambiguous PATH shim ([`CliProfile::ensure_unambiguous_in`], with relative
+/// `PATH` entries taken from `cwd`) and a level that would switch a declared
+/// native sandbox off ([`CliProfile::ensure_sandbox_kept`]). Every worker
+/// launch path goes through this before it creates a worktree or builds a
+/// pane command.
 ///
-/// Prints [`CliProfile::unsandboxed_full_auto_warning`] to stderr, once per
-/// CLI per process.
+/// Prints nothing: the warning comes back in the [`Resolved`] value.
 ///
 /// # Errors
 ///
@@ -472,16 +515,13 @@ pub fn resolve_for_launch<S: BuildHasher>(
     identity: &str,
     clis: &HashMap<String, CustomCli, S>,
     level: &ApprovalLevel,
-) -> Result<CliProfile, PawError> {
+    cwd: &Path,
+) -> Result<Resolved, PawError> {
     let profile = CliProfile::resolve(identity, clis);
-    profile.ensure_unambiguous()?;
+    profile.ensure_unambiguous_in(None, cwd)?;
     profile.ensure_sandbox_kept(level)?;
-    if let Some(warning) = profile.unsandboxed_full_auto_warning(level)
-        && first_warning_for(profile.id())
-    {
-        eprintln!("{warning}");
-    }
-    Ok(profile)
+    let warning = profile.unsandboxed_full_auto_warning(level);
+    Ok(Resolved { profile, warning })
 }
 
 /// What the drive loop reads about one agent's CLI: the prompt-shape profile
@@ -540,26 +580,30 @@ impl AgentProfiles {
     ///
     /// A blank `cli` clears the record, so the agent resolves `generic`. An
     /// override pattern that does not compile (only reachable when the table
-    /// bypassed config load) is reported on stderr and the agent resolves
-    /// `generic`.
-    pub fn record(&mut self, agent_id: &str, cli: &str) {
+    /// bypassed config load) makes the agent resolve `generic`, and the
+    /// returned warning names it for the caller to report.
+    #[must_use = "a returned warning must be reported"]
+    pub fn record(&mut self, agent_id: &str, cli: &str) -> Option<String> {
         if self
             .agents
             .get(agent_id)
             .is_some_and(|(seen, _)| seen == cli)
         {
-            return;
+            return None;
         }
         self.agents.remove(agent_id);
         if cli.trim().is_empty() {
-            return;
+            return None;
         }
         match AgentCli::of(&CliProfile::resolve(cli, &self.clis)) {
             Ok(resolved) => {
                 self.agents
                     .insert(agent_id.to_string(), (cli.to_string(), resolved));
+                None
             }
-            Err(e) => eprintln!("warning: agent {agent_id}: {e}; using the generic profile"),
+            Err(e) => Some(format!(
+                "warning: agent {agent_id}: {e}; using the generic profile"
+            )),
         }
     }
 
@@ -573,19 +617,6 @@ impl AgentProfiles {
     }
 }
 
-/// Whether no unsandboxed-full-auto warning was printed for `id` yet in this
-/// process, recording it as printed. A launch resolves the same CLI more
-/// than once (pre-flight, then per pane).
-fn first_warning_for(id: &str) -> bool {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    match seen.lock() {
-        Ok(mut set) => set.insert(id.to_string()),
-        Err(_) => true,
-    }
-}
-
 /// Whether `needle`'s words appear as a contiguous run of `haystack`'s words.
 fn contains_words(haystack: &str, needle: &str) -> bool {
     let hay: Vec<&str> = haystack.split_whitespace().collect();
@@ -594,13 +625,14 @@ fn contains_words(haystack: &str, needle: &str) -> bool {
 }
 
 /// Locates `command` the way a shell would: a path containing `/` is taken
-/// as-is when it exists, anything else is searched on `path`.
-fn locate(command: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// as-is when it exists, anything else is searched on `path`, with relative
+/// entries taken from `cwd`. Without a `cwd` only a `/` path can be found.
+pub(super) fn locate(command: &str, path: Option<&OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
     if command.contains('/') {
         let candidate = Path::new(command);
         return candidate.exists().then(|| candidate.to_path_buf());
     }
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = cwd?;
     match path {
         Some(path) => which::which_in(command, Some(path), cwd).ok(),
         None => which::which_in(command, std::env::var_os("PATH"), cwd).ok(),

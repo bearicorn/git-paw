@@ -71,7 +71,8 @@ fn status_json(
     );
     let mut usage_total = usage_json(&summary.total);
     if let Some(map) = usage_total.as_object_mut() {
-        // Exactly the figure `budget_max_tokens` caps.
+        // Same formula as `budget_max_tokens` (`UsageTotals::tokens`), over
+        // current workers only.
         map.insert(
             "tokens".to_string(),
             serde_json::json!(summary.total.tokens()),

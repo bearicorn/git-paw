@@ -9,6 +9,10 @@
 //! `openspec/changes/test-coverage-v0-5-0/tasks.md` 12.9 and 13.1) and to the
 //! `dashboard-mvu` frozen-surface scenario.
 
+#[path = "helpers/source_scan.rs"]
+mod source_scan;
+use source_scan::production_code;
+
 const SUPERVISOR_RS: &str = include_str!("../src/commands/supervisor.rs");
 const MAIN_RS: &str = include_str!("../src/main.rs");
 const DASHBOARD_RS: &str = include_str!("../src/dashboard.rs");
@@ -119,10 +123,7 @@ fn only_profile_resolution_reads_the_embedded_default() {
         }
         // Unit tests may pin behaviour against the default; production code
         // may not read it.
-        let production = body
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or(&body);
+        let production = production_code(&body);
         for symbol in ["claude_prompt_profile(", "default_compiled_prompt_profile("] {
             if production.contains(symbol) {
                 offenders.push(format!("{symbol} in {rel}"));
@@ -382,10 +383,7 @@ fn dashboard_view_reads_only_the_model_and_performs_no_io() {
     ] {
         // The View's own test module constructs broker state, so restrict the
         // audit to the production half of the file.
-        let prod = DASHBOARD_VIEW_RS
-            .split("#[cfg(test)]")
-            .next()
-            .expect("view.rs must have a production section");
+        let prod = production_code(DASHBOARD_VIEW_RS);
         assert!(
             !prod.contains(io),
             "`src/dashboard/view.rs` must be pure — found the I/O marker `{io}`"
@@ -449,12 +447,6 @@ fn no_broker_message_variant_is_dedicated_to_permission_prompts() {
 // spec-providers: "Per-format behaviour is reached only through the backend".
 // ---------------------------------------------------------------------------
 
-/// The non-test part of `body`: everything before its first `#[cfg(test)]`
-/// (git-paw keeps unit tests in a trailing `mod tests`).
-fn production_part(body: &str) -> &str {
-    body.find("#[cfg(test)]").map_or(body, |i| &body[..i])
-}
-
 /// Outside `src/specs/`, no production code compares a spec-type string or
 /// matches on `SpecBackendKind`: per-format behaviour is reached through
 /// `SpecBackendKind::backend()`, so a new format cannot be silently missed by
@@ -462,32 +454,34 @@ fn production_part(body: &str) -> &str {
 /// MCP server).
 #[test]
 fn spec_format_dispatch_happens_only_inside_specs() {
-    let string_compare = regex::Regex::new(
-        r#"(==|!=)\s*(Some\()?"(openspec|markdown|speckit|superpowers)"|"(openspec|markdown|speckit|superpowers)"\s*(=>|==|!=|\|)"#,
-    )
-    .unwrap();
-    // A match arm, a `matches!`, or an equality test against one variant.
-    let kind_match = regex::Regex::new(
-        r"SpecBackendKind::\w+\s*(\||=>|\{|==|!=)|matches!\([^)]*SpecBackendKind::|(==|!=)\s*(Some\()?SpecBackendKind::",
-    )
-    .unwrap();
+    let string_compare = regex::Regex::new(r#""(openspec|markdown|speckit|superpowers)""#).unwrap();
+    let kind_variant = regex::Regex::new(r"SpecBackendKind::[A-Z][a-z]\w*").unwrap();
+    let let_else = regex::Regex::new(r"\blet\s+(Some\()?SpecBackendKind::").unwrap();
+    let kind_match = |line: &str| dispatches_on(line, &kind_variant) || let_else.is_match(line);
     for caught in [
         "if kind == SpecBackendKind::OpenSpec {",
         "x.ok() != Some(SpecBackendKind::OpenSpec)",
         "SpecBackendKind::SpecKit == kind",
         "SpecBackendKind::Markdown => 1,",
+        "if let SpecBackendKind::OpenSpec = kind {",
+        "let SpecBackendKind::SpecKit = kind else { return };",
+        "Some(SpecBackendKind::OpenSpec) => 2,",
+        "while let Some(SpecBackendKind::Markdown) = next() {",
+        "matches!(kind, SpecBackendKind::Superpowers)",
     ] {
-        assert!(kind_match.is_match(caught), "guard misses: {caught}");
+        assert!(kind_match(caught), "guard misses: {caught}");
     }
+    assert!(dispatches_on("if t == \"speckit\" {", &string_compare));
+    assert!(!kind_match("let all = SpecBackendKind::ALL;"));
     let specs_dir = std::path::Path::new("src").join("specs");
     let mut offenders = Vec::new();
     for (path, body) in source_files() {
         if std::path::Path::new(&path).starts_with(&specs_dir) || path.ends_with("_tests.rs") {
             continue;
         }
-        for (n, line) in production_part(&body).lines().enumerate() {
+        for (n, line) in production_code(&body).lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
-            if string_compare.is_match(code) || kind_match.is_match(code) {
+            if dispatches_on(code, &string_compare) || kind_match(code) {
                 offenders.push(format!("{path}:{}: {}", n + 1, line.trim()));
             }
         }
@@ -496,6 +490,161 @@ fn spec_format_dispatch_happens_only_inside_specs() {
         offenders.is_empty(),
         "spec-format dispatch outside src/specs/ — go through SpecBackendKind::backend():\n{}",
         offenders.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// code-architecture: "Source audits read every production line".
+// ---------------------------------------------------------------------------
+
+/// Scenario "Production code after an early test item is audited".
+#[test]
+fn production_code_after_an_early_test_item_is_audited() {
+    let source = "#[cfg(test)]\nuse crate::x;\nfn a() {}\n#[cfg(test)]\nmod t {\n    fn b() {}\n}\nfn after() { forbidden(); }\n";
+    let code = production_code(source);
+    assert_eq!(code.lines().count(), source.lines().count());
+    assert_eq!(code.lines().nth(7), Some("fn after() { forbidden(); }"));
+    assert!(!code.contains("use crate::x"));
+}
+
+/// Every `#[cfg(test)]` item in `src/` closes before the end of its file, so
+/// the filter never blanks the rest of a file because of a brace in a
+/// string, char or raw-string literal.
+#[test]
+fn every_test_item_in_src_closes_before_eof() {
+    let mut unclosed = Vec::new();
+    for (path, body) in source_files() {
+        for line in source_scan::unclosed_test_items(&body) {
+            unclosed.push(format!("{path}:{line}"));
+        }
+    }
+    assert!(
+        unclosed.is_empty(),
+        "test items that never close:\n{}",
+        unclosed.join("\n")
+    );
+}
+
+/// Braces inside literals do not end or extend a test item.
+#[test]
+fn braces_in_literals_do_not_count() {
+    let source = "#[cfg(test)]\nmod t {\n    const A: &str = \"{\";\n    const B: char = '}';\n    const C: &str = r#\"{{\"#;\n    fn f<'a>(x: &'a str) {}\n}\nfn after() {}\n";
+    let code = production_code(source);
+    assert!(code.contains("fn after() {}"), "{code}");
+    assert!(!code.contains("const A"), "{code}");
+    assert!(source_scan::unclosed_test_items(source).is_empty());
+}
+
+/// Scenario "Test items and comments are not audited".
+#[test]
+fn test_items_and_comments_are_not_audited() {
+    let source = "// forbidden() in a comment, and #[cfg(test)] too\nfn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { forbidden(); }\n}\n";
+    let code = production_code(source);
+    assert!(!code.contains("forbidden"), "{code}");
+    assert!(code.contains("fn a() {}"));
+}
+
+/// Scenario "main.rs is a positive control": `main.rs` mentions
+/// `#[cfg(test)]` in a comment and has a `#[cfg(test)] use` before its
+/// production body; both must leave `fn main` visible.
+#[test]
+fn main_rs_is_a_positive_control() {
+    let first_test_item = MAIN_RS
+        .find("#[cfg(test)]\nuse")
+        .expect("main.rs test import");
+    assert!(MAIN_RS[first_test_item..].contains("\nfn main() {"));
+    let code = production_code(MAIN_RS);
+    assert!(code.contains("\nfn main() {"), "fn main was blanked");
+    assert!(code.contains("use git_paw::cli::{Cli, Command};"));
+}
+
+// ---------------------------------------------------------------------------
+// cli-provider: "Per-CLI names are compared only inside the agent CLI module".
+// ---------------------------------------------------------------------------
+
+/// The forms a comparison or a match takes on one line.
+const DISPATCH_FORMS: &[&str] = &[
+    "=>",
+    "if let",
+    "while let",
+    "matches!",
+    "==",
+    "!=",
+    ".eq(",
+    ".eq_ignore_ascii_case(",
+    ".starts_with(",
+];
+
+/// Whether `line` names `subject` in a comparison or a match.
+fn dispatches_on(line: &str, subject: &regex::Regex) -> bool {
+    subject.is_match(line) && DISPATCH_FORMS.iter().any(|form| line.contains(form))
+}
+
+fn cli_name_compare() -> regex::Regex {
+    regex::Regex::new(r#""(claude|codex|agy|qwen|cursor-agent)""#).unwrap()
+}
+
+/// Scenarios "A CLI-name comparison outside the module is caught" and "A
+/// CLI-name match arm outside the module is caught": the pattern catches
+/// each comparison form and leaves a bare literal alone.
+#[test]
+fn cli_name_audit_catches_each_comparison_form() {
+    let re = cli_name_compare();
+    for caught in [
+        "if cli == \"codex\" {",
+        "x != Some(\"qwen\")",
+        "\"claude\" => 1,",
+        "\"agy\" | \"qwen\" => 2,",
+        "(\"claude\", _) => 3,",
+        "matches!(id, \"cursor-agent\")",
+        "Some(\"claude\") => 4,",
+        "(_, \"codex\") => 5,",
+        "if cli.starts_with(\"claude\") {",
+        "if let Some(\"agy\") = id {",
+        "id.eq(\"qwen\")",
+        "id.eq_ignore_ascii_case(\"claude\")",
+    ] {
+        assert!(dispatches_on(caught, &re), "guard misses: {caught}");
+    }
+    for clean in ["let known = [\"claude\", \"codex\"];", "probe(\"claude\")"] {
+        assert!(!dispatches_on(clean, &re), "false positive: {clean}");
+    }
+}
+
+/// Scenarios "Comparisons inside the module and in tests pass" and "The
+/// current tree has no finding outside the module".
+#[test]
+fn cli_names_are_compared_only_inside_agent_cli() {
+    let re = cli_name_compare();
+    let agent_cli = std::path::Path::new("src").join("agent_cli");
+    let mut offenders = Vec::new();
+    for (path, body) in source_files() {
+        if std::path::Path::new(&path).starts_with(&agent_cli) || path.ends_with("tests.rs") {
+            continue;
+        }
+        for (n, line) in production_code(&body).lines().enumerate() {
+            if dispatches_on(line, &re) {
+                offenders.push(format!("{path}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "per-CLI name comparison outside src/agent_cli/ — reach the CLI's resolved record:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Scenario "Comparisons inside the module and in tests pass": a
+/// comparison inside a test item is not a finding.
+#[test]
+fn a_cli_name_comparison_in_a_test_item_is_not_a_finding() {
+    let re = cli_name_compare();
+    let source = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { if cli == \"codex\" {} }\n}\n";
+    assert!(
+        !production_code(source)
+            .lines()
+            .any(|l| dispatches_on(l, &re))
     );
 }
 
@@ -602,9 +751,8 @@ fn pane_listings_name_the_agent_window_not_the_bare_session() {
         if path.ends_with("tests.rs") {
             continue;
         }
-        // Production code only: stop at the file's test module.
-        let production = body.split("#[cfg(test)]").next().unwrap_or(&body);
-        let mut rest = production;
+        let production = production_code(&body);
+        let mut rest = production.as_str();
         while let Some(at) = rest.find("\"list-panes\"") {
             let after = &rest[at..];
             let window: String = after.chars().take(800).collect();

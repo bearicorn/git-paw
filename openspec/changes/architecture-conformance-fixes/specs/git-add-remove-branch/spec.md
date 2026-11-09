@@ -16,6 +16,8 @@
 - **AND** `git stash list` SHALL be unchanged
 - **AND** stderr SHALL contain a notice naming `feat/x` and `--no-rebase`
 
+Test: `tests/add_remove_e2e.rs::a_cli_swap_on_a_dirty_kept_worktree_completes`
+
 #### Scenario: A modified tracked file alone blocks the rebase
 
 - **GIVEN** a kept worktree for `feat/x` whose only change is one modified tracked file
@@ -24,6 +26,8 @@
 - **THEN** the command SHALL exit zero without rebasing `feat/x`
 - **AND** the modified file SHALL be byte-identical to its state before the command
 - **AND** stderr SHALL contain the skip notice naming `feat/x` and `--no-rebase`
+
+Test: `tests/add_remove_e2e.rs::add_skips_the_rebase_over_a_modified_tracked_file`
 
 ### Requirement: add judges uncommitted work as remove does
 
@@ -37,6 +41,8 @@
 - **THEN** `feat/x` SHALL be rebased onto the default branch
 - **AND** no skip notice SHALL be printed
 
+Test: `tests/add_remove_e2e.rs::add_rebases_a_kept_worktree_whose_only_changes_are_managed`
+
 ### Requirement: add treats an unreadable worktree as dirty
 
 When the uncommitted-work check fails for the worktree holding the branch, `add` SHALL treat that worktree as dirty rather than abort, as `git-operations` "Creation-time rebase judges uncommitted work as remove does" requires, and its skip notice SHALL say the check failed.
@@ -48,3 +54,5 @@ When the uncommitted-work check fails for the worktree holding the branch, `add`
 - **THEN** `add` SHALL NOT abort on the failed status check and SHALL NOT attempt the rebase
 - **AND** `feat/x`'s tip SHALL be unchanged
 - **AND** stderr SHALL contain a skip notice naming `feat/x`, the failed check and `--no-rebase`
+
+Test: `tests/add_remove_e2e.rs::add_skips_the_rebase_when_the_worktree_status_cannot_be_read`

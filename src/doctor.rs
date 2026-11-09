@@ -2161,8 +2161,10 @@ fn probe_supervisor(config: &PawConfig, repo_root: &Path) -> SupervisorProbe {
         sweep_installed: is_executable(
             &repo_root.join(".git-paw").join("scripts").join("sweep.sh"),
         ),
-        // Same condition as the drive loop: not every worker CLI reports cost.
-        // With no worker CLI configured nothing is known, so no warning.
+        // The drive loop's rule over a different set: the doctor reads config,
+        // so it checks the configured CLIs (`default_cli`, `default_spec_cli`,
+        // the presets), where the loop checks the session's workers. With no
+        // CLI configured nothing is known, so no warning.
         unenforceable_cost_cap: supervisor.budget_max_cost.is_some() && {
             let mut clis = configured_worker_clis(config).peekable();
             clis.peek().is_some()

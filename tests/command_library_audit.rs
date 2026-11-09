@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+#[path = "helpers/source_scan.rs"]
+mod source_scan;
+use source_scan::production_code;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -51,61 +55,6 @@ fn forbidden() -> Vec<(Regex, &'static str)> {
     .into_iter()
     .map(|(pattern, why)| (Regex::new(pattern).expect("valid pattern"), why))
     .collect()
-}
-
-/// Blanks every `#[cfg(test)]` item (by walking the braces of the item that
-/// follows the attribute) and every comment line, keeping line numbers, so
-/// only production code is audited.
-fn production_code(source: &str) -> String {
-    let mut out: Vec<char> = source.chars().collect();
-    let text: Vec<char> = out.clone();
-    let marker: Vec<char> = "#[cfg(test)]".chars().collect();
-    let mut i = 0;
-    while i + marker.len() <= text.len() {
-        if text[i..i + marker.len()] == marker[..] {
-            let mut j = i + marker.len();
-            while j < text.len() && text[j] != '{' && text[j] != ';' {
-                j += 1;
-            }
-            let mut end = j;
-            if j < text.len() && text[j] == '{' {
-                let mut depth = 0usize;
-                while end < text.len() {
-                    match text[end] {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    end += 1;
-                }
-            }
-            for c in out.iter_mut().take((end + 1).min(text.len())).skip(i) {
-                if *c != '\n' {
-                    *c = ' ';
-                }
-            }
-            i = end + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out.into_iter()
-        .collect::<String>()
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("//") {
-                ""
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Every violation in `source`, as `line: why: text`.

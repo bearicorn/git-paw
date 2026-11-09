@@ -104,6 +104,12 @@ impl Fixture {
     }
 
     fn write_transcript(&self) {
+        self.write_transcript_as(SID);
+    }
+
+    /// Writes the usage fixture as the transcript of session `sid` in
+    /// `feat/x`'s worktree.
+    fn write_transcript_as(&self, sid: &str) {
         let slug: String = canon(self.repo.path())
             .join("wt-x")
             .to_string_lossy()
@@ -112,7 +118,7 @@ impl Fixture {
             .collect();
         let dir = self.claude_config.path().join("projects").join(slug);
         fs::create_dir_all(&dir).expect("project dir");
-        fs::write(dir.join(format!("{SID}.jsonl")), SESSION_FIXTURE).expect("transcript");
+        fs::write(dir.join(format!("{sid}.jsonl")), SESSION_FIXTURE).expect("transcript");
     }
 
     fn status(&self, json: bool) -> String {
@@ -163,6 +169,23 @@ fn a_worker_with_a_usage_report_shows_its_token_totals() {
         5 + 150 + 2500 + 520,
         "the capped figure counts every token kind: {json}"
     );
+}
+
+/// Scenario "A CLI session git-paw did not launch is excluded": a second
+/// transcript in the same worktree's history, under a session id the launch
+/// did not record, adds nothing.
+#[test]
+fn a_session_git_paw_did_not_launch_is_excluded() {
+    let fx = Fixture::new("foreign");
+    fx.write_transcript();
+    fx.write_transcript_as("0b1c2d3e-0000-4000-8000-00000000f00d");
+    let json = fx.status_json();
+    assert_eq!(
+        worktree(&json, "feat/x")["usage"]["output_tokens"],
+        150,
+        "{json}"
+    );
+    assert_eq!(json["usage_total"]["output_tokens"], 150, "{json}");
 }
 
 /// Scenario "Unknown usage is null and counted".

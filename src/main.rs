@@ -740,6 +740,8 @@ fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
         "context_bloat_pattern" => profile.context_bloat_pattern.clone(),
         "paste_buffer_pattern" => profile.paste_buffer_pattern.clone(),
         "cli_unavailable_markers" => marker_alternation(&profile.cli_unavailable_markers),
+        "menu_cursor_glyphs" => marker_alternation(&profile.menu_cursor_glyphs),
+        "menu_footer_markers" => marker_alternation(&profile.menu_footer_markers),
         other => {
             return Err(PawError::SessionError(format!(
                 "unknown prompt-profile field '{other}'"

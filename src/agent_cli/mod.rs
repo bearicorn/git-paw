@@ -27,7 +27,9 @@ use std::str::FromStr;
 use crate::config::{ApprovalLevel, CliPromptProfile, claude_prompt_profile};
 use crate::error::PawError;
 
-pub use profile::{AgentCli, AgentProfiles, CliProfile, LaunchSession, resolve_for_launch};
+pub use profile::{
+    AgentCli, AgentProfiles, CliProfile, LaunchSession, Resolved, resolve_for_launch,
+};
 pub use usage::{UsageCache, UsageQuery, UsageReport, UsageSummary, UsageTotals};
 
 /// A provider family: which in-tree [`CliProvider`] supplies a CLI's built-in

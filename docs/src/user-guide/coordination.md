@@ -835,13 +835,15 @@ conflict.
 ### Activity phrases
 
 A status payload may also carry an optional `activity` field — a short phrase
-naming what the agent is doing right now:
+naming what the agent is doing right now. Publish it with the helper's
+`--activity` flag:
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","activity":"running the test suite","modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent feat-auth status --activity "running the test suite" "working"
 ```
+
+On the wire the phrase is one more field of the `agent.status` payload:
+`{"status":"working","activity":"running the test suite","modified_files":[]}`.
 
 The field is optional and backward compatible: a payload that omits it
 deserializes and re-serializes exactly as before, so existing agents and stored
@@ -1110,15 +1112,17 @@ hardening `validate_token` while `feat-session` reworks `refresh_session`:
 
 ```bash
 # feat-auth
-curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.intent","agent_id":"feat-auth","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"harden token checks","valid_for_seconds":900}}'
+.git-paw/scripts/broker.sh --agent feat-auth intent "harden token checks" src/auth.rs 900 \
+  --region src/auth.rs#function=validate_token
 
 # feat-session
-curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.intent","agent_id":"feat-session","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"refresh_session"}]}],"summary":"rework session refresh","valid_for_seconds":900}}'
+.git-paw/scripts/broker.sh --agent feat-session intent "rework session refresh" src/auth.rs 900 \
+  --region src/auth.rs#function=refresh_session
 ```
+
+On the wire each `--region` turns its path into a region object, e.g.
+`{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}`
+in the `agent.intent` payload's `files` array.
 
 Because the declared functions differ, **no** forward-conflict warning fires —
 the two agents proceed in parallel on the same file. Had both named

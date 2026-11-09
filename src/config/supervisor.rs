@@ -1258,6 +1258,7 @@ mod tests {
         assert_eq!(unset.budget_on_exhausted, None);
     }
 
+    /// Scenario "An unknown budget policy is rejected".
     #[test]
     fn an_unknown_budget_on_exhausted_is_rejected_naming_the_accepted_values() {
         let err = toml::from_str::<PawConfig>("[supervisor]\nbudget_on_exhausted = \"stop\"\n")

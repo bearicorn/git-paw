@@ -656,6 +656,7 @@ const AUDITED_PROSE_ASSETS: &[&str] = &[
     "assets/hooks/pre-push.sh",
     "assets/hooks/pre-commit.sh",
     "assets/escalation-framing.md",
+    "assets/worker-role-line.md",
 ];
 
 #[test]

@@ -254,6 +254,49 @@ fn prompt_profile_subcommand_fails_on_an_invalid_config() {
         .stdout("");
 }
 
+/// Spec scenario "The helper command prints the menu fields".
+#[test]
+fn prompt_profile_subcommand_prints_the_menu_fields() {
+    let repo = TempDir::new().expect("repo");
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .expect("git init")
+        .success();
+    assert!(ok);
+    for (field, expected) in [
+        ("menu_cursor_glyphs", "❯|›|>\n"),
+        ("menu_footer_markers", "enter to select\n"),
+    ] {
+        assert_cmd::Command::cargo_bin("git-paw")
+            .expect("binary")
+            .args(["__prompt-profile", "--cli", "claude", "--field", field])
+            .current_dir(repo.path())
+            .assert()
+            .success()
+            .stdout(expected);
+    }
+}
+
+/// An empty menu marker fails the load like every other marker list.
+#[test]
+fn an_empty_menu_marker_fails_the_load() {
+    for field in ["menu_cursor_glyphs", "menu_footer_markers"] {
+        let err = load_with_mycli_profile(&format!("{field} = [' ']")).expect_err("empty marker");
+        assert!(err.contains(field), "{err}");
+    }
+}
+
+/// Spec scenario "An empty menu list fails the load".
+#[test]
+fn an_empty_menu_list_fails_the_load_naming_the_field() {
+    for field in ["menu_cursor_glyphs", "menu_footer_markers"] {
+        let err = load_with_mycli_profile(&format!("{field} = []")).expect_err("empty list");
+        assert!(err.contains(field), "{err}");
+    }
+}
+
 /// Spec scenario "An invalid pattern fails the load".
 #[test]
 fn an_invalid_override_pattern_fails_the_load_naming_the_field() {
