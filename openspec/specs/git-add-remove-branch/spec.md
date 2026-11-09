@@ -693,7 +693,7 @@ rebased and its HEAD SHALL be unchanged by `add`.
 
 ### Requirement: add never rebases over uncommitted work
 
-When `git paw add` would rebase a branch that is checked out in an existing worktree, the system SHALL first check that worktree for uncommitted changes, and when it has any, `add` SHALL NOT rebase the branch and SHALL NOT stash, commit, reset, check out over, or otherwise modify or discard any of those changes.
+`git paw add` SHALL follow `git-operations` "Creation-time rebase never runs over uncommitted work": when the worktree holding the branch has uncommitted changes, `add` SHALL NOT rebase the branch and SHALL NOT stash, commit, reset, check out over, or otherwise modify or discard any of those changes.
 
 #### Scenario: A CLI swap on a dirty kept worktree completes
 
@@ -707,6 +707,8 @@ When `git paw add` would rebase a branch that is checked out in an existing work
 - **AND** `git stash list` SHALL be unchanged
 - **AND** stderr SHALL contain a notice naming `feat/x` and `--no-rebase`
 
+Test: `tests/add_remove_e2e.rs::a_cli_swap_on_a_dirty_kept_worktree_completes`
+
 #### Scenario: A modified tracked file alone blocks the rebase
 
 - **GIVEN** a kept worktree for `feat/x` whose only change is one modified tracked file
@@ -716,9 +718,11 @@ When `git paw add` would rebase a branch that is checked out in an existing work
 - **AND** the modified file SHALL be byte-identical to its state before the command
 - **AND** stderr SHALL contain the skip notice naming `feat/x` and `--no-rebase`
 
+Test: `tests/add_remove_e2e.rs::add_skips_the_rebase_over_a_modified_tracked_file`
+
 ### Requirement: add judges uncommitted work as remove does
 
-`add` SHALL treat a worktree as having uncommitted changes when the uncommitted-work detection used by `remove` (NUL-delimited `git status --porcelain -z`, per "Robust uncommitted-work detection") reports at least one entry — modified, staged, renamed, deleted or untracked — that is not git-paw-managed under "Uncommitted-work safety". A worktree whose only entries are git-paw-managed SHALL be treated as clean.
+`add` SHALL judge uncommitted work by `git-operations` "Creation-time rebase judges uncommitted work as remove does": a worktree is dirty when at least one entry, modified, staged, renamed, deleted or untracked, is not git-paw-managed, and a worktree whose only entries are git-paw-managed SHALL be treated as clean.
 
 #### Scenario: git-paw-managed files alone do not block the rebase
 
@@ -728,9 +732,11 @@ When `git paw add` would rebase a branch that is checked out in an existing work
 - **THEN** `feat/x` SHALL be rebased onto the default branch
 - **AND** no skip notice SHALL be printed
 
+Test: `tests/add_remove_e2e.rs::add_rebases_a_kept_worktree_whose_only_changes_are_managed`
+
 ### Requirement: add treats an unreadable worktree as dirty
 
-When the uncommitted-work detection fails for the worktree holding the branch, `add` SHALL treat that worktree as having uncommitted changes rather than abort, and its skip notice SHALL say the check failed.
+When the uncommitted-work check fails for the worktree holding the branch, `add` SHALL treat that worktree as dirty rather than abort, as `git-operations` "Creation-time rebase judges uncommitted work as remove does" requires, and its skip notice SHALL say the check failed.
 
 #### Scenario: A worktree whose status cannot be read is not rebased
 
@@ -739,6 +745,8 @@ When the uncommitted-work detection fails for the worktree holding the branch, `
 - **THEN** `add` SHALL NOT abort on the failed status check and SHALL NOT attempt the rebase
 - **AND** `feat/x`'s tip SHALL be unchanged
 - **AND** stderr SHALL contain a skip notice naming `feat/x`, the failed check and `--no-rebase`
+
+Test: `tests/add_remove_e2e.rs::add_skips_the_rebase_when_the_worktree_status_cannot_be_read`
 
 ### Requirement: add attaches a dirty worktree without a rebase
 

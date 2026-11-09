@@ -1120,6 +1120,8 @@ output SHALL be unchanged. Sessions git-paw did not launch SHALL be excluded.
 - **THEN** the `feat/x` worktree object SHALL contain a `usage` object with its token totals
 - **AND** `usage_total.tokens` SHALL equal its input, output, cache-read and cache-write tokens summed
 
+Test: `tests/status_json_usage.rs::a_worker_with_a_usage_report_shows_its_token_totals`
+
 #### Scenario: Unknown usage is null and counted
 
 - **GIVEN** an active session with one worker whose usage is unknown
@@ -1127,7 +1129,19 @@ output SHALL be unchanged. Sessions git-paw did not launch SHALL be excluded.
 - **THEN** that worktree object SHALL contain `"usage": null`
 - **AND** `usage_total` SHALL report one worker with unknown usage
 
+Test: `tests/status_json_usage.rs::an_unknown_worker_is_null_and_counted_in_the_total`
+
 #### Scenario: Human-readable status is unchanged by usage
 
 - **WHEN** `git paw status` is run without `--json`
 - **THEN** the output SHALL be byte-identical to the output before this requirement for the same session
+
+Test: `tests/status_json_usage.rs::human_status_is_byte_identical_with_and_without_usage`
+
+#### Scenario: A CLI session git-paw did not launch is excluded
+
+- **GIVEN** an active session whose `feat/x` worker has a usage report, and a second report in the same worktree's CLI history under a session id git-paw did not record
+- **WHEN** `git paw status --json` is run
+- **THEN** `feat/x`'s `usage` and `usage_total` SHALL count only the recorded session's report
+
+Test: `tests/status_json_usage.rs::a_session_git_paw_did_not_launch_is_excluded`
