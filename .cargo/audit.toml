@@ -1,0 +1,6 @@
+# cargo-audit reads this file; cargo-deny reads deny.toml. Keep both ignore lists matching.
+[advisories]
+ignore = [
+    # Safe to ignore: git-paw does not enable the affected reqwest or unix-socket clients. Remove once rmcp is 3.9 or later.
+    "RUSTSEC-2026-0462",
+]
