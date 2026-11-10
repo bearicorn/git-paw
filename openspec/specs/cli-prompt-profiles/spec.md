@@ -15,7 +15,7 @@ literals; the detection algorithms are unchanged — only the origin of the lite
 
 ### Requirement: A CLI prompt-shape profile describes one CLI's terminal surface
 
-The system SHALL define a per-CLI prompt-shape profile of the literals and patterns showing how one CLI's terminal surface looks: readiness, approval-prompt, live-prompt, mid-response and permission-mode markers; the command-header, option-line and file-prompt forms; the broad-grant marker; the input sigil; stream-error, context-bloat and paste-buffer markers; and `cli_unavailable_markers` (usage limit or lost authentication). It SHALL NOT carry any decision about what is permitted.
+The system SHALL define a per-CLI prompt-shape profile of the literals and patterns showing how one CLI's terminal surface looks: readiness, approval-prompt, live-prompt, mid-response and permission-mode markers; the command-header, option-line and file-prompt forms; the broad-grant marker; the input sigil; stream-error, context-bloat and paste-buffer markers; the menu cursor glyphs and footer markers; and `cli_unavailable_markers`. It SHALL NOT carry any decision about what is permitted.
 
 #### Scenario: Profile carries prompt-shape fields
 
