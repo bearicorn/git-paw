@@ -15,6 +15,9 @@
 //! `detect-stuck` (which names the agent it resolved for each pane) and
 //! `status` — against a discovery file written in the real shape.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -187,7 +190,7 @@ fn pane_path_resolves_to_its_agent_from_the_discovery_file() {
         fakebin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .arg("detect-stuck")
         .current_dir(repo.path())
@@ -225,7 +228,7 @@ fn status_shows_a_roster_agent_on_any_branch_prefix() {
     let (port, stop) = spawn_http_stub(body);
     write_broker_config(repo.path(), port);
 
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .arg("status")
         .current_dir(repo.path())
@@ -272,7 +275,7 @@ fn status_without_a_discovery_file_uses_the_broker_id_rule() {
     let (port, stop) = spawn_http_stub(body);
     write_broker_config(repo.path(), port);
 
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .arg("status")
         .current_dir(repo.path())
@@ -315,7 +318,7 @@ fn a_subcommand_needing_the_session_reports_when_none_is_found() {
     );
     write_broker_config(repo.path(), 1);
 
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .arg("detect-stuck")
         .current_dir(repo.path())

@@ -8,6 +8,9 @@
 //! bundled shell helpers, the post-commit hook, and the Rust HTTP clients —
 //! still passes the guard.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -195,7 +198,7 @@ fn make_executable(path: &Path) {
 /// Runs a bundled helper inside the fixture repo and returns its combined
 /// output.
 fn run_helper(dir: &Path, script: &str, args: &[&str]) -> String {
-    let out = Command::new("bash")
+    let out = script_cmd::bash()
         .arg(format!(".git-paw/scripts/{script}"))
         .args(args)
         .current_dir(dir)

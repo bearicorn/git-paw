@@ -14,6 +14,9 @@
 //! "The detector SHALL accept an acknowledgement for a pair and file" — this
 //! is the orchestrator-reachable path to that acceptance.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -151,7 +154,7 @@ fn setup() -> Fixture {
 }
 
 fn run_conflict_ack(fx: &Fixture, args: &[&str]) -> std::process::Output {
-    let mut cmd = StdCommand::new("bash");
+    let mut cmd = script_cmd::bash();
     cmd.arg(&fx.sweep)
         .arg("conflict-ack")
         .args(args)

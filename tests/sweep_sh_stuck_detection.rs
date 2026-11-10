@@ -15,6 +15,9 @@
 //!
 //! Maps to openspec/changes/auto-approve-scope-v0-6-x/specs/stuck-prompt-detection/spec.md
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -220,7 +223,7 @@ fn run_stuck_eval_full_with_path(
     capture: &str,
     binary_on_path: bool,
 ) -> String {
-    let mut child = StdCommand::new("bash")
+    let mut child = script_cmd::bash()
         .arg(&fx.sweep)
         .arg("stuck-eval")
         .arg(agent)

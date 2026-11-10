@@ -68,8 +68,8 @@ fn assert_contains_all(label: &str, haystack: &str, needles: &[&str]) {
     assert!(missing.is_empty(), "{label}: missing {missing:?}");
 }
 
-// --- Requirement: README features section enumerates the current
-// user-facing surface (Highlights) ---
+// --- Requirement: README Highlights section enumerates the current
+// user-facing surface ---
 
 /// Scenario: README Features section mentions Spec Kit.
 #[test]
@@ -348,8 +348,7 @@ fn security_note_names_the_trust_model_and_links_both_pages() {
     assert!(lines <= 6, "the Security note has {lines} non-blank lines");
 }
 
-// --- supervisor-launch: README Supervisor Mode quick start documents the
-// flags (on the linked orchestrator quick-start page) ---
+// --- supervisor-launch: Orchestrator quick-start page documents the flags ---
 
 /// Lines inside fenced code blocks that run `git paw`.
 fn command_lines(page: &str) -> Vec<String> {

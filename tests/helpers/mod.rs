@@ -96,7 +96,8 @@ impl TmuxTestEnv {
     ///
     /// Sets `TMUX_TMPDIR` to [`Self::socket_dir`] and removes `TMUX` and
     /// `TMUX_PANE` from the child environment so the subprocess does not
-    /// mistake itself for an inside-tmux client of an outer server.
+    /// mistake itself for an inside-tmux client of an outer server, and
+    /// removes `GIT_PAW_BROKER_URL` so it cannot reach a live session's broker.
     ///
     /// Callers MUST keep the [`TmuxTestEnv`] alive for at least as long as
     /// the tmux server the spawned command starts — when the helper is
@@ -107,6 +108,7 @@ impl TmuxTestEnv {
             .env("GIT_PAW_READINESS_TIMEOUT_MS", TEST_READINESS_TIMEOUT_MS)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
+            .env_remove("GIT_PAW_BROKER_URL")
     }
 
     /// Variant of [`Self::apply`] for `assert_cmd::Command` (the test
@@ -119,6 +121,7 @@ impl TmuxTestEnv {
             .env("GIT_PAW_READINESS_TIMEOUT_MS", TEST_READINESS_TIMEOUT_MS)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
+            .env_remove("GIT_PAW_BROKER_URL")
     }
 
     /// Apply the same env mutations to the **current process** for tests

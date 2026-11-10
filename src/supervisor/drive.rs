@@ -2954,7 +2954,17 @@ struct SweepLearningSink {
     /// session so the wind-down pass does not re-record friction already
     /// captured opportunistically.
     seen: std::collections::HashSet<String>,
+    /// How long one `sweep.sh learn` may run before it is killed: a learning
+    /// is bookkeeping, so it must never hold the loop.
+    timeout: Duration,
+    /// The session's recorded broker, handed to the helper so it never falls
+    /// back to a `[broker]` port edited after launch.
+    broker_url: Option<String>,
 }
+
+/// Longest time one `sweep.sh learn` may run. It outlasts the helper's own
+/// broker-call bounds, so a slow but answering broker still records it.
+const LEARNING_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl LearningSink for SweepLearningSink {
     fn record(&mut self, category: &str, title: &str, body: &str) {
@@ -2970,16 +2980,47 @@ impl LearningSink for SweepLearningSink {
         if !script.exists() {
             return;
         }
-        let status = Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .arg(&script)
             .arg("learn")
             .arg(category)
             .arg(title)
             .arg(body)
-            .current_dir(&self.repo_root)
-            .status();
-        if let Err(e) = status {
-            eprintln!("drive: failed to record learning via sweep.sh: {e}");
+            .current_dir(&self.repo_root);
+        if let Some(url) = &self.broker_url {
+            command.env("GIT_PAW_BROKER_URL", url);
+        }
+        let child = command.spawn();
+        match child {
+            Ok(mut child) => {
+                if !wait_bounded(&mut child, self.timeout) {
+                    eprintln!(
+                        "drive: sweep.sh learn did not finish within {}s; learning dropped",
+                        self.timeout.as_secs()
+                    );
+                }
+            }
+            Err(e) => eprintln!("drive: failed to record learning via sweep.sh: {e}"),
+        }
+    }
+}
+
+/// Waits for `child` up to `timeout`, killing and reaping it on expiry.
+/// Returns whether it exited on its own.
+fn wait_bounded(child: &mut std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
         }
     }
 }
@@ -3325,6 +3366,8 @@ pub fn run_drive_loop(
     let mut learnings = SweepLearningSink {
         repo_root: repo_root.to_path_buf(),
         seen: std::collections::HashSet::new(),
+        timeout: LEARNING_TIMEOUT,
+        broker_url: broker_url.clone(),
     };
     // No resolvable data directory leaves the refresher without a
     // credential (its notification is then refused) rather than failing the
@@ -11646,5 +11689,62 @@ mod tests {
             assert!(text.contains(EXCLUDES_OWN_SESSION), "{text}");
             assert!(text.contains("budget_max_tokens: 43 of 1000"), "{text}");
         }
+    }
+
+    /// Scenario "A learning that never finishes does not hold the loop": a
+    /// `sweep.sh learn` that never exits is killed at the bound.
+    #[test]
+    fn a_hung_learning_is_dropped_at_the_bound() {
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let scripts = repo.path().join(".git-paw/scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("sweep.sh"), "sleep 1\ntouch late.txt\n").unwrap();
+        let mut sink = SweepLearningSink {
+            repo_root: repo.path().to_path_buf(),
+            seen: std::collections::HashSet::new(),
+            timeout: Duration::from_millis(300),
+            broker_url: None,
+        };
+
+        let started = Instant::now();
+        sink.record("tooling_friction", "title", "{}");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hung learning held the caller for {:?}",
+            started.elapsed()
+        );
+        // Past the script's own delay: a killed run never reaches its side effect.
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !repo.path().join("late.txt").exists(),
+            "the learning was not killed at the bound"
+        );
+    }
+
+    /// Scenario "A learning carries the session's recorded broker".
+    #[test]
+    fn a_fast_learning_runs_with_the_session_broker_url() {
+        let url = "http://127.0.0.1:4242";
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let scripts = repo.path().join(".git-paw/scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("sweep.sh"),
+            "printf '%s|%s\\n' \"$1\" \"$GIT_PAW_BROKER_URL\" > learned.txt\n",
+        )
+        .unwrap();
+        let mut sink = SweepLearningSink {
+            repo_root: repo.path().to_path_buf(),
+            seen: std::collections::HashSet::new(),
+            timeout: Duration::from_secs(10),
+            broker_url: Some(url.to_string()),
+        };
+
+        sink.record("tooling_friction", "title", "{}");
+
+        let learned = std::fs::read_to_string(repo.path().join("learned.txt"))
+            .expect("the learning ran to completion");
+        assert_eq!(learned, format!("learn|{url}\n"));
     }
 }

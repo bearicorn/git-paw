@@ -8,6 +8,9 @@
 //! Mirrors `sweep_sh_session_discovery` for the agent-side helper
 //! (`agent-broker-helper` / "Helper discovers the broker URL from config").
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -120,7 +123,7 @@ fn broker_sh_targets_configured_broker_port() {
 
     // Run `.git-paw/scripts/broker.sh --agent feat-x status booting`.
     let broker = tmp.path().join(".git-paw/scripts/broker.sh");
-    let output = StdCommand::new("bash")
+    let output = script_cmd::bash()
         .arg(&broker)
         .args(["--agent", "feat-x", "status", "booting"])
         .current_dir(tmp.path())

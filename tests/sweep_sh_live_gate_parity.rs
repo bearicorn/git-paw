@@ -18,6 +18,9 @@
 //! subprocess reads the same embedded profile the in-process Rust gate
 //! does". `one_source_is_read_by_both_consumers` pins that directly.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -122,7 +125,7 @@ fn sweep_sees_live(repo: &Path, sweep: &Path, capture: &str) -> bool {
         built_bin_dir().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(sweep)
         .args(["approve", "2"])
         .current_dir(repo)
@@ -328,7 +331,7 @@ fn fixtures() -> Vec<(&'static str, String, bool)> {
 #[test]
 fn sweep_sh_parses_under_bash_n() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh");
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg("-n")
         .arg(&src)
         .output()

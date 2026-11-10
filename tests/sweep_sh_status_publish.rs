@@ -16,6 +16,9 @@
 //! "status-publish carries a phase and a structured detail", and
 //! "status-publish rejects a non-object detail argument".
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -152,7 +155,7 @@ fn setup() -> Fixture {
 }
 
 fn run_status_publish(fx: &Fixture, args: &[&str]) -> std::process::Output {
-    StdCommand::new("bash")
+    script_cmd::bash()
         .arg(&fx.sweep)
         .arg("status-publish")
         .args(args)

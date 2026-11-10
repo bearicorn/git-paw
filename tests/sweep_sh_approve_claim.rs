@@ -14,6 +14,9 @@
 //! every invocation, so "sent nothing" is asserted against the real dispatch
 //! log. The suite is hermetic — no real tmux server, no broker.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -154,7 +157,7 @@ impl Repo {
                 .display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let out = StdCommand::new("bash")
+        let out = script_cmd::bash()
             .arg(&self.sweep)
             .args(["approve", pane])
             .current_dir(self.dir.path())

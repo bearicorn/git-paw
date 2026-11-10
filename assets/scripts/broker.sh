@@ -393,7 +393,7 @@ cmd_poll() {
   agent=$(resolve_agent) || exit $?
   # Pipe curl into python via `-c` so the script body does not compete with
   # the curl body for stdin (a heredoc on stdin would swallow the pipe).
-  curl -s "${BROKER}/messages/${agent}?since=${since}" | "${PY}" -c "$(cat <<'PY'
+  curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" "${BROKER}/messages/${agent}?since=${since}" | "${PY}" -c "$(cat <<'PY'
 import json, sys
 try:
     data = json.load(sys.stdin)

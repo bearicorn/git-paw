@@ -56,7 +56,18 @@ fi
 DEFAULT_DOCS_BASE_URL="https://bearicorn.github.io/git-paw"
 
 # Parse [broker] port + bind from config.toml. Defaults to 127.0.0.1:9119.
+# GIT_PAW_BROKER_URL wins, so the drive loop reaches the session's recorded
+# broker even after a port edit. It is honoured only as a loopback
+# http://host:port: the session environment is writable from any pane, and the
+# verdict verbs send the authority credential to whatever this returns.
 discover_broker_url() {
+  if [[ -n "${GIT_PAW_BROKER_URL:-}" ]]; then
+    if [[ "${GIT_PAW_BROKER_URL}" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}$ ]]; then
+      echo "${GIT_PAW_BROKER_URL}"
+      return
+    fi
+    echo "${PAW_SCRIPT_NAME}: ignoring GIT_PAW_BROKER_URL (not a loopback http://host:port)" >&2
+  fi
   if [[ ! -f "${CONFIG_TOML}" ]]; then
     echo "http://127.0.0.1:9119"
     return
@@ -195,6 +206,12 @@ discover_prompt_profile_field() {
 # error body to stderr and returns non-zero, so a publish the broker rejected
 # is never reported as done. A caller that genuinely wants fire-and-forget
 # must say so explicitly (`paw_publish … || true`).
+# Bounds for every broker HTTP call the helpers make: a port that accepts the
+# connection but never answers must fail the call, not hang its caller (the
+# unattended drive loop runs these helpers). A long-poll passes a later
+# --max-time, which curl takes over this one.
+PAW_BROKER_CURL_BOUNDS=(--connect-timeout 2 --max-time 10)
+
 paw_publish() {
   local url=$1 payload=$2
   local body status rc
@@ -202,7 +219,7 @@ paw_publish() {
     echo "${PAW_SCRIPT_NAME}: cannot create a temporary file for the publish response" >&2
     return 1
   }
-  status=$(curl -sS -o "${body}" -w '%{http_code}' -X POST "${url}/publish" \
+  status=$(curl -sS "${PAW_BROKER_CURL_BOUNDS[@]}" -o "${body}" -w '%{http_code}' -X POST "${url}/publish" \
     -H "Content-Type: application/json" \
     -d "${payload}" 2>>"${body}")
   rc=$?

@@ -574,3 +574,44 @@ fn supervised_launch_refreshes_the_skill_after_a_config_change() {
     );
     assert!(!skill.contains("make test"));
 }
+
+// supervisor-launch / Scenario: A stale sweep.sh is replaced on a supervised
+// launch
+#[test]
+#[serial]
+fn a_supervised_launch_refreshes_a_stale_root_helper_script() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home");
+    let root = tr.path();
+    fs::create_dir_all(root.join(".git-paw")).expect(".git-paw");
+    fs::write(root.join(".git-paw/config.toml"), EXPORT_CONFIG).expect("config");
+    let (ok, init_out, _) = run_paw(root, home.path(), &tmux_env, &["init"]);
+    assert!(ok, "init failed:\n{init_out}");
+    let sweep = root.join(".git-paw/scripts/sweep.sh");
+    fs::write(&sweep, "#!/usr/bin/env bash\necho unknown subcommand\n").expect("stale sweep");
+
+    let (ok, stdout, stderr) = run_paw(
+        root,
+        home.path(),
+        &tmux_env,
+        &["start", "--supervisor", "--branches", "a"],
+    );
+    assert!(ok, "start failed:\n{stdout}\n{stderr}");
+
+    let bundled = git_paw::init::bundled_scripts()
+        .into_iter()
+        .find(|(name, _)| *name == "sweep.sh")
+        .map(|(_, content)| content)
+        .expect("sweep.sh is bundled");
+    assert_eq!(fs::read_to_string(&sweep).unwrap(), bundled);
+    let mode = fs::metadata(&sweep).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "sweep.sh stays executable");
+}

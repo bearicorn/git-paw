@@ -5,6 +5,9 @@
 //! section-by-anchor retrieval, default vs overridden docs base URL, and
 //! non-zero exit with a diagnostic on a missing page.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -79,7 +82,7 @@ fn setup_repo(with_base_url: bool) -> TempDir {
 }
 
 fn run(repo: &Path, args: &[&str]) -> Output {
-    Command::new("bash")
+    script_cmd::bash()
         .arg(helper_path())
         .args(args)
         .current_dir(repo)

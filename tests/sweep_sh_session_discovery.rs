@@ -5,6 +5,9 @@
 //! the script's `status` subcommand renders the agent ids reported by the
 //! stub. (task 3.9)
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -134,7 +137,7 @@ fn sweep_sh_discovers_session_name_and_broker_port() {
 
     // Run `.git-paw/scripts/sweep.sh status` and inspect stdout.
     let sweep = tmp.path().join(".git-paw/scripts/sweep.sh");
-    let output = StdCommand::new("bash")
+    let output = script_cmd::bash()
         .arg(&sweep)
         .arg("status")
         .current_dir(tmp.path())

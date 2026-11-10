@@ -10,6 +10,9 @@
 //! dedicated server, and sweep.sh's bare `tmux display-message` follows
 //! `$TMUX`, so it never touches the default socket.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -77,7 +80,7 @@ fn write_repo_json(repo: &Path, session_name: &str, extra_field: bool) {
 /// and returns the combined stdout+stderr, which includes the discovered
 /// `session:` line.
 fn sweep_usage_output(repo: &Path, sweep: &Path) -> String {
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(sweep)
         .current_dir(repo)
         .env_remove("TMUX")

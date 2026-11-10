@@ -97,7 +97,8 @@ pub enum Command {
                       With `--unattended`, a repository that already has a supervised session \
                       gets a new drive loop bound to it instead: the session is driven as it \
                       stands when active, revived first when paused, recovered first when \
-                      stopped. Launch-selection flags are not applied to a live session, so \
+                      stopped. Launch-selection flags are not applied to a live session (a \
+                      one-line notice says so), so \
                       re-running the command that launched a wave drives it again after its \
                       loop exits. Only one drive loop may drive a session at a time. With \
                       `[supervisor] budget_max_tokens` / `budget_max_cost` set, the loop stops \
@@ -280,7 +281,7 @@ pub enum Command {
         /// stands (no pane rebuilt, no worktree touched, nothing injected); a
         /// paused one is revived first; a stopped one is recovered first. The
         /// terminal is never attached. Selection flags are NOT applied to a
-        /// live session, so re-running the original launch command re-binds.
+        /// live session (a one-line notice says so), so re-running the original launch command re-binds.
         /// The loop drives the session's own roster and reaches the broker at
         /// the endpoint recorded for that session, not the configured one. A
         /// session launched WITHOUT supervisor mode is refused: it leaves its

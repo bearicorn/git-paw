@@ -337,12 +337,32 @@ fn spec_mode_for(p: &StartSessionParams) -> Result<SpecMode, PawError> {
     ))
 }
 
+/// An MCP client has no terminal for `git paw add` or `--no-rebase`, so those
+/// hints are removed.
+fn mcp_wording(message: &str) -> String {
+    let message = message
+        .strip_suffix(crate::commands::launch::REBASE_SKIP_CLI_HINT)
+        .unwrap_or(message);
+    message.replace(crate::commands::start::ADD_AGENTS_CLI_HINT, "")
+}
+
 /// `start_session`: the `git paw start` dispatch, non-interactive and never
-/// attaching.
+/// attaching. A session error comes back in [`mcp_wording`].
 fn start_session_blocking(
     root: &Path,
     p: &StartSessionParams,
 ) -> Result<StartSessionResponse, PawError> {
+    launch_for_mcp(root, p).map_err(mcp_error)
+}
+
+fn mcp_error(e: PawError) -> PawError {
+    match e {
+        PawError::SessionError(message) => PawError::SessionError(mcp_wording(&message)),
+        other => other,
+    }
+}
+
+fn launch_for_mcp(root: &Path, p: &StartSessionParams) -> Result<StartSessionResponse, PawError> {
     let spec_mode = spec_mode_for(p)?;
     let ctx = CommandContext::new(root.to_path_buf());
     let config = ctx.config_or_default();
@@ -430,18 +450,7 @@ fn start_session_blocking(
         session_name,
         orchestrator_context,
         output: out.lines,
-        // The tool has no `--no-rebase`: keep a skipped rebase's reason, drop
-        // the CLI flag hint.
-        warnings: out
-            .warnings
-            .into_iter()
-            .map(
-                |w| match w.strip_suffix(crate::commands::launch::REBASE_SKIP_CLI_HINT) {
-                    Some(reason_only) => reason_only.to_string(),
-                    None => w,
-                },
-            )
-            .collect(),
+        warnings: out.warnings.iter().map(|w| mcp_wording(w)).collect(),
     })
 }
 
@@ -665,5 +674,33 @@ mod tests {
         assert!(failed.is_err());
         let next = run_lifecycle(|| Ok::<u8, PawError>(7)).await;
         assert_eq!(next.expect("the next call runs"), 7);
+    }
+
+    /// Scenarios "A selection-ignored warning reaches the client without the
+    /// CLI hint" and "An empty-session refusal reaches the client without the
+    /// CLI hint": each launch message keeps its reason and loses the command.
+    #[test]
+    fn start_session_wording_drops_the_cli_hints() {
+        use crate::commands::launch::rebase_skip_notice;
+        use crate::commands::start::{ADD_AGENTS_CLI_HINT, selection_ignored_notice};
+
+        let ignored = mcp_wording(&selection_ignored_notice("paw-x"));
+        assert!(
+            ignored.contains("the launch selection was not applied"),
+            "{ignored}"
+        );
+        assert!(!ignored.contains("git paw"), "{ignored}");
+
+        let refusal = mcp_error(PawError::SessionError(format!(
+            "session 'paw-x' is running with no agents{ADD_AGENTS_CLI_HINT}"
+        )));
+        assert!(
+            matches!(&refusal, PawError::SessionError(m) if m == "session 'paw-x' is running with no agents"),
+            "{refusal}"
+        );
+
+        let rebase = mcp_wording(&rebase_skip_notice("feat/a", "dirty tree"));
+        assert!(rebase.contains("dirty tree"), "{rebase}");
+        assert!(!rebase.contains("--no-rebase"), "{rebase}");
     }
 }

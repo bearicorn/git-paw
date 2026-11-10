@@ -544,6 +544,19 @@ fn test_items_and_comments_are_not_audited() {
     assert!(code.contains("fn a() {}"));
 }
 
+/// Scenario "Lines inside a block comment are not audited": the comment's
+/// lines blank, a one-line block comment too, and the code after each keeps
+/// its line.
+#[test]
+fn lines_inside_a_block_comment_are_not_audited() {
+    let source = "/*\n  forbidden() in a block\n*/\nfn a() {}\n/* forbidden() */\nfn b() {}\n";
+    let code = production_code(source);
+    assert!(!code.contains("forbidden"), "{code}");
+    let lines: Vec<&str> = code.lines().collect();
+    assert_eq!(lines[3], "fn a() {}", "{code}");
+    assert_eq!(lines[5], "fn b() {}", "{code}");
+}
+
 /// Scenario "main.rs is a positive control": `main.rs` mentions
 /// `#[cfg(test)]` in a comment and has a `#[cfg(test)] use` before its
 /// production body; both must leave `fn main` visible.
@@ -573,6 +586,8 @@ const DISPATCH_FORMS: &[&str] = &[
     ".eq(",
     ".eq_ignore_ascii_case(",
     ".starts_with(",
+    ".contains(",
+    "contains(&",
 ];
 
 /// Whether `line` names `subject` in a comparison or a match.
@@ -603,6 +618,8 @@ fn cli_name_audit_catches_each_comparison_form() {
         "if let Some(\"agy\") = id {",
         "id.eq(\"qwen\")",
         "id.eq_ignore_ascii_case(\"claude\")",
+        "if cli.contains(\"claude\") {",
+        "names.contains(&\"codex\")",
     ] {
         assert!(dispatches_on(caught, &re), "guard misses: {caught}");
     }

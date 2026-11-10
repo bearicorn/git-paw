@@ -7,6 +7,9 @@
 //! `git paw __send` call and exits with a scripted status; every other git
 //! call goes to the real git.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -95,7 +98,7 @@ fn tell_with_stdin(args: &[&str], input: Option<&str>, stub_line: &str, stub_exi
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = StdCommand::new("bash")
+    let mut child = script_cmd::bash()
         .arg(&sweep)
         .arg("tell")
         .args(args)

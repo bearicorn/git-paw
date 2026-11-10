@@ -38,7 +38,9 @@ use super::launch::{
 use super::purge::invalidate_if_stale;
 use super::recover::recover_session_detached;
 use super::spec_mode::{SpecMode, apply_spec_mode};
-use super::start::{handle_existing_session, restart_from_pause_detached};
+use super::start::{
+    handle_existing_session, restart_from_pause_detached, selection_ignored_notice,
+};
 use super::{CommandContext, Output};
 use crate::config::resolve_submit_delay_ms;
 
@@ -377,9 +379,13 @@ pub fn supervisor(
         && !invalidate_if_stale(repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
+        let has_selection = branches_flag.is_some() || *spec_mode != SpecMode::None;
         if unattended {
             // Nothing is touched here: the caller refuses a bare session and
             // takes the drive-loop binding BEFORE any revive or recovery.
+            if has_selection && !existing.worktrees.is_empty() {
+                out.warn(&selection_ignored_notice(&existing.session_name));
+            }
             return Ok(LaunchOutcome::DriveExisting {
                 repo_root: repo_root.to_path_buf(),
                 config: Box::new(config.clone()),
@@ -387,7 +393,6 @@ pub fn supervisor(
                 status: effective,
             });
         }
-        let has_selection = branches_flag.is_some() || *spec_mode != SpecMode::None;
         if let Some(outcome) =
             handle_existing_session(repo_root, existing, &effective, has_selection, out)?
         {
@@ -1100,6 +1105,7 @@ pub fn revive_for_drive(
 /// Refreshes the exported skills (`.git-paw/skills/orchestrator/SKILL.md` and
 /// `.git-paw/skills/cli-setup/SKILL.md`, with the same session-independent
 /// inputs `git paw init` uses, so neither lags the config or the binary) and
+/// the bundled root helper scripts under `.git-paw/scripts/`, and
 /// writes the orchestrator's session context into the repo-root sidecar
 /// `.git-paw/AGENTS.local.md`: the session's name and broker URL, the helpers,
 /// the drive-loop directive when `unattended`, and the governance section,
@@ -1118,6 +1124,8 @@ fn write_orchestrator_context(
     orchestrator_cli: &str,
 ) -> Result<(), PawError> {
     crate::init::export_skills(repo_root, config)?;
+    // The skill teaches the helpers' subcommands, so the helpers must match it.
+    crate::init::refresh_root_scripts(repo_root)?;
     let template = crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL)?;
     let assignment = crate::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),

@@ -11,6 +11,9 @@
 //! Driven against a REAL broker, so "published nothing" is asserted against
 //! what the broker actually holds rather than a stub's idea of it.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -89,7 +92,7 @@ fn spawn_broker() -> (git_paw::broker::BrokerHandle, u16) {
 /// Runs the helper from `cwd` (which decides whether it sees the main working
 /// tree or a linked worktree).
 fn run(script: &Path, cwd: &Path, args: &[&str]) -> Output {
-    StdCommand::new("bash")
+    script_cmd::bash()
         .arg(script)
         .args(args)
         .current_dir(cwd)

@@ -1,7 +1,7 @@
 # core-project-conventions Specification
 
 ## Purpose
-Repo-wide contributor conventions and the doc accuracy they demand: the `AGENTS.md` approved-dependencies table stays in sync with `[dependencies]`/`[dev-dependencies]` in `Cargo.toml` (including `dirs` recorded as an intentional exclusion), the commit-scope enumeration and its compound-scope form, the mdBook architecture chapter's module list and its changelog include, and the README Features section's enumeration of the current user-facing surface — so contributors can trust the project docs to match the shipped code.
+Repo-wide contributor conventions and the doc accuracy they demand: the `AGENTS.md` approved-dependencies table stays in sync with `[dependencies]`/`[dev-dependencies]` in `Cargo.toml` (including `dirs` recorded as an intentional exclusion), the commit-scope enumeration and its compound-scope form, the mdBook architecture chapter's module list and its changelog include, and the README Highlights section's enumeration of the current user-facing surface — so contributors can trust the project docs to match the shipped code.
 
 ## Requirements
 
