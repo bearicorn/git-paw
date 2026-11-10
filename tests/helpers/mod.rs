@@ -409,6 +409,20 @@ pub fn setup_test_repo() -> TestRepo {
     }
 }
 
+/// Agent CLI stub that prints `marker` and its arguments once, then discards
+/// input. Use it instead of a shell: a shell parses the injected boot block as
+/// commands, and its errors mix with the echoed text. Prepend `bin_dir` to
+/// `PATH`.
+pub fn write_input_sink_cli(bin_dir: &Path, name: &str, marker: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = format!("#!/bin/sh\nprintf '%s %s\\n' '{marker}' \"$*\"\nexec cat >/dev/null\n");
+    let path = bin_dir.join(name);
+    std::fs::write(&path, script).expect("write input-sink stub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod input-sink stub");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

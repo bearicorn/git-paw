@@ -9,9 +9,9 @@
 //! `Recovery of a pre-relocation session rebuilds the new layout` and
 //! supervisor-launch `Supervised recovery applies the same fallback`.
 //!
-//! The tests use `echo` as the CLI with a sentinel flag supplied through the
-//! `[clis.echo] approval_args` override, so a pane's scrollback shows the
-//! exact command the pane was launched with.
+//! Pane tests use an input-sink stub CLI, not a shell: a shell would parse the
+//! injected boot block as commands. The sentinel flag comes in via
+//! `approval_args`.
 //!
 //! Skips if tmux is unavailable.
 
@@ -27,9 +27,15 @@ use tempfile::TempDir;
 mod helpers;
 use helpers::*;
 
-/// Sentinel flag mapped to `full-auto` via the `[clis.echo]` override; unique
-/// enough that it can only appear in a pane through a full-auto command.
+/// Sentinel flag mapped to `full-auto` via the sink's `[clis]` override;
+/// unique enough that it can only appear in a pane through a full-auto command.
 const SENTINEL_FLAG: &str = "--paw-full-auto-sentinel";
+
+/// The input-sink stub's binary name and `[clis]` key.
+const SINK_CLI: &str = "paw-approval-sink";
+
+/// Line prefix the sink prints, with its arguments, once it is running.
+const SINK_MARKER: &str = "PAW_APPROVAL_SINK";
 
 fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
@@ -121,12 +127,27 @@ fn launch(tr: &TestRepo, env: &TmuxTestEnv, config: &str) -> (Option<String>, St
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
 
+    // The sink lives in the test's sandbox, so it outlives the launch.
+    let sink_dir = tr
+        .path()
+        .parent()
+        .expect("repo has parent")
+        .join("sink-bin");
+    fs::create_dir_all(&sink_dir).expect("create sink bin dir");
+    write_input_sink_cli(&sink_dir, SINK_CLI, SINK_MARKER);
+    let path_env = format!(
+        "{}:{}",
+        sink_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
     let home = TempDir::new().expect("home tempdir");
     let mut start = cmd();
     env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env("PATH", &path_env)
         .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(15))
@@ -166,21 +187,21 @@ fn approval_changes_no_pane_command() {
             r#"
 [supervisor]
 enabled = true
-cli = "echo"
+cli = "{SINK_CLI}"
 approval = "full-auto"
 agent_approval = "auto"
 
-[clis.echo]
-command = "echo"
+[clis.{SINK_CLI}]
+command = "{SINK_CLI}"
 approval_args = {{ "full-auto" = "{SENTINEL_FLAG}" }}
 "#
         ),
     );
     let session = session.expect("session name in stdout");
 
-    // Wait for both agents' commands to render, then inspect every pane.
+    // Wait for both agents' sinks to render, then inspect every pane.
     let captures: Vec<String> = (0..=2)
-        .map(|pane| capture_pane_until(&tmux_env, &session, pane, "echo"))
+        .map(|pane| capture_pane_until(&tmux_env, &session, pane, SINK_MARKER))
         .collect();
     kill_session(&tmux_env, &session);
 
@@ -211,12 +232,12 @@ fn coding_agents_resolve_flags_from_agent_approval() {
             r#"
 [supervisor]
 enabled = true
-cli = "echo"
+cli = "{SINK_CLI}"
 approval = "manual"
 agent_approval = "full-auto"
 
-[clis.echo]
-command = "echo"
+[clis.{SINK_CLI}]
+command = "{SINK_CLI}"
 approval_args = {{ "full-auto" = "{SENTINEL_FLAG}" }}
 "#
         ),

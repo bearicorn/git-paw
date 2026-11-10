@@ -7,11 +7,10 @@
 //!    `Enter` key.  This is asserted by exercising `tmux::build_boot_inject_args`,
 //!    which the production injector calls.
 //!
-//! 2. The boot block reaches the agent pane: starting `git paw start --cli sh
-//!    --branches feat/x` against a broker-enabled config creates a tmux
-//!    session whose agent pane shows that the registration step from the boot
-//!    block ran (the broker reports the agent as `working`). This proves the
-//!    keys actually landed in pane 1 and were consumed by the shell.
+//! 2. The boot block reaches the agent pane: starting `git paw start` with an
+//!    input-sink stub as the agent CLI against a broker-enabled config creates
+//!    a tmux session whose agent pane buffer shows the boot block. This proves
+//!    the keys actually landed in pane 1.
 //!
 //! This pairing is the closest practical proxy for the spec wording "boot
 //! block visible AND no Enter side-effect": tmux's `send-keys -l` translates
@@ -150,15 +149,24 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
     let project_name = unique_project_name("manual");
     let repo = rename_repo_basename(&tr, &project_name);
 
-    // Configure broker enabled + register `sh` as the agent CLI. The
-    // broker doesn't actually have to be reachable for this test — we
-    // assert on what landed in the pane, not on what the shell ran.
+    // The agent CLI is a registered input sink, not a shell: a shell would
+    // parse the boot block as commands and mix its errors into the pane text.
     let broker_port = find_free_port();
     let paw_dir = repo.join(".git-paw");
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
-    let config_content =
-        format!("[broker]\nenabled = true\nport = {broker_port}\n\n[clis.sh]\ncommand = \"sh\"\n");
+    let config_content = format!(
+        "[broker]\nenabled = true\nport = {broker_port}\n\n\
+         [clis.paw-boot-sink]\ncommand = \"paw-boot-sink\"\n"
+    );
     fs::write(paw_dir.join("config.toml"), config_content).expect("write config");
+
+    let sink_dir = TempDir::new().expect("sink bin dir");
+    write_input_sink_cli(sink_dir.path(), "paw-boot-sink", "PAW_BOOT_SINK_UP");
+    let path_env = format!(
+        "{}:{}",
+        sink_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
     // The session name is `paw-<project_name>` (per `tmux::resolve_session_name`).
     let session_name = format!("paw-{project_name}");
@@ -170,10 +178,11 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
     start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
+        .env("PATH", &path_env)
         .env_remove("XDG_DATA_HOME");
     tmux_env.apply_assert(&mut start_cmd);
-    let _ = start_cmd
-        .args(["start", "--cli", "sh", "--branches", "feat/x"])
+    let start_out = start_cmd
+        .args(["start", "--cli", "paw-boot-sink", "--branches", "feat/x"])
         .output()
         .expect("run start");
 
@@ -186,7 +195,9 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         .success();
     assert!(
         session_alive,
-        "tmux session '{session_name}' must be created by `git paw start`"
+        "tmux session '{session_name}' must be created by `git paw start`; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&start_out.stdout),
+        String::from_utf8_lossy(&start_out.stderr)
     );
 
     // Pane 0 is the dashboard, pane 1 is the agent. The boot block lands
@@ -236,8 +247,8 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         "broker.sh helper invocation must appear in the agent pane buffer; got:\n{buffer}"
     );
     assert!(
-        buffer.contains("feat-x"),
-        "pre-expanded agent_id 'feat-x' must appear in the agent pane buffer (so the curl \
-         lines target the correct agent); got:\n{buffer}"
+        buffer.contains("--agent feat-x"),
+        "pre-expanded agent_id 'feat-x' must appear in the boot block's broker.sh calls \
+         (so they target the correct agent); got:\n{buffer}"
     );
 }

@@ -47,6 +47,9 @@ const OSS_SENTINEL: &str = "--paw-oss-sentinel";
 /// Approval-flag sentinel for the supervisor test, mapped to `full-auto`.
 const SUP_SENTINEL: &str = "--paw-sup-sentinel";
 
+/// Line the supervisor test's input-sink agent prints once it is running.
+const AGENT_MARKER: &str = "PAW_AGENT_SINK_UP";
+
 /// The CLI session id the recovery test's saved receipt carries.
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
@@ -431,7 +434,8 @@ fn worker_overrides_resolve_by_key_and_launch_command() {
 /// `[supervisor] cli = "claude-oss"` with `[clis.claude-oss] command = <stub>`
 /// and `approval = "full-auto"`: no pane runs an orchestrator, so the
 /// configured command is never spawned — pane 0 is the dashboard and the
-/// agent runs `--cli`.
+/// agent runs `--cli`, an input sink so the boot block typed into its pane is
+/// never parsed by a shell.
 #[test]
 #[serial]
 fn supervisor_cli_is_never_launched_in_a_pane() {
@@ -459,15 +463,26 @@ fn supervisor_cli_is_never_launched_in_a_pane() {
     )
     .expect("write config");
 
+    let sink_dir = TempDir::new().expect("sink bin dir");
+    write_input_sink_cli(sink_dir.path(), "paw-agent-sink", AGENT_MARKER);
+    let path_env = format!("{}:{}", sink_dir.path().display(), st.path_env);
+
     let home = TempDir::new().expect("home tempdir");
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(&repo)
         .env("HOME", home.path())
-        .env("PATH", &st.path_env)
+        .env("PATH", &path_env)
         .env_remove("XDG_DATA_HOME")
-        .args(["start", "--supervisor", "--cli", "echo", "--branches", "a"])
+        .args([
+            "start",
+            "--supervisor",
+            "--cli",
+            "paw-agent-sink",
+            "--branches",
+            "a",
+        ])
         .timeout(Duration::from_secs(25))
         .output()
         .expect("run start");
@@ -479,10 +494,15 @@ fn supervisor_cli_is_never_launched_in_a_pane() {
     );
 
     let session_name = format!("paw-{project}");
-    // Pane 1 is the agent, running `echo`: once its output renders, every
-    // pane has been launched. Only an orchestrator pane could have spawned
-    // the stub.
-    let pane1 = wait_for_pane_content(&tmux_env, &session_name, 1, "echo", Duration::from_secs(15));
+    // Pane 1 is the agent sink: once its marker renders, every pane has been
+    // launched. Only an orchestrator pane could have spawned the stub.
+    let pane1 = wait_for_pane_content(
+        &tmux_env,
+        &session_name,
+        1,
+        AGENT_MARKER,
+        Duration::from_secs(15),
+    );
     let pane0 = wait_for_pane_content(
         &tmux_env,
         &session_name,
@@ -494,7 +514,7 @@ fn supervisor_cli_is_never_launched_in_a_pane() {
     kill_session(&tmux_env, &session_name);
 
     assert!(
-        pane1.contains("echo"),
+        pane1.contains(AGENT_MARKER),
         "the agent launched; capture:\n{pane1}"
     );
     assert!(

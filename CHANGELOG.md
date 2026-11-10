@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-11-11
+
+### Features
+
+- *(agents,broker,session)* Route worker broker calls through broker.sh, scope the orchestrator pointer and refill emptied sessions **BREAKING**
+- *(agents,supervisor,config)* Attribute worker usage and enforce an optional budget cap
+- *(git,cli)* Never rebase over uncommitted work when a worktree is reused
+- *(cli,supervisor,skills)* Verify every message typed to a coding agent
+- *(cli,config,agents)* Declare worker sandboxes and keep native ones on at full-auto
+- *(cli,config,supervisor)* Read each surface with its own cli prompt profile **BREAKING**
+- *(config,agents)* Resolve each agent cli into a provider-family record and launch every worker from it **BREAKING**
+- *(cli,worktree)* Add --no-rebase to add and never rebase over uncommitted work
+
+### Bug Fixes
+
+- *(supervisor,broker,mcp)* Refresh helpers on supervised launch and bound broker calls
+- *(supervisor)* Report the native-sandbox refusal in a dry run
+- *(specs,mcp)* Serve each spec format's own files from the mcp read tools **BREAKING**
+- *(specs)* Stop pointing markdown workers at openspec/changes
+
+### Refactor
+
+- *(agents,supervisor,config)* Bring v0.19 in line with the architecture direction
+- *(specs)* Require every per-format decision in each spec backend
+- *(specs)* Make SpecBackend the strategy for every per-format decision
+
+### Documentation
+
+- *(supervisor,config)* Note when a supervised launch stops on the helper refresh and when helpers ignore GIT_PAW_BROKER_URL
+- *(specs)* Propose architecture-conformance-fixes
+- *(readme)* Rewrite the readme as a short landing page
+- *(specs)* Propose worker-friction-fixes
+- *(specs)* Propose four more v0.19.0 changes
+- *(specs)* State ten header-only requirements in their bodies
+- *(specs)* List the cli-provider capability in the specifications index
+- *(specs)* State the session persistence requirement in its body
+- *(specs)* Group the add rebase requirements and tidy the add hint and test comments
+- *(specs)* Propose the first seven v0.19.0 changes
+
+### CI/CD
+
+- Ignore the rmcp advisory in cargo-audit as deny.toml already does
+- Run the macos test job on macos-15
 ## [0.18.0] - 2026-10-29
 
 ### Features
@@ -475,6 +518,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.19.0]: https://github.com/bearicorn/git-paw/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/bearicorn/git-paw/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/bearicorn/git-paw/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/bearicorn/git-paw/compare/v0.15.0...v0.16.0
