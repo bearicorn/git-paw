@@ -573,7 +573,7 @@ The command bodies SHALL live in the library crate as `git_paw::commands`, expos
 
 ### Requirement: Source audits read every production line
 
-A source audit SHALL check every production line of each file it scans. It SHALL skip only `#[cfg(test)]` items, measured by their braces, and comment lines, so code after an early `#[cfg(test)]` item is still audited. Braces inside string, char and raw-string literals and comments SHALL NOT count. All source audits SHALL share one implementation of that rule.
+A source audit SHALL check every production line of each file it scans. It SHALL skip only `#[cfg(test)]` items, measured by their braces, and comment lines, including lines inside a `/* */` block comment, so code after an early `#[cfg(test)]` item is still audited. Braces inside string, char and raw-string literals and comments SHALL NOT count. All source audits SHALL share one implementation of that rule.
 
 #### Scenario: Production code after an early test item is audited
 
@@ -623,9 +623,18 @@ Test: `tests/source_audit.rs::spec_format_dispatch_happens_only_inside_specs`
 
 Test: `tests/source_audit.rs::braces_in_literals_do_not_count`, `tests/source_audit.rs::every_test_item_in_src_closes_before_eof`
 
+#### Scenario: Lines inside a block comment are not audited
+
+- **GIVEN** a source file whose only match of the forbidden pattern is on a line inside a `/* */` block comment, followed by production code
+- **WHEN** the shared filter is applied
+- **THEN** the line inside the block comment SHALL be blank
+- **AND** the production code after the comment SHALL remain visible on its original line
+
+Test: `tests/source_audit.rs::lines_inside_a_block_comment_are_not_audited`
+
 ### Requirement: Core modules report warnings as values
 
-A module in the core or agent-CLI layer SHALL return a warning to its caller as a value, not print it to stderr, and SHALL NOT keep process-global state to deduplicate warnings. Launch resolution SHALL take the working directory as a parameter and return the warning with the profile, so a caller cannot drop it. The caller SHALL emit it through its own output sink, once per launch, as each CLI resolves.
+The agent-CLI module and launch resolution SHALL return a warning to their caller as a value, not print it to stderr, and SHALL NOT keep process-global state to deduplicate warnings. Launch resolution SHALL take the working directory as a parameter and return the warning with the profile, so a caller cannot drop it. The caller SHALL emit it through its own output sink, once per launch, as each CLI resolves.
 
 #### Scenario: An unsandboxed full-auto launch warns once per launch through the sink
 
@@ -693,8 +702,8 @@ Test: `src/commands/send.rs::a_send_uses_the_backend_as_capturer_and_dispatcher`
 #### Scenario: Drive-loop keystrokes are unchanged
 
 - **GIVEN** the drive loop wired to a fake backend that is both its capturer and its dispatcher
-- **WHEN** it submits buffered input left on an idle input box
-- **THEN** the fake SHALL record the same key operations as before this refactor
+- **WHEN** it submits a message and the input box still shows a paste placeholder after the first `Enter`
+- **THEN** the fake SHALL record, in order: the message text, `Enter`, `ClearLine`, the message text again, and `Enter`
 
 Test: `src/supervisor/drive.rs::submit_and_verify_recovers_a_paste_placeholder_and_reports_delivered`
 

@@ -2,7 +2,9 @@
 
 ## Purpose
 Isolates the test suite from the developer's live environment — tmux-spawning tests use a tempdir-rooted socket via a shared helper, `setup_test_repo` guards against running while a live `paw-*` session exists, `git paw` subcommand tests override `HOME`/`XDG_DATA_HOME`, and broker ports come from an OS-assigned ephemeral bind rather than a collision-prone PID-modulo scheme — and closes the gap between passing tests on a developer's machine and passing in CI by providing cold-start smoke recipes (`just smoke`, `smoke-container`, `smoke-all`) that strip inherited tmux/broker context and mirror CI's environment, plus convention-enforcement tests (every `new-session` carries `-x`/`-y`/`-c`, no stdin-claiming pipe in `sweep.sh`), an expanded CI matrix (headless Linux + macOS), and a CONTRIBUTING rule to run the smoke suite before pushing tmux/broker/worktree changes.
+
 ## Requirements
+
 ### Requirement: Tmux-spawning tests SHALL use a dedicated tmux socket
 
 Every integration test in `tests/` that directly invokes `tmux` (via `std::process::Command::new("tmux")`) or indirectly spawns tmux through a `git paw` subcommand (e.g. `git paw start`, which calls `src/tmux.rs::TmuxCommand::execute()`) SHALL configure its `std::process::Command` builder so the spawned tmux process uses a tempdir-rooted tmux socket directory, NOT the user's default tmux socket.
@@ -408,3 +410,14 @@ Test: the `cargo test` gate (verified at implementation by temporarily adding a 
 
 Test: `tests/production_panic_free.rs::bin_target_is_not_excluded_from_testing`
 
+### Requirement: Script-running tests SHALL clear the session broker address
+
+A test that runs a bundled helper script SHALL build the command through the shared builder in `tests/helpers/script_cmd.rs`, which clears `GIT_PAW_BROKER_URL`, so a test run inside a live git-paw session never publishes to that session's broker. `TmuxTestEnv::apply` SHALL clear it too.
+
+#### Scenario: A test never inherits the session's broker address
+
+- **GIVEN** a test run inside a live git-paw session, whose environment sets `GIT_PAW_BROKER_URL` to the session's broker
+- **WHEN** the test runs a bundled helper against its own broker
+- **THEN** the helper SHALL publish to the test's broker and nothing SHALL reach the session's
+
+Test: `tests/helper_publish_contract.rs::a_script_test_ignores_an_inherited_broker_url`

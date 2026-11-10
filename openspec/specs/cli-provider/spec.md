@@ -495,7 +495,7 @@ For a `claude`-family entry, the parent directory of an absolute `[clis.<name>].
 
 ### Requirement: Per-CLI names are compared only inside the agent CLI module
 
-Production code outside `src/agent_cli/` SHALL NOT compare, match or test a value against a known CLI name (`claude`, `codex`, `agy`, `qwen`, `cursor-agent`). Per-CLI behaviour SHALL be reached through the CLI's resolved record, such as its family. A source audit SHALL enforce this.
+Production code outside `src/agent_cli/` SHALL NOT compare, match or test a value against a known CLI name (`claude`, `codex`, `agy`, `qwen`, `cursor-agent`), including a membership test with `contains`. Per-CLI behaviour SHALL be reached through the CLI's resolved record, such as its family. A source audit SHALL enforce this.
 
 #### Scenario: A CLI-name comparison outside the module is caught
 
@@ -516,6 +516,14 @@ Test: `tests/source_audit.rs::cli_name_audit_catches_each_comparison_form`
 #### Scenario: A wrapped match or a prefix test is caught
 
 - **GIVEN** a production line outside `src/agent_cli/` with `Some("claude") =>`, `(_, "codex") =>` or `.starts_with("claude")`
+- **WHEN** the CLI-name audit runs
+- **THEN** it SHALL report that line
+
+Test: `tests/source_audit.rs::cli_name_audit_catches_each_comparison_form`
+
+#### Scenario: A membership test is caught
+
+- **GIVEN** a production line outside `src/agent_cli/` with `cli.contains("claude")` or `names.contains(&"codex")`
 - **WHEN** the CLI-name audit runs
 - **THEN** it SHALL report that line
 
