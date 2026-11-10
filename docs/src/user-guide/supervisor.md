@@ -405,6 +405,8 @@ revoked or taken over exits `session-torn-down` on its next poll without acting
 > exported skill, so the helpers always match the subcommands the skill
 > teaches. A script is rewritten only when its content differs from the
 > running binary's; like `git paw init`, this overwrites local edits there.
+> If a script path is a symlink or `.git-paw/scripts/` is not writable, the
+> launch stops with an error naming the path, as `git paw init` does.
 
 ### Session-instance lifecycle
 

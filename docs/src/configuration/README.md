@@ -797,7 +797,7 @@ wave_stall_minutes = 30
 
 The default of 30 minutes sits just above the unattended drive loop's 25-minute heartbeat, so a wave that is merely between heartbeats is not reported as stalled. A config written before the key existed loads unchanged and gets the default.
 
-When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker.
+When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker. The bundled helper scripts prefer it over `[broker]` only when it is a loopback `http://host:port` (`127.0.0.1`, `localhost` or `[::1]`); with a non-loopback `bind` they ignore it and use the configured address (see the [CLI reference](../cli-reference.md)).
 
 > **Warning — a non-loopback `bind` removes a protection and adds exposure.**
 > The broker authenticates nothing: whoever reaches the port can read the whole
