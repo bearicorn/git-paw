@@ -26,9 +26,9 @@ v0.1.0 through v0.18.0 shipped; v0.19.0 is next.
 | v0.16.0 | 2026-09-14 | Unattended boot & friction-killers | make a fresh consumer's `--unattended` run reach its first tool call (peer-4-poker dogfood proved it can't): **boot trio** GP-01 (allowlist → `permissions.allow`), GP-02 (bundled-helper classifier + `normalize_command` leading-`VAR=`/`env`/`nohup`), GP-03 (`--permission-mode auto` + launch liveness), GP-04 (`.git-paw/` conflict FP + `.git/`-write safety); + **unattended-hardening** GP-05 (exit-summary outcome), GP-06 (purge/stop orphan drive-loop), orchestrator-in-`session.json`; + **quick CLI DX** shell completions, `git paw attach`, strike phantom `resume`. Carved ahead of the remote/mobile victory-lap so the flagship boots on a fresh repo |
 | v0.17.0 | 2026-10-25 | Drive-loop reliability + `--resume`; classifier retired | the post-0.16.0 data-safety chain fixed (exit summary from git refs + `cli-unavailable` non-success exit; purge/remove never delete unmerged branches) + launch correctness (boot and task prompts submitted on every path, readiness gate, helpers provisioned, governance wired) + **`--resume`** (worker CLI session ids captured and resumed); **BREAKING:** the auto-approve classifier is retired (git-paw approves no prompt; the drive loop detects and escalates), `git paw setup-cli` seeds allow rules only on explicit consent, panes launch the configured `command` (`cursor-agent` detected), the broker listener checks `Host`/`Origin`, `stop` lost `--force` |
 | v0.18.0 | 2026-10-29 | **Orchestrator relocation** | the orchestrator moved out of the session: the **supervisor pane** is gone, your own driving session takes its place with the exported orchestrator skill, and the **drive loop** stays (**BREAKING**); the broker host runs in its own process in a `broker` window, with the dashboard as a thin client; **verdict authority** in the broker (only the root session's credential may publish verdicts; **BREAKING**); MCP **write tools** (session lifecycle, verdicts) and consented spec authoring confined to the change directory; the drive loop hands judgment calls to a headless orchestrator one-shot; the unattended heartbeat measures progress, not wall-clock time; plus a cursor-based event read surface, `cmd_*` as a library, a terminal backend port and a pure drive-loop core |
-| v0.19.0 | *planned* | Per-CLI foundation | one resolved record per CLI (`[clis.<name>].family` / `args`, the ambiguous-shim refusal) threaded through every consumer, per-worker sandbox mode, usage and cost attribution with a budget cap, verified `sweep.sh tell`, and the spec-format Strategy. Hook providers, trust pre-acceptance and allowlist seeding were dropped; consented seeding shipped in v0.17.0 as `setup-cli` |
+| v0.19.0 | *in progress* | Per-CLI foundation | one resolved record per CLI (`[clis.<name>].family` / `args`, the ambiguous-shim refusal) threaded through every consumer, per-worker sandbox mode, usage and cost attribution with a budget cap, verified `sweep.sh tell`, the spec-format Strategy and `add` keeping a dirty kept worktree; plus five changes added during the build: MCP `get_spec`/`get_tasks` per format, `start` skipping the rebase on a dirty worktree, the README landing page (pulled forward from v0.21.0), post-merge audit follow-ups, and worker-friction fixes from the build dogfood. Dogfooded on git-paw v0.18.0 with an external orchestrator |
 | v0.20.0 | *planned* | Skills packaging + agent profiles | skills become agentskills.io packages (dirs: `SKILL.md` + `scripts/`/`references/`/`assets/`, consolidating today's split `agent-skills/*.md` + `scripts/*.sh`; injected `AGENTS.md` references the packages) + per-CLI skill templates; on that foundation, **agent profiles** in config (`[profiles.<name>]`: a CLI pinned to a model + a role skill): worker profiles launch as panes, delegate profiles run headless one-shot for the orchestrator (explorer + gate auditors). Replaces the vendor subagent-persona plan |
-| v0.21.0 | *planned* | Pre-freeze contract + DX hardening | lock the machine/config contract before the freeze: config schema versioning + migration, the supervisor vocabulary split (config version 2 with `[orchestrator]`/`[workers]`/`[drive]`, `--coordinated`/`--bare`, the `orchestrator` wire identity; old names warn through the new `core-deprecation` registry), one versioned `--json` contract (`add`, `remove` and `list-clis` gain `--json`), `git paw finish <branch>` (merge an agent's work into a target branch via `--into`, then remove the worktree — the pure-manual merge capstone), GP-09 merge-queue, session-state reconciliation + state-file locking (carried from v0.13); plus DX polish (**BREAKING (view):** the dashboard becomes an opt-in usage view and the roster moves into `status`; configurable layout, `config check`, terminal robustness, README landing-page slim-down) |
+| v0.21.0 | *planned* | Pre-freeze contract + DX hardening | lock the machine/config contract before the freeze: config schema versioning + migration, the supervisor vocabulary split (config version 2 with `[orchestrator]`/`[workers]`/`[drive]`, `--coordinated`/`--bare`, the `orchestrator` wire identity; old names warn through the new `core-deprecation` registry), one versioned `--json` contract (`add`, `remove` and `list-clis` gain `--json`), `git paw finish <branch>` (merge an agent's work into a target branch via `--into`, then remove the worktree — the pure-manual merge capstone), GP-09 merge-queue, session-state reconciliation + state-file locking (carried from v0.13); plus DX polish (**BREAKING (view):** the dashboard becomes an opt-in usage view and the roster moves into `status`; configurable layout, `config check`, terminal robustness) |
 | v0.22.0 | *planned* | Session recording & replay, rethought | `git paw replay` can't recreate a session — `pipe-pane` raw capture of a full-screen agent TUI (alt-screen + cursor-addressed redraws + animated spinners/thinking counters) is unreadable ANSI-stripped and not a faithful recording (confirmed unusable, peer-4-poker 2026-08-31). Rethink the record: a semantic timeline from broker events, commits and the CLI's own JSONL transcript becomes the default (**BREAKING**: `--color` and the ANSI-stripped view go), with an optional asciinema v2 recording played through `asciinema play` (no built-in VT player); capture on every path that creates an agent (`add` and recovery included; the `--from-specs`-only gap was fixed in 02649dc), one record per run. Freeze-adjacent — replay is a shipped command, so fix it pre-1.0 or deprecate it at the freeze |
 | v0.23.0 | *planned* | Per-CLI support audit | verify every detected CLI end to end against the worker lifecycle (detection, launch, readiness, boot block, prompt shapes, approvals, send/submit, auto-mode/sandbox/hooks, resume, headless one-shot, exit detection, cost); a per-CLI conformance suite (recorded prompt-shape fixtures in CI + an opt-in live smoke); a published support matrix with tiers (first-class / supported / launch-only) that v1.0.0 freezes |
 | v0.24.0 | *planned* | Pre-freeze hardening | feature freeze: fix the audit findings, de-flake the suite, a back-compat matrix for v0.16+ configs/sessions, an error/exit-code pass, a five-gate audit of the release candidate, and a full external-orchestrator dogfood of the v0.18.0 relocation before the freeze |
@@ -610,6 +610,31 @@ breaking changes; inherits the `cmd_*` library refactor pulled forward in v0.18.
 Claude-family *boot trio* (GP-01/02/03/04) was carved ahead into **v0.16.0** so the
 flagship boots on a fresh repo now; this cycle **generalizes** that machinery across CLIs.
 
+**Scope as built (2026-11-10).** Twelve changes. The seven specced up front:
+`cli-provider-record`, `cli-profile-threading`, `worker-sandbox-mode`, `worker-usage-budget`,
+`verified-agent-send`, `spec-backend-strategy` and `add-keeps-worktree-state`. Five more were
+added during the build:
+
+- **`mcp-spec-artifacts-per-format`** — MCP `get_spec` / `get_tasks` returned wrong or empty
+  results for Spec Kit, Markdown and Superpowers. Pre-existing; found by the
+  `spec-backend-strategy` adversarial review.
+- **`start-skips-rebase-on-dirty-worktree`** — `start`, launch and MCP `start_session` skip the
+  rebase on a dirty reused worktree, as `add` does. Decided: a branch with no worktree is rebased
+  inside its own new worktree, never in the main checkout.
+- **`readme-landing-page`** — `README.md` cut from 403 to about 120 lines, in the maintainer's
+  voice. Pulled forward from v0.21.0's "README as a landing page".
+- **`v019-review-followups`** — the small items from the post-merge audits.
+- **`worker-friction-fixes`** — from the build dogfood:
+  - the coordination skill teaches `broker.sh`, not raw `curl`, and tells workers to run commands
+    bare (DF-20, DF-12, DF-19, DF-38);
+  - the orchestrator pointer `git paw init` writes into the tracked `AGENTS.md` no longer reaches
+    workers (DF-08);
+  - `doctor` warns when `/opsx:apply` is unreachable, and the docs cover provisioning it (DF-04,
+    DF-09, DF-13);
+  - an emptied session can be refilled (DF-43, DF-44);
+  - the orchestrator skill checks that each merge landed and never pipes a gate (DF-52, DF-41,
+    DF-47).
+
 All of it hangs off one abstraction — a **resolved per-CLI record** (`CliProfile`, capability
 `cli-provider`: compiled provider families with a `generic` fallback) — with the same
 "native-first, generic-fallback" shape throughout:
@@ -768,6 +793,27 @@ uncommitted changes, because `add` always rebases an existing branch. `git paw a
 matches `start --no-rebase`, and `add` never rebases a dirty worktree: it skips the rebase with a
 notice and touches nothing in the tree.
 
+**Built 2026-11-10 as the v0.18.0 dogfood.** git-paw v0.18.0 built this cycle on itself: an
+external Claude Code session was the orchestrator, and the workers ran Opus 5.5 at medium effort.
+The findings are DF-01 to DF-52; those not fixed here are carried into v0.20.0, v0.21.0, v0.23.0
+and v0.24.0 below.
+- **Verification:** the five gates, plus a fork-based regression review and adversarial review of
+  each change before merging. They earned their cost: on the first merge alone they found three
+  items worth fixing (DF-32).
+- **RUSTSEC-2026-0462** (rmcp 1.7, an unbounded body read in the streamable-HTTP client
+  transports) is ignored in `deny.toml`. git-paw enables only the `server` / stdio features, so it
+  is not exposed. Upgrading to rmcp 3.9 or later is a major, protocol-churning bump and is still
+  to do.
+- **openspec 1.16 strict validation adopted.** A requirement over 500 characters now fails
+  `--strict`, and all seven specced changes failed it on the upgrade. Ten header-only requirements
+  in the main specs blocked archives one by one and were fixed in one commit (DF-29, DF-41, DF-49).
+- **Orchestrator merge error (DF-52).** `spec-backend-strategy` was archived without its code: the
+  ff-merge failed on a dirty main checkout, `| tail -1` hid the exit code, and the chained archive
+  ran anyway. Later changes were built and verified on a base without it, all gates green. Recovered
+  by rebasing its commits onto the branch tip and re-running the gates. Lessons: never pipe a
+  must-succeed git step, check `git merge-base --is-ancestor` after each merge, and keep the
+  orchestrator's checkout clean.
+
 ---
 
 ## v0.20.0 — Skills packaging + agent profiles (planned)
@@ -882,6 +928,14 @@ Added 2026-10-19: `skill-override-resolution`, which lands after `skill-package-
   - Overrides change instructions only: an override's `scripts/`, `references/` and `assets/`
     are ignored, so it never decides whether a command runs.
 
+**Dogfood findings carried here from the v0.19.0 build (2026-11-10).** Workers are not isolated
+from the operator's own CLI config; a per-profile config directory is the natural fix.
+- **DF-14, DF-27, DF-40** — the operator's personal plugins and hooks run inside every worker,
+  adding hook chatter, uncontrolled review cost and orders that conflict with the orchestrator's.
+- **DF-39** — a worker can reach the operator's project memory, which is keyed to the main checkout,
+  so its memory writes would leak into the operator's own sessions.
+- **DF-48** — idle workers' prompt caches go cold, so each late nudge re-caches 300–500k tokens.
+
 ---
 
 ## v0.21.0 — Pre-freeze contract + DX hardening (planned)
@@ -976,14 +1030,8 @@ longer rates `echo "$VAR"` or any other command; the agent CLI's own permission 
 - **Terminal robustness** — honour `NO_COLOR`, degrade on non-truecolor / limited-palette
   terminals, and render cleanly at narrow widths and in non-TTY / piped output (CI logs)
   instead of spraying escape codes or breaking the dashboard layout.
-- **README as a landing page** — slim `README.md` to *what git-paw is and why it exists*
-  (the pitch) plus a demo, install, and a minimal quick-start, then **forward everything
-  else to the docs**. Today it carries a ~40-line changelog-style `## Features` dump
-  (version stamps, per-config-table descriptions like `[supervisor.conflict]` /
-  `[supervisor.learnings_config]`) and verbose supervisor/config prose that duplicates the
-  mdBook user guide + CLI/config references — cut it, keeping only pointers. Safe to do
-  here because those docs already cover the detail; landing the freeze at v1.0.0 with a
-  bloated front door undercuts the "stable, polished" moment.
+- *(README as a landing page: pulled forward into v0.19.0 as `readme-landing-page` on
+  2026-11-10.)*
 
 ### Feature — shared dependency store symlinked into worktrees (DX; dogfood tip 2026-08-06)
 
@@ -1047,9 +1095,9 @@ The drafts by area:
   - `config-check-command`
   - `start-resume-summary`
   - `configurable-agent-grid`
-- **DX:** `terminal-output-robustness`, `readme-landing-page`, `worktree-shared-dep-cache`, and
-  `dashboard-usage-view`. That change replaced `dashboard-tabbed-roster` (2026-10-19 decision: the
-  dashboard becomes an opt-in usage view).
+- **DX:** `terminal-output-robustness`, `worktree-shared-dep-cache`, and `dashboard-usage-view`
+  (`readme-landing-page` moved to v0.19.0 on 2026-11-10). That change replaced
+  `dashboard-tabbed-roster` (2026-10-19 decision: the dashboard becomes an opt-in usage view).
   - The dashboard is off by default (`[dashboard] enabled`, `--dashboard`). A config migrated
     from version 1 keeps it, and a session keeps whatever dashboard it recorded.
   - It shows tokens and cost per agent and per tier, the orchestrator's one-shot usage, and the
@@ -1073,6 +1121,32 @@ Stale premises found while speccing:
 - **The three slugify rules** serve three different purposes and can't be merged without renaming
   worktree directories and log files.
 - **`list`** doesn't exist, and `doctor --json` already does.
+
+**Dogfood findings carried here from the v0.19.0 build (2026-11-10).**
+- **Broker event semantics:**
+  - **DF-35, DF-50** — a rebase re-publishes every commit as `agent.artifact committed` plus
+    `supervisor.verify-now`, and an orchestrator's commit in a worker's worktree is published as
+    that agent's.
+  - **DF-21** — `verify-now` fires per section commit, and there is no "change complete" signal.
+  - **DF-37, DF-40** — there is no "branch under verification, frozen" signal, so workers amend
+    their branch while the orchestrator's gates run on it.
+- **Repo and config portability:**
+  - **DF-03** — the committed repo config names a CLI that is absent on the maintainer's other
+    machine, and `doctor` only warns about it above the report.
+  - **DF-06** — `start` should provision missing bundled scripts after a clone instead of leaving
+    it to `git paw init`.
+  - **DF-10** — openspec sends telemetry by default; document `OPENSPEC_TELEMETRY=0`.
+- **DF-23** — the struct-literal ripple (GP-40) drives workers to mass `sed` / `perl` edits;
+  consider `Default` with `..` at literal sites.
+- **DF-42** — `remove`'s merged-ness check turned out correct; its "kept" report is a useful signal
+  that a branch did not land (it was the missed clue in DF-52).
+- **Docs only:**
+  - **DF-16** — oh-my-zsh's `tmux` plugin shadows `tmux` in the orchestrator's shell, so the
+    skill's `tmux send-keys` snippets fail; `command tmux` works.
+  - **DF-25, DF-28** — the orchestrator's own CLI permission check can veto or stall an approval the
+    human sanctioned; document an ask rule for `sweep.sh approve` in the orchestrator session.
+  - **DF-26** — a laptop sleep kills in-flight worker turns, and nothing re-engages an attended
+    session.
 
 ---
 
@@ -1210,6 +1284,16 @@ captures (capturing them is the first, blocking task). The launch gate learns pr
 notices (dismissed once, then readiness is polled) and blocking dialogs (never answered; the
 launch fails loudly).
 
+**Dogfood findings carried here from the v0.19.0 build (2026-11-10).**
+- **DF-11** — launch readiness: two of three workflow commands were not submitted, and one boot
+  prompt was left unsubmitted in the composer.
+- **DF-24** — a running Claude worker does not reload allow rules added to its `--settings` file,
+  so rules must be right before launch.
+- **DF-22** — the e2e live-session guard forces an env-prefixed `cargo test` that a prefix allow
+  rule misses.
+- **DF-36** — `sweep.sh events` blocked for about two minutes once while the broker answered
+  `/status` instantly; cause unconfirmed.
+
 ---
 
 ## v0.24.0 — Pre-freeze hardening (planned)
@@ -1285,6 +1369,17 @@ retirement):
   escalations collapse into a single alert within the 5-minute window.
 - **Unverified:** if Claude Code confirms on the option digit alone, the trailing `Enter` that
   `sweep.sh approve` sends could land on a queued next prompt.
+
+**Dogfood findings carried here from the v0.19.0 build (2026-11-10).**
+- **DF-34** — opsx role-gating flags an orchestrator-directed main-spec edit as an agent archive,
+  and records the commit as `unknown` instead of its SHA.
+- **DF-45, DF-46** — the conflict detector attributes main-checkout edits to "supervisor" and
+  re-escalates overlaps the orchestrator already ruled on, with noise that scales with the
+  struct-literal ripple.
+- **DF-51** — `/opsx:propose` leaves an untracked `openspec/config.yaml` that blocks `git paw
+  remove`.
+- **DF-49** — add a release-time `openspec validate --specs --strict` gate, so defects in the main
+  specs surface before they block an archive.
 
 ---
 
