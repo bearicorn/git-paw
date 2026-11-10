@@ -1381,6 +1381,21 @@ retirement):
 - **DF-49** — add a release-time `openspec validate --specs --strict` gate, so defects in the main
   specs surface before they block an archive.
 
+**Architecture debt carried here from the v0.19.0 conformance audit (2026-11-10).** Refactor-sized
+gaps against `docs/src/architecture-direction.md`, deferred so v0.19 stays scoped; fix before the freeze:
+- **F10:** per-CLI facts still outside `agent_cli` (`doctor.rs` maps `/opsx:apply` to `.claude/` paths;
+  `cli_setup` facts) — move them into provider facets, which also makes a per-CLI dispatch audit allowlist-free.
+- **F11:** the shared submit actuator and `__send` are keyed by pane index, not `SurfaceId`, and fail with
+  tmux-named errors — migrate the actuator ports to surfaces.
+- **F12:** `CliProfile` / `AgentProfiles` carry the config DTO `CustomCli` as internal state — map it once at
+  load into a core record (removes the config ↔ agent_cli cycle).
+- **F13:** `sweep.sh` resolves a pane's CLI by `pane_index` from the roster but its agent by path — add
+  `git paw __prompt-profile --agent <id>` so the binary owns resolution.
+- **F14:** the `grep -E` subset for override patterns is a denylist that misses `\b \B \x \t \n` — switch
+  to a positive subset, or test each shell-matched override through `grep -E` in `doctor`.
+- **F15:** `SpecBackend` mixes pure per-format decisions with direct `std::fs` reads and the ports table has
+  no filesystem port — record it on the direction page or add the port.
+
 ---
 
 ## v1.0.0 — Stable CLI freeze
