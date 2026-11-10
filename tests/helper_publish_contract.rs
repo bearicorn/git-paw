@@ -17,6 +17,9 @@
 //! deterministic-id scheme* is covered here too, as a parity test against
 //! `LearningRecord::deterministic_id`.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Output};
@@ -94,7 +97,7 @@ fn spawn_broker() -> (git_paw::broker::BrokerHandle, u16) {
 }
 
 fn run(script: &Path, repo: &Path, args: &[&str]) -> Output {
-    let mut cmd = StdCommand::new("bash");
+    let mut cmd = script_cmd::bash();
     cmd.arg(script)
         .args(args)
         .current_dir(repo)
@@ -344,6 +347,162 @@ fn publish_with_no_broker_listening_exits_non_zero() {
     assert!(
         stderr.contains("broker.sh"),
         "the failure must be reported by the helper on stderr; stderr:\n{stderr}"
+    );
+}
+
+/// Scenario "A broker that accepts but never answers cannot hang a helper":
+/// the listener completes the TCP handshake and then says nothing.
+#[test]
+#[serial]
+fn learn_against_a_broker_that_never_answers_returns_within_the_bound() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (_, sweep_sh) = install_helpers(repo.path());
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
+    let port = silent.local_addr().expect("listener addr").port();
+    write_broker_config(repo.path(), port);
+
+    let started = std::time::Instant::now();
+    let out = run(
+        &sweep_sh,
+        repo.path(),
+        &["learn", "tooling_friction", "t", "{}"],
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "learn against a silent broker took {elapsed:?}"
+    );
+    assert!(
+        !out.status.success(),
+        "a publish nobody answered must not exit 0; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    drop(silent);
+}
+
+/// Scenario "A test never inherits the session's broker address": inside a
+/// live git-paw session the parent environment names the live broker, and
+/// the shared script builder drops it so the run reaches the test broker.
+#[test]
+#[serial]
+fn a_script_test_ignores_an_inherited_broker_url() {
+    let probe = script_cmd::bash();
+    assert!(
+        probe
+            .get_envs()
+            .any(|(key, value)| key == "GIT_PAW_BROKER_URL" && value.is_none()),
+        "the shared builder must clear GIT_PAW_BROKER_URL"
+    );
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (_, sweep_sh) = install_helpers(repo.path());
+    let (_broker, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    let out = run(
+        &sweep_sh,
+        repo.path(),
+        &["learn", "tooling_friction", "t", "{}"],
+    );
+
+    assert!(
+        out.status.success(),
+        "learn should reach the test broker; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fetch_log(port).contains("agent.learning"));
+}
+
+/// Scenario "`GIT_PAW_BROKER_URL` overrides the configured port": the config
+/// names a port nothing listens on, the variable names the live broker.
+#[test]
+#[serial]
+fn learn_publishes_to_the_broker_url_override() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (_, sweep_sh) = install_helpers(repo.path());
+    write_broker_config(repo.path(), pick_broker_port());
+    let (_broker, port) = spawn_broker();
+
+    let mut cmd = script_cmd::bash();
+    cmd.arg(&sweep_sh)
+        .args(["learn", "tooling_friction", "t", "{}"])
+        .current_dir(repo.path())
+        .env_remove("TMUX")
+        .env("GIT_PAW_BROKER_URL", format!("http://127.0.0.1:{port}"));
+    let _home = with_root_session(&mut cmd, repo.path());
+    let out = cmd.output().expect("run sweep.sh learn");
+
+    assert!(
+        out.status.success(),
+        "learn should publish to the override; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fetch_log(port).contains("agent.learning"));
+}
+
+/// Scenario "A non-loopback `GIT_PAW_BROKER_URL` is ignored": a pane can write
+/// the session environment, so only a loopback address may redirect a helper.
+#[test]
+#[serial]
+fn a_non_loopback_broker_url_override_is_ignored() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let (_, sweep_sh) = install_helpers(repo.path());
+    let (_broker, port) = spawn_broker();
+    write_broker_config(repo.path(), port);
+
+    for hostile in [
+        "http://evil.example:1",
+        "-K/nonexistent",
+        "http://127.0.0.1:1/x",
+    ] {
+        let mut cmd = script_cmd::bash();
+        cmd.arg(&sweep_sh)
+            .args(["learn", "tooling_friction", hostile, "{}"])
+            .current_dir(repo.path())
+            .env_remove("TMUX")
+            .env("GIT_PAW_BROKER_URL", hostile);
+        let _home = with_root_session(&mut cmd, repo.path());
+        let out = cmd.output().expect("run sweep.sh learn");
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{hostile}: learn should fall back to the config broker; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ignoring GIT_PAW_BROKER_URL"),
+            "{hostile}: {stderr}"
+        );
+    }
+    assert_eq!(fetch_log(port).matches("agent.learning").count(), 3);
+}
+
+/// Scenario "Every broker call in the bundled helpers is bounded".
+#[test]
+fn every_broker_curl_in_the_helpers_passes_the_bounds() {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
+    let mut unbounded = Vec::new();
+    for name in ["_paw_common.sh", "broker.sh", "sweep.sh"] {
+        let body = fs::read_to_string(assets.join(name)).expect("read helper");
+        for (n, line) in body.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') || !code.contains("curl ") {
+                continue;
+            }
+            if !code.contains("\"${PAW_BROKER_CURL_BOUNDS[@]}\"") {
+                unbounded.push(format!("{name}:{}: {code}", n + 1));
+            }
+        }
+    }
+    assert!(
+        unbounded.is_empty(),
+        "broker curl calls without PAW_BROKER_CURL_BOUNDS:\n{}",
+        unbounded.join("\n")
     );
 }
 

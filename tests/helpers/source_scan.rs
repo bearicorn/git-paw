@@ -40,12 +40,22 @@ pub fn unclosed_test_items(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// `source` with every whole comment line emptied, keeping line numbers.
+/// `source` with every whole comment line emptied, keeping line numbers: a
+/// `//` line, and every line from one that starts with `/*` through the line
+/// holding its `*/`.
 fn uncommented(source: &str) -> String {
+    let mut in_block = false;
     source
         .lines()
         .map(|line| {
-            if line.trim_start().starts_with("//") {
+            let trimmed = line.trim_start();
+            if !in_block && trimmed.starts_with("/*") {
+                in_block = !trimmed[2..].contains("*/");
+                ""
+            } else if in_block {
+                in_block = !line.contains("*/");
+                ""
+            } else if trimmed.starts_with("//") {
                 ""
             } else {
                 line

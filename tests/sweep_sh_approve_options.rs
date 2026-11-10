@@ -10,6 +10,9 @@
 //! consults no classifier. The suite is hermetic — no real tmux server, no
 //! broker.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -167,7 +170,7 @@ fn run_approve_inner(capture: &str, pane: &str, record_git: bool) -> ApproveRun 
             .display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .args(["approve", pane])
         .current_dir(repo.path())
@@ -343,7 +346,7 @@ fn classify_subcommand_is_rejected_as_unknown() {
     let sweep = install_sweep(repo.path());
     write_session_json(repo.path());
 
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .arg("classify")
         .current_dir(repo.path())

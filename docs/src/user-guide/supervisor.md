@@ -400,6 +400,12 @@ revoked or taken over exits `session-torn-down` on its next poll without acting
 > running — and you would end up with two loops driving the same panes. Stop
 > that older `--unattended` process before re-attaching to its session.
 
+> **Upgrading the helpers.** A supervised launch — fresh, or a drive loop
+> bound to an existing session — refreshes `.git-paw/scripts/` along with the
+> exported skill, so the helpers always match the subcommands the skill
+> teaches. A script is rewritten only when its content differs from the
+> running binary's; like `git paw init`, this overwrites local edits there.
+
 ### Session-instance lifecycle
 
 A loop binds to the *specific session instance* it began driving — not just

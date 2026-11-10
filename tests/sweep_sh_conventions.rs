@@ -8,6 +8,9 @@
 //! the interpreter takes its script from an argument and leaves stdin
 //! free for the pipe.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::path::Path;
 
 /// Patterns whose presence in `sweep.sh` would re-introduce the
@@ -313,7 +316,7 @@ fn broker_sh_has_no_credential_verb() {
             "broker.sh must not dispatch a `{verb}` subcommand"
         );
     }
-    let out = std::process::Command::new("bash")
+    let out = script_cmd::bash()
         // Relative, so the usage line's `$0` carries no checkout path.
         .arg("broker.sh")
         .arg("--help")

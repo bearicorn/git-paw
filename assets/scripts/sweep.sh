@@ -584,7 +584,7 @@ publish_verdict() {
     return 1
   }
   status=$(printf 'X-Paw-Authority: %s\n' "${authority}" | \
-    curl -sS -o "${body}" -w '%{http_code}' -X POST "${BROKER}/publish" \
+    curl -sS "${PAW_BROKER_CURL_BOUNDS[@]}" -o "${body}" -w '%{http_code}' -X POST "${BROKER}/publish" \
       -H "Content-Type: application/json" -H @- \
       -d "${payload}" 2>>"${body}")
   rc=$?
@@ -841,7 +841,7 @@ cmd_status() {
   # rule (`supervisor`, or a `<prefix>-<name>` / `<prefix>/<name>` slug).
   local roster
   roster=$(roster_agent_ids)
-  curl -s "${BROKER}/status" | SHOW_ALL=${show_all} ROSTER="${roster}" "${PY}" -c "$(cat <<'PY'
+  curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" "${BROKER}/status" | SHOW_ALL=${show_all} ROSTER="${roster}" "${PY}" -c "$(cat <<'PY'
 import json, os, re, sys
 try:
     data = json.load(sys.stdin)
@@ -896,8 +896,8 @@ cmd_events() {
   local log status
   # --max-time must outlast the broker's own wait, or curl would abandon a
   # request the broker is legitimately still holding.
-  log=$(curl -s --max-time "$((wait + 10))" "${BROKER}/log?since=${since}&wait=${wait}" || true)
-  status=$(curl -s --max-time 5 "${BROKER}/status" || true)
+  log=$(curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" --max-time "$((wait + 10))" "${BROKER}/log?since=${since}&wait=${wait}" || true)
+  status=$(curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" --max-time 5 "${BROKER}/status" || true)
 
   SINCE="${since}" LOG_JSON="${log}" STATUS_JSON="${status}" "${PY}" -c "$(cat <<'PY'
 import json, os, sys
@@ -979,7 +979,7 @@ PY
 }
 
 cmd_inbox() {
-  curl -s "${BROKER}/messages/supervisor?since=0" | "${PY}" -c "$(cat <<'PY'
+  curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" "${BROKER}/messages/supervisor?since=0" | "${PY}" -c "$(cat <<'PY'
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -1893,8 +1893,8 @@ cmd_detect_stuck() {
     return 0
   fi
   local status_json log_json
-  status_json=$(curl -s "${BROKER}/status")
-  log_json=$(curl -s "${BROKER}/log?since=0")
+  status_json=$(curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" "${BROKER}/status")
+  log_json=$(curl -s "${PAW_BROKER_CURL_BOUNDS[@]}" "${BROKER}/log?since=0")
   for p in "${PANES[@]}"; do
     local cap path agent ls wt cb ci bage
     use_pane_profile "${p}"

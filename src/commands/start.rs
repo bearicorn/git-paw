@@ -285,9 +285,8 @@ pub fn start(
 
     // Resolve every CLI record before any worktree exists, so an ambiguous
     // PATH shim or a disabled native sandbox refuses the launch with nothing
-    // created.
-    // Each warning prints as its CLI resolves, so an earlier CLI's warning
-    // still shows when a later one is refused.
+    // created. Each warning prints as its CLI resolves, so an earlier CLI's
+    // warning still shows when a later one is refused.
     let mut warnings = LaunchWarnings::default();
     let profiles = selection
         .mappings
@@ -1134,12 +1133,17 @@ pub(crate) fn existing_session_action(
     }
 }
 
+/// The CLI hint ending the selection-ignored notice and the empty-session
+/// refusal. MCP `start_session` has no `git paw add`, so it strips this.
+pub(crate) const ADD_AGENTS_CLI_HINT: &str =
+    " — add agents with `git paw add <branch>` or `git paw add --from-spec <name>`";
+
 /// The one-line notice `start` prints when it revives a session that has
 /// agents and so does not apply the launch selection it was given.
 pub(crate) fn selection_ignored_notice(session_name: &str) -> String {
     format!(
         "notice: session '{session_name}' already has agents, so the launch selection was not \
-         applied — add more with `git paw add <branch>` or `git paw add --from-spec <name>`"
+         applied{ADD_AGENTS_CLI_HINT}"
     )
 }
 
@@ -1174,8 +1178,7 @@ pub(crate) fn handle_existing_session(
             Ok(None)
         }
         ExistingSessionAction::Refuse => Err(PawError::SessionError(format!(
-            "session '{}' is running with no agents — add them with `git paw add <branch>` \
-             or `git paw add --from-spec <name>`",
+            "session '{}' is running with no agents{ADD_AGENTS_CLI_HINT}",
             existing.session_name
         ))),
     }

@@ -385,9 +385,12 @@ records no agents:
 Without a selection flag, or on a session that still has agents, `start`
 behaves as before: it reattaches, restarts or recovers. When it does that
 despite a selection flag, it says so in one line (`notice: session '<name>'
-already has agents, so the launch selection was not applied — add more with
-git paw add ...`) rather than dropping the flag silently. `--unattended`, which
-binds a drive loop to the session as it stands, is unaffected.
+already has agents, so the launch selection was not applied — add agents with
+git paw add ...`) rather than dropping the flag silently. `--unattended` binds
+a drive loop to the session as it stands and prints the same notice when given
+a selection. Through the MCP server's `start_session`, the notice and the
+empty-session refusal come without the `git paw add` hint, since an MCP client
+has no terminal to run it in.
 
 > **Scope:** `add` / `remove` operate on **every** live session — bare,
 > spec-driven and supervisor-mode alike. Every session git-paw builds uses

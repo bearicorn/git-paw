@@ -1177,9 +1177,21 @@ fn the_probe_flags_a_cost_cap_over_a_claude_fleet() {
     assert!(!probe(
         "default_cli = \"claude\"\n[supervisor]\nenabled = true\nbudget_max_tokens = 1000\n"
     ));
+}
+
+/// Scenario "No worker CLI configured raises no cost-cap warning".
+#[test]
+fn no_worker_cli_configured_raises_no_cost_cap_warning() {
+    let repo = tempfile::tempdir().unwrap();
+    let config: crate::config::PawConfig =
+        toml::from_str("[supervisor]\nenabled = true\nbudget_max_cost = 25.0\n").unwrap();
+    let probe = probe_supervisor(&config, repo.path());
+    assert!(!probe.unenforceable_cost_cap);
     assert!(
-        !probe("[supervisor]\nenabled = true\nbudget_max_cost = 25.0\n"),
-        "no worker CLI configured: nothing is known, so no warning"
+        check_supervisor(&probe)
+            .iter()
+            .all(|c| c.name != "budget_max_cost"),
+        "no budget_max_cost check without a configured worker CLI"
     );
 }
 

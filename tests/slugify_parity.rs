@@ -12,8 +12,11 @@
 //! implementations of one rule are exactly how the derivation drifted from the
 //! `/publish` validator in the first place (PP-26).
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use git_paw::broker::messages::slugify_branch;
 
@@ -42,7 +45,7 @@ fn shell_slugify_matches_slugify_branch_for_every_corpus_entry() {
     let corpus = slug_corpus::branch_corpus();
     let common_sh = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/scripts/_paw_common.sh");
 
-    let mut child = Command::new("bash")
+    let mut child = script_cmd::bash()
         .arg("-c")
         .arg(DRIVER)
         .env("COMMON_SH", common_sh)

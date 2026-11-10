@@ -20,6 +20,9 @@
 //! override rather than asserting on the type's shape, so a future change
 //! that starts consulting the profile at one of these points fails here.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -188,7 +191,7 @@ fn approve_under_hostile_profile(capture: &str, pane: &str) -> ApproveRun {
             .display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(&sweep)
         .args(["approve", pane])
         .current_dir(repo.path())

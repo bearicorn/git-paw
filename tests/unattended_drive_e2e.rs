@@ -937,6 +937,13 @@ fn unattended_rebinds_a_loop_to_a_live_session_after_heartbeat() {
         !second_stderr.contains("already running for this repository"),
         "--unattended must not take the GP-13 non-interactive refusal; stderr:\n{second_stderr}"
     );
+    // tmux-orchestration "An unattended re-start with a different selection
+    // prints the notice".
+    assert!(
+        second_stderr.contains("the launch selection was not applied")
+            && second_stderr.contains("git paw add"),
+        "the ignored selection must be reported; stderr:\n{second_stderr}"
+    );
     // The released binding must not make the next loop wait out the staleness
     // window (a floor of two minutes); finishing a 2.5s-heartbeat run well
     // inside that is only possible if it bound immediately.

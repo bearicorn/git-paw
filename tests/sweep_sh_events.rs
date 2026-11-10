@@ -5,6 +5,9 @@
 //! broker, so what is asserted is the JSON an orchestrator actually reads on
 //! stdout — not a re-implementation of the verb.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -70,7 +73,7 @@ fn free_port() -> u16 {
 /// status.
 fn run_events(repo: &Path, args: &[&str]) -> (String, bool) {
     let script = repo.join(".git-paw/scripts/sweep.sh");
-    let output = StdCommand::new("bash")
+    let output = script_cmd::bash()
         .arg(&script)
         .arg("events")
         .args(args)

@@ -8,8 +8,10 @@
 //! terminal port's tmux adapter encodes a surface as the `pane_index` /
 //! `dashboard_pane` integers they carry.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use git_paw::session::{
     RepoSessionFile, load_session_from, read_repo_session_file, save_session_in,
@@ -80,7 +82,7 @@ fn sweep_resolve(session_file: &Path, path: &Path) -> String {
         "PY=python3\nSESSION_FILE=\"$1\"\n{}\nresolve_agent_for_path \"$2\"\n",
         &script[start..end]
     );
-    let out = Command::new("bash")
+    let out = script_cmd::bash()
         .args(["-c", &harness, "harness"])
         .arg(session_file)
         .arg(path)
@@ -141,7 +143,7 @@ fn sweep_sh_and_the_core_rule_name_the_same_agent_for_a_surface_owner() {
 /// `sweep.sh` still parses after the documentation comment.
 #[test]
 fn sweep_sh_is_syntactically_valid() {
-    let status = Command::new("bash")
+    let status = script_cmd::bash()
         .args(["-n"])
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh"))
         .status()

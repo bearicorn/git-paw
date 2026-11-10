@@ -72,7 +72,14 @@ on an existing config is the upgrade path after a version bump — see
 - `.git-paw/scripts/_paw_common.sh` — shared preamble the bundled helpers
   source for repository-root resolution, Python 3 detection, and broker /
   docs URL discovery. Binary-managed like the helpers themselves: it is
-  overwritten on every `git paw init`, and a helper cannot run without it
+  overwritten on every `git paw init` and every supervised launch, and a
+  helper cannot run without it. Every broker call the helpers make gives up
+  after 2 seconds to connect and 10 seconds in total (the `events` long-poll
+  waits longer), so a broker that never answers fails the call instead of
+  hanging it. `GIT_PAW_BROKER_URL`, when set to a loopback `http://host:port`,
+  takes precedence over the `[broker]` address in `.git-paw/config.toml`; any
+  other value is ignored with a warning. Every session sets it for its panes,
+  and the unattended drive loop sets it to the session's recorded broker
 - `.git-paw/skills/orchestrator/SKILL.md` — the orchestrator skill, rendered
   with your `[supervisor]` gate commands and configured spec format, for the
   agent you drive the session with; `.git-paw/skills/cli-setup/SKILL.md` beside
@@ -164,7 +171,7 @@ binds a *new* drive loop to that session instead of launching or refusing: an
 active session is driven as it stands (no pane rebuilt, no worktree touched,
 nothing injected), a paused one is revived first, a stopped one recovered
 first. The terminal is never attached. Launch-selection flags are not applied
-to a live session, so re-running the command that launched a wave is what
+to a live session (a one-line notice says so), so re-running the command that launched a wave is what
 drives it again after its loop exits. The loop drives the session's own roster
 and reaches the broker at the endpoint recorded for that session, not the
 configured one. A session launched *without* supervisor mode is refused — it

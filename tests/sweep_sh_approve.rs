@@ -13,6 +13,9 @@
 //! `auto_approve_integration.rs`. tmux is a hard dependency, so they run
 //! normally rather than behind `#[ignore]`.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -134,7 +137,7 @@ fn run_approve_with_status(repo: &Path, sweep: &Path, pane: &str) -> (Option<i32
     let bin = assert_cmd::cargo::cargo_bin("git-paw");
     let bin_dir = bin.parent().expect("built binary has a parent dir");
     let path = std::env::var("PATH").unwrap_or_default();
-    let out = Command::new("bash")
+    let out = script_cmd::bash()
         .arg(sweep)
         .args(["approve", pane])
         .current_dir(repo)

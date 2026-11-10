@@ -120,18 +120,13 @@ pub fn run_init() -> Result<(), PawError> {
 
     // 3. Create .git-paw/scripts/ directory and install the bundled helpers
     //    (sweep.sh for the supervisor, broker.sh and docs-fetch.sh for the
-    //    coding agents).
-    let created_scripts = create_dir_if_missing(&scripts_dir)?;
-    if created_scripts {
+    //    coding agents). Each is reported only when its content changed.
+    if !scripts_dir.is_dir() {
         println!("  Created .git-paw/scripts/");
     }
-    // The shared preamble installs first: the three helpers source it, so it
-    // must be on disk before any of them can run. Each is reported only when
-    // its content changed (PP-30).
     let mut managed_changed = false;
-    for (name, content) in bundled_scripts() {
-        let outcome = install_script(&scripts_dir.join(name), content)?;
-        outcome.report(&format!(".git-paw/scripts/{name}"));
+    for (rel, outcome) in refresh_root_scripts(&repo_root)? {
+        outcome.report(&rel);
         managed_changed |= outcome.changed();
     }
 
@@ -217,6 +212,26 @@ pub fn run_init() -> Result<(), PawError> {
     }
 
     Ok(())
+}
+
+/// Installs the [`bundled_scripts`] under `<repo_root>/.git-paw/scripts/`,
+/// writing only changed files, and returns each one's relative path and
+/// [`WriteOutcome`]. Init and every supervised launch call this, so a new
+/// skill never runs with an old `sweep.sh`.
+///
+/// # Errors
+///
+/// Returns an error when a script cannot be written or is a symlink.
+pub fn refresh_root_scripts(repo_root: &Path) -> Result<Vec<(String, WriteOutcome)>, PawError> {
+    let scripts_dir = repo_root.join(".git-paw").join("scripts");
+    create_dir_if_missing(&scripts_dir)?;
+    bundled_scripts()
+        .into_iter()
+        .map(|(name, content)| {
+            install_script(&scripts_dir.join(name), content)
+                .map(|outcome| (format!(".git-paw/scripts/{name}"), outcome))
+        })
+        .collect()
 }
 
 /// Provisions the agent-side bundled helper scripts into an agent worktree's
@@ -1855,5 +1870,56 @@ test_command = "just check"
             BROKER_SCRIPT,
             "re-attach refreshes the helper to the running binary's version"
         );
+    }
+
+    // supervisor-launch / Scenario: A stale sweep.sh is replaced on a
+    // supervised launch (the refresh the launch calls).
+    #[test]
+    fn refresh_root_scripts_replaces_a_stale_script() {
+        let dir = TempDir::new().unwrap();
+        refresh_root_scripts(dir.path()).unwrap();
+        let sweep = dir.path().join(".git-paw/scripts/sweep.sh");
+        fs::write(&sweep, "#!/usr/bin/env bash\n# v0.18 sweep\n").unwrap();
+
+        let outcomes = refresh_root_scripts(dir.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(&sweep).unwrap(), SWEEP_SCRIPT);
+        assert!(is_executable(&sweep));
+        let changed: Vec<&str> = outcomes
+            .iter()
+            .filter(|(_, o)| o.changed())
+            .map(|(rel, _)| rel.as_str())
+            .collect();
+        assert_eq!(changed, [".git-paw/scripts/sweep.sh"]);
+    }
+
+    // supervisor-launch / Scenario: An up-to-date script is not rewritten.
+    #[test]
+    fn refresh_root_scripts_leaves_current_scripts_untouched() {
+        let dir = TempDir::new().unwrap();
+        let first = refresh_root_scripts(dir.path()).unwrap();
+        assert_eq!(first.len(), bundled_scripts().len());
+        assert!(first.iter().all(|(_, o)| *o == WriteOutcome::Created));
+
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for (rel, _) in &first {
+            fs::File::options()
+                .write(true)
+                .open(dir.path().join(rel))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        let second = refresh_root_scripts(dir.path()).unwrap();
+
+        for (rel, outcome) in &second {
+            assert_eq!(*outcome, WriteOutcome::Unchanged, "{rel}");
+            let mtime = fs::metadata(dir.path().join(rel))
+                .unwrap()
+                .modified()
+                .unwrap();
+            assert_eq!(mtime, old, "{rel} was rewritten");
+        }
     }
 }

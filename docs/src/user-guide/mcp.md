@@ -478,7 +478,9 @@ returns structured JSON with the command's output lines and warnings.
   decides, as a non-interactive `git paw start` does. `dry_run` reports the plan
   and creates nothing. A rebase skipped for a branch whose worktree has
   uncommitted changes is returned in `warnings`, naming the branch and the
-  reason.
+  reason, and so is a selection not applied to a session that already has
+  agents. Launch warnings and errors name no CLI command (no `git paw add`,
+  no `--no-rebase`).
 - **`stop_session` takes no confirmation.** Stopping is recoverable (the
   worktrees, branches and state stay; `start_session` recovers it), as with
   `git paw stop`.

@@ -12,6 +12,9 @@
 //! - "A missing argument publishes nothing"
 //! - "Neither verb is granted by setup-cli"
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -149,7 +152,7 @@ fn setup() -> Fixture {
 }
 
 fn run_sweep(fx: &Fixture, args: &[&str]) -> std::process::Output {
-    StdCommand::new("bash")
+    script_cmd::bash()
         .arg(&fx.sweep)
         .args(args)
         .current_dir(&fx.root)

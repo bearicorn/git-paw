@@ -82,14 +82,19 @@ fails the load with an error naming the field:
   itself and may use the full Rust syntax.
 - No marker may be empty or whitespace-only: under `grep -E` an empty
   alternative matches every line.
+- `menu_cursor_glyphs` and `menu_footer_markers` may not be empty lists: a
+  profile with no menu glyph or footer could never see a menu, so `sweep.sh
+  tell` would type into one. The load fails naming the field.
 
 A detector therefore never meets an invalid pattern at run time.
 
 > **Breaking since v0.19:** a configuration that sets an empty or
-> whitespace-only marker, or uses a construct outside the `grep -E` subset
+> whitespace-only marker, sets `menu_cursor_glyphs = []` or
+> `menu_footer_markers = []`, or uses a construct outside the `grep -E` subset
 > in `option_line_pattern`, `context_bloat_pattern` or
-> `paste_buffer_pattern`, no longer loads. Remove the empty marker, or
-> rewrite the pattern in POSIX ERE (for example `[0-9]` for `\d`).
+> `paste_buffer_pattern`, no longer loads. Remove the empty marker or list
+> (an omitted field keeps its default), or rewrite the pattern in POSIX ERE
+> (for example `[0-9]` for `\d`).
 
 ## Fields
 

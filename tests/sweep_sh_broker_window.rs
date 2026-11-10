@@ -10,6 +10,9 @@
 //!
 //! Runs on a private tmux socket only.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -171,7 +174,7 @@ fn snapshot_finds_the_coding_pane_with_the_broker_window_selected() {
     write_session_json(repo.path(), &name);
     build_session_with_broker_window_selected(&env, repo.path(), &name);
 
-    let mut cmd = Command::new("bash");
+    let mut cmd = script_cmd::bash();
     env.apply(&mut cmd);
     let out = cmd
         .arg(&sweep)

@@ -9,6 +9,9 @@
 //! A request is accepted (202) only when its header equals the broker's
 //! credential, so an accepted publish proves the header carried it.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -127,7 +130,7 @@ fn sweep(repo: &Path, home: &Path, args: &[&str]) -> Output {
         bin_dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    Command::new("bash")
+    script_cmd::bash()
         .arg(".git-paw/scripts/sweep.sh")
         .args(args)
         .current_dir(repo)

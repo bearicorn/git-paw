@@ -7,8 +7,10 @@
 //! can silently reintroduce an inline copy — the exact drift this change
 //! retired — and nothing would fail until the two copies diverged in behavior.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 
 /// Helpers that source the shared preamble.
 const HELPERS: &[&str] = &["broker.sh", "sweep.sh", "docs-fetch.sh"];
@@ -120,7 +122,7 @@ fn a_helper_without_the_preamble_fails_loudly() {
         let lone = tmp.path().join(helper);
         std::fs::copy(script_path(helper), &lone).expect("copy helper");
 
-        let out = StdCommand::new("bash")
+        let out = script_cmd::bash()
             .arg(&lone)
             .output()
             .expect("run helper without preamble");
@@ -143,7 +145,7 @@ fn a_helper_without_the_preamble_fails_loudly() {
 fn all_bundled_scripts_parse_under_bash_n() {
     for script in ALL_SCRIPTS {
         let path = script_path(script);
-        let out = StdCommand::new("bash")
+        let out = script_cmd::bash()
             .arg("-n")
             .arg(&path)
             .output()

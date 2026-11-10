@@ -8,6 +8,9 @@
 //! outcomes can only come from the per-pane profile. Hermetic: no tmux
 //! server, no broker.
 
+#[path = "helpers/script_cmd.rs"]
+mod script_cmd;
+
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -105,7 +108,7 @@ fn detect_stuck(repo: &Path, sweep: &Path, capture: &str) -> String {
     let capture_file = repo.join("capture.txt");
     fs::write(&capture_file, capture).expect("capture");
     let log = repo.join("tmux-stuck.log");
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(sweep)
         .arg("detect-stuck")
         .current_dir(repo)
@@ -225,7 +228,7 @@ fn approve(repo: &Path, sweep: &Path, capture: &str, pane: &str) -> (String, Vec
             .display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = StdCommand::new("bash")
+    let out = script_cmd::bash()
         .arg(sweep)
         .args(["approve", pane])
         .current_dir(repo)
