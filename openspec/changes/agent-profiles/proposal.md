@@ -94,7 +94,9 @@ one-shot delegates alike, with as many of each as the user wants.
   subcommand); `src/main.rs` (dispatch); `src/config/mod.rs` (template).
 - **Assets:** `assets/agent-skills/{explorer,spec-auditor,doc-auditor,security-auditor}/SKILL.md`,
   `assets/delegate-framing.md`, the orchestrator `SKILL.md` delegation section,
-  `assets/scripts/{broker,sweep}.sh` (delegate-marker refusal).
+  `assets/agent-skills/coordination/scripts/broker.sh` and
+  `assets/agent-skills/orchestrator/scripts/sweep.sh` (delegate-marker refusal; the pre-package
+  `assets/scripts/` paths are the ones `skill-package-layout` moves).
 - **Persisted state:** additive `WorktreeEntry.profile`; delegate run log and ledger under
   `.git-paw/logs/delegates/` (gitignored).
 - **Enum-variant ripple:** none (`BrokerMessage`, `SpecBackendKind` untouched). The clap `Command`
@@ -131,8 +133,11 @@ one-shot delegates alike, with as many of each as the user wants.
   applies `worker-operator-isolation`'s `operator_isolation()` facet to delegate runs (worker
   profiles get it through the shared launch builder with no extra work). Coordination point: the
   gate-references contract says the orchestrator runs gates inline "when the CLI cannot run isolated
-  subagents"; this change's `skill-agent` requirement redefines a matching delegate profile as such
-  a subagent. If gate-references is archived first, that wording should become a MODIFIED here.
+  subagents"; this change's `skill-agent` requirement *A delegate profile counts as an isolated
+  subagent* makes a matching delegate profile satisfy that condition, as an ADDED requirement that
+  names the gate-references requirements it extends (they are not archived yet, so they cannot be
+  MODIFIED here). Its vendor-neutrality rule is not restated: gate-references' *The delegation
+  section names no vendor* covers the extended section.
 - **Cross-version dependencies:**
   - v0.17.0: `status-and-picker-truth` (archived; `default_cli` pre-selects in both picker modes
     and a supervised launch honours the picked CLI — `default_profile` and profile picks follow the

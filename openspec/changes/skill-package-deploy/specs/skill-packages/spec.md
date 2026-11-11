@@ -100,6 +100,17 @@ The system SHALL write each installed package file (`SKILL.md`, references, scri
 - **THEN** the write SHALL fail naming that path
 - **AND** the symlink's target SHALL be unchanged
 
+### Requirement: Installation supersedes the packaging identity pin
+
+The system SHALL read *Packaging preserves deployed output* as governing the source-tree restructure only: from the installation layout of this capability onward, the files written into a repository or worktree, the helper bytes and the rendered skill text are those the installation requirements specify, and the identity scenarios of that requirement SHALL NOT be asserted against pre-package output.
+
+#### Scenario: The identity pin does not constrain installed output
+
+- **GIVEN** a pre-package export of `.git-paw/skills/orchestrator/SKILL.md` that named `.git-paw/scripts/sweep.sh`
+- **WHEN** `git paw init` runs
+- **THEN** the exported file SHALL name `.git-paw/skills/orchestrator/scripts/sweep.sh` and SHALL NOT be required to equal the pre-package content
+- **AND** `.git-paw/skills/<name>/` SHALL exist for every registered package
+
 ### Requirement: Bundled prose names helpers by their package path
 
 The system SHALL treat a helper's package path, `.git-paw/skills/<package>/scripts/<helper>`, as its invocation path. Bundled agent-facing prose — every registered package's `SKILL.md`, references and assets, the orchestrator session context and the escalation framing — SHALL name a helper only through `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}` or `{{DOCS_FETCH_HELPER}}`, which every renderer SHALL substitute from the registry and the unknown-placeholder check SHALL know.

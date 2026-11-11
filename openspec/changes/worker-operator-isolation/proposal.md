@@ -32,7 +32,7 @@ extensions or writing that memory.
   file needs editing. The dry-run launch line and the docs show the added arguments.
 - Not in scope: the operator's own driving session, the drive loop's headless orchestrator
   one-shot (it is the orchestrator, not a worker), and delegate runs. `agent-profiles` applies this
-  facet to delegates when it extracts the headless runner. Per-profile config directories are out:
+  facet to delegates when it generalises the headless runner. Per-profile config directories are out:
   a fresh `CLAUDE_CONFIG_DIR` forces a new login.
 
 ## Capabilities

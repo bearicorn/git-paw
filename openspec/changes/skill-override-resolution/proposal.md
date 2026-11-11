@@ -51,7 +51,8 @@ override boundary; this change makes the overrides themselves real, with one ord
 - `skill-agent`: *Skill resolution order*, *User override directory may be absent*, *Unreadable
   user override is a hard error* (directory form, three levels, explicit roots, `cli-setup` never
   overridden), *SkillTemplate value type* (its scenario's call takes the repository root);
-  ADDED: production callers resolve through the real search roots. *Embedded cli-setup skill*
+  ADDED: *The cli-setup skill is not overridable*; production callers resolve through the real
+  search roots. *Embedded cli-setup skill*
   still names the one-argument `skills::resolve("cli-setup")` informally; it is read as the
   two-argument call and left for the pre-freeze wording sweep.
 - `mcp-server`: ADDED — `get_skill` reports the production resolver's source.

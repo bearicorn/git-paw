@@ -52,7 +52,7 @@ The system SHALL expose a compile-time registry of every bundled package (`SKILL
 #### Scenario: The root-only skill exports come from the registry
 
 - **WHEN** `git paw init` runs in a fresh repository
-- **THEN** `.git-paw/skills/` SHALL hold a `SKILL.md` for exactly the registered root-only packages, `orchestrator` and `cli-setup`
+- **THEN** `.git-paw/skills/` SHALL hold a `SKILL.md` for exactly the registered root-only packages, which include `orchestrator` and `cli-setup`
 
 #### Scenario: An unregistered package file fails the suite
 

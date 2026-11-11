@@ -14,7 +14,7 @@ An override exists at a level when `<level>/<skill-name>/SKILL.md` exists; a dir
 
 The name `supervisor` SHALL be an accepted alias of `orchestrator`: `resolve("supervisor", …)` SHALL return the orchestrator template, and an override directory named either `orchestrator` or `supervisor` (at each level above) SHALL apply to both names, an `orchestrator` directory winning over a `supervisor` directory when both exist at the same level; a higher level SHALL win over a lower one whichever of the two names it uses.
 
-The bundled `cli-setup` skill SHALL NOT be overridable, because it carries the consent rules for writing an agent CLI's permission settings: `resolve("cli-setup", …)` SHALL skip levels 1 and 2 and return the embedded default. An override directory named `cli-setup` at either level SHALL be ignored — neither read nor validated, so a broken one cannot fail resolution — and is reported by `git paw doctor` (*Doctor reports where each bundled skill resolves from*).
+The one exception is the bundled `cli-setup` skill, which no level overrides (*The cli-setup skill is not overridable*).
 
 If no level has the requested name, the function SHALL return `Err(SkillError::UnknownSkill { name })`.
 
@@ -117,19 +117,6 @@ The returned `SkillTemplate` SHALL include a `source: Source` field — `Source:
 - **WHEN** `skills::resolve("orchestrator", repo_root)` is called
 - **THEN** the result SHALL have `source = Source::AgentsStandard` and the repository override's content
 
-#### Scenario: The cli-setup skill ignores overrides
-
-- **GIVEN** a repository override at `<main>/.agents/skills/cli-setup/SKILL.md` and a user override at `<config_dir>/git-paw/agent-skills/cli-setup/SKILL.md`
-- **WHEN** `skills::resolve("cli-setup", repo_root)` is called
-- **THEN** the result SHALL have `source = Source::Embedded` and the embedded content
-- **AND** `origin_path` SHALL be `None`
-
-#### Scenario: A broken cli-setup override does not fail resolution
-
-- **GIVEN** a repository override at `<main>/.agents/skills/cli-setup/SKILL.md` whose frontmatter is invalid
-- **WHEN** `skills::resolve("cli-setup", repo_root)` is called
-- **THEN** the result SHALL be `Ok` with `source = Source::Embedded`
-
 #### Scenario: Unknown skill name returns an error
 
 - **WHEN** `skills::resolve("nonexistent", repo_root)` is called
@@ -205,6 +192,23 @@ The system SHALL define a public type `SkillTemplate` with at least these fields
 - **THEN** the clone has identical `name`, `content`, and `source` fields
 
 ## ADDED Requirements
+
+### Requirement: The cli-setup skill is not overridable
+
+The bundled `cli-setup` skill SHALL NOT be overridable, because it carries the consent rules for writing an agent CLI's permission settings: `resolve("cli-setup", …)` SHALL skip the repository and user levels and return the embedded default. An override directory named `cli-setup` at either level SHALL be ignored, neither read nor validated, so a broken one cannot fail resolution, and is reported by `git paw doctor` (*Doctor reports where each bundled skill resolves from*).
+
+#### Scenario: The cli-setup skill ignores overrides
+
+- **GIVEN** a repository override at `<main>/.agents/skills/cli-setup/SKILL.md` and a user override at `<config_dir>/git-paw/agent-skills/cli-setup/SKILL.md`
+- **WHEN** `skills::resolve("cli-setup", repo_root)` is called
+- **THEN** the result SHALL have `source = Source::Embedded` and the embedded content
+- **AND** `origin_path` SHALL be `None`
+
+#### Scenario: A broken cli-setup override does not fail resolution
+
+- **GIVEN** a repository override at `<main>/.agents/skills/cli-setup/SKILL.md` whose frontmatter is invalid
+- **WHEN** `skills::resolve("cli-setup", repo_root)` is called
+- **THEN** the result SHALL be `Ok` with `source = Source::Embedded`
 
 ### Requirement: Production callers resolve skills through the real search roots
 

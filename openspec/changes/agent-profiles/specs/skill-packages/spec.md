@@ -2,17 +2,26 @@
 
 ### Requirement: Bundled delegate role packages
 
-The system SHALL ship four bundled delegate role packages registered in the package registry: `explorer`, `spec-auditor`, `doc-auditor` and `security-auditor`. Each SHALL state that the delegate is read-only unless its approval level permits edits, SHALL instruct it to return only a compact result on stdout, and SHALL name no vendor product, model or project toolchain. These packages SHALL never be selected for an agent worktree.
+The system SHALL ship four bundled delegate role packages registered in the package registry: `explorer`, `spec-auditor`, `doc-auditor` and `security-auditor`. Each SHALL state that the delegate is read-only unless its approval level permits edits, SHALL instruct it to return only a compact result on stdout, and SHALL name no vendor product, model or project toolchain.
+
+#### Scenario: The role packages are vendor-neutral
+
+- **WHEN** the no-language-leak audit renders the four packages
+- **THEN** none SHALL contain a vendor product name, a model name or a project-specific toolchain command
+
+### Requirement: Delegate role packages are root-only
+
+The four delegate role packages SHALL be root-only: never selected for an agent worktree, and installed and exported at the repository root like `orchestrator`.
 
 #### Scenario: Delegate role packages never reach a worktree
 
 - **WHEN** the worktree package selection is computed for any combination of inputs
 - **THEN** it SHALL contain none of `explorer`, `spec-auditor`, `doc-auditor` or `security-auditor`
 
-#### Scenario: The role packages are vendor-neutral
+#### Scenario: Delegate role packages are exported at the root
 
-- **WHEN** the no-language-leak audit renders the four packages
-- **THEN** none SHALL contain a vendor product name, a model name or a project-specific toolchain command
+- **WHEN** `git paw init` runs in a fresh repository
+- **THEN** `.git-paw/skills/<name>/SKILL.md` SHALL exist for each of `explorer`, `spec-auditor`, `doc-auditor` and `security-auditor`
 
 ### Requirement: The explorer role returns a map
 

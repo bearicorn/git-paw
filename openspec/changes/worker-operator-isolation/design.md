@@ -38,7 +38,7 @@ Claude Code facts, from the official docs (code.claude.com, read 2026-11-11):
 
 **Non-Goals:**
 - Isolating the operator's driving session or the headless orchestrator one-shot.
-- Delegate runs: `agent-profiles` (later in v0.20.0) applies the same facet when it extracts the
+- Delegate runs: `agent-profiles` (later in v0.20.0) applies the same facet when it generalises the
   headless runner. The facet is therefore a plain value (`env` pairs plus `args`), usable both as a
   shell prefix in a pane command and as `SpawnSpec` environment plus argv for a shell-less spawn.
 - Per-worker or per-profile config directories (re-login cost; see D1).

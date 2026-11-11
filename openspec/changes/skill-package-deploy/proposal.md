@@ -91,8 +91,9 @@ release review).
   installs the root packages (DF-06); every launch path installs the worktree's selection;
   installing never touches setup grants; atomic replacement of installed files; package-path
   invocation through placeholders; helpers the system invokes itself use the package path; the
-  compatibility copy; and how requirements naming the legacy deployed path are read (never the
-  `cli-setup` requirements or doctor's grant checks).
+  compatibility copy; how requirements naming the legacy deployed path are read (never the
+  `cli-setup` requirements or doctor's grant checks); and that `skill-package-layout`'s
+  byte-identity pin governs the restructure only, not the installed output defined here.
 - `cli-setup`: *Allowlist entries are path-scoped to git-paw's helper scripts* (package paths;
   ask rules at both paths), *The allowlist item guards the granted helpers against silent
   modification* (adds `Edit(**/.git-paw/skills/**)`; re-verification), *Undo removes exactly what

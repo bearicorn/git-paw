@@ -76,14 +76,18 @@ The delegation section SHALL state that a delegated gate never publishes, and th
 - **THEN** it SHALL state that a delegated gate never publishes `agent.verified` or `agent.feedback`
 - **AND** that `agent.verified` follows only when testing, regression and all three audit verdicts pass
 
-### Requirement: Delegation degrades to inline gates and names no vendor
+### Requirement: Delegation degrades to inline gates
 
-The delegation section SHALL instruct an orchestrator whose CLI cannot run isolated subagents to read each reference and run the gate inline. It MAY direct broad read-only exploration to an isolated read-only subagent that returns a map rather than file contents. It SHALL name no vendor product, model, or persona file format or path.
+The delegation section SHALL instruct an orchestrator whose CLI cannot run isolated subagents to read each reference and run the gate inline. It MAY direct broad read-only exploration to an isolated read-only subagent that returns a map rather than file contents.
 
 #### Scenario: Inline fallback without subagents
 
 - **WHEN** the delegation section is inspected
 - **THEN** it SHALL instruct an orchestrator whose CLI cannot run isolated subagents to read each reference and run the gate inline
+
+### Requirement: The delegation section names no vendor
+
+The delegation section SHALL name no vendor product, model, or persona file format or path.
 
 #### Scenario: The delegation section is vendor-neutral
 
