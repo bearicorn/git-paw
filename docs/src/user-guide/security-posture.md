@@ -31,6 +31,7 @@ For a `claude`-family worker (verified against Claude Code 2.1.322):
 | Your user-level settings (`~/.claude/settings.json`): permission rules, model default, `env` block, hooks, enabled plugins | **No** | `--setting-sources project,local` leaves out the `user` source (verified for the `env` block; hooks follow from the same exclusion — no user hook was probed) |
 | Plugins your environment points at through `CLAUDE_CODE_PLUGIN_DIRS` | **No** | `CLAUDE_CODE_PLUGIN_DIRS=` (empty) for the worker; the flag alone does not stop them |
 | Auto memory, which Claude Code shares across every worktree of a repository | **No** — neither read nor written | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
+| Prompt suggestions (the greyed predicted next message in an idle input box) | **No** | `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, which overrides `promptSuggestionEnabled`; otherwise a lone Enter git-paw sends an idle worker (buffered-input recovery, `sweep.sh tell`, an approval) could submit a message nobody wrote |
 | The repository's project settings (`.claude/settings.json`) and the main checkout's `.claude/settings.local.json` | Yes | both sources stay on, so [`git paw setup-cli`](cli-setup.md) rules still apply |
 | Project skills, commands, `CLAUDE.md`/`AGENTS.md`, a project `.mcp.json` (git-paw's MCP boot form) | Yes | |
 | Managed (organisation) settings and their plugins | Yes | the CLI always applies them |

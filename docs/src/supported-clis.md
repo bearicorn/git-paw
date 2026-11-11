@@ -76,12 +76,16 @@ facts are verified (the v0.23.0 per-CLI audit).
 
 | Family | Environment (`env NAME=value …` before the executable) | Arguments after `args` |
 |--------|-----------------------------------|------------------------|
-| `claude` | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS=` | `--setting-sources project,local` |
+| `claude` | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` | `--setting-sources project,local` |
 | every other family | none | none |
 
 So a `claude` worker at `auto` launches as
-`env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id <id>`.
-`git paw start --dry-run` prints the exact line. A declared variant
+`env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id <id>`.
+`git paw start --dry-run` prints the exact line.
+`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` turns off Claude Code's greyed
+prompt suggestion, so an idle worker's input box stays empty and a lone Enter
+git-paw sends it (buffered-input recovery, `sweep.sh tell`, an approval) cannot
+submit a predicted message nobody wrote. A declared variant
 (`family = "claude"`) gets the same isolation; `inherit_operator_config = true`
 on its [`[clis.<name>]` entry](configuration/README.md#custom-clis) turns it
 off for that CLI. What each part does, and what a worker still inherits, is in
