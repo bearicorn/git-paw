@@ -21,6 +21,13 @@ closes. The grant table, the protection rules, undo and the doctor setup and bro
 have to move with the helpers, and the facts the grant relies on have to be re-verified for the
 new paths.
 
+A real v0.19.0 run added three more on the same seam: the root orchestrator `SKILL.md` keeps the
+gate commands rendered at `init` time, so a `[supervisor]` command configured later stays
+"(not configured)" with nothing flagging it (PK-01); `git paw doctor` in a repository where `init`
+never ran shows a ✗ per helper, so a fresh repository looks broken (PK-07); and `init` does not
+gitignore `.git-paw/sessions/` and the other runtime state, so `git add .git-paw/` would commit it
+(PK-19).
+
 Three deployment defects found in v0.19.0 dogfooding belong to the same seam and are folded in:
 a fresh clone has no root helpers until someone runs `git paw init` (DF-06); `sweep.sh` run from
 inside an agent's worktree finds no session, because the shared preamble resolves `.git-paw/` from
@@ -42,7 +49,13 @@ release review).
   and `cli-setup` skills; that refresh now covers every package and compatibility copy, and the
   bare and spec-driven `start` paths do the same, so a fresh clone needs no `git paw init` for its
   root helpers. Only missing or differing files are written; config, `.gitignore` and `AGENTS.md`
-  stay `init`'s.
+  stay `init`'s. Rendered files are compared with a fresh render from the current config, so a
+  `[supervisor]` gate command added after `init` reaches the root orchestrator `SKILL.md` on the next
+  `start` instead of staying `(not configured)` (PK-01).
+- **`git paw init` ignores all of git-paw's runtime state (PK-19)**: the required `.gitignore`
+  entries add `.git-paw/scripts/`, `.git-paw/sessions/`, `.git-paw/AGENTS.local.md`,
+  `.git-paw/.sweep-progress`, `.git-paw/.sweep-stuck-dedup` and `.git-paw/.add-remove.lock`, so
+  `git add .git-paw/` stages only `config.toml`.
 - **The helper's invocation path is its package path**, e.g.
   `.git-paw/skills/coordination/scripts/broker.sh`. Bundled prose names helpers only through
   registry-rendered placeholders (`{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}`, `{{DOCS_FETCH_HELPER}}`),
@@ -76,7 +89,10 @@ release review).
   each provisioned package's name, description, `SKILL.md` path and helper path. Skill bodies stay
   inlined so the one file the boot prompt names remains self-sufficient.
 - **Doctor checks packages**: per package `SKILL.md` present; each helper present, executable and
-  matching; a missing or stale compatibility copy is ⚠, not ✗. The broad-grant advisory recognises
+  matching; a missing or stale compatibility copy is ⚠, not ✗; a root `SKILL.md` or reference that
+  differs from what the current config renders is ⚠ stale (remedy `git paw start` or `git paw init`,
+  PK-01); a repository with no `.git-paw/config.toml` gets one ⚠ "not initialised — run
+  `git paw init`" line instead of a ✗ per helper (PK-07). The broad-grant advisory recognises
   a wide helper grant at either path and prints the longer package path whole.
 
 ## Capabilities
@@ -88,7 +104,7 @@ release review).
 ### Modified Capabilities
 
 - `skill-packages`: installation layout; init installs every package at the root; every `start`
-  installs the root packages (DF-06); every launch path installs the worktree's selection;
+  installs the root packages (DF-06), re-rendered from the current config (PK-01); every launch path installs the worktree's selection;
   installing never touches setup grants; atomic replacement of installed files; package-path
   invocation through placeholders; helpers the system invokes itself use the package path; the
   compatibility copy; how requirements naming the legacy deployed path are read (never the
@@ -108,7 +124,10 @@ release review).
 - `supervisor-launch`: *A supervised launch refreshes the bundled root helper scripts* (v0.19.0
   `v019-release-review-fixes`) — the refresh installs the root packages and their compatibility
   copies.
-- `preflight-diagnostics`: *Bundled-scripts check* — per-package checks; *Doctor reports CLI setup
+- `core-init`: *Init appends logs directory to .gitignore* — the required entries cover every
+  runtime path under `.git-paw/` except `config.toml` (PK-19).
+- `preflight-diagnostics`: *Bundled-scripts check* — per-package checks, stale rendered root
+  skills (PK-01), one line for an uninitialised repository (PK-07); *Doctor reports CLI setup
   state* — pre-package entries are reported out of date, and the modified-helper warning follows
   the paths the applied entries name; *Doctor lists broad durable grants in the project's CLI
   settings* — shape 8 at either path, package path printed whole.
@@ -131,7 +150,10 @@ release review).
   protection rules at the package paths, from the registry), `src/cli_setup/undo.rs` (shape check
   accepts both paths), `src/cli_setup/doctor.rs` (setup check follows the applied entries' paths;
   broad-grant shape 8 at both paths; `MAX_WORD` keeps the longest package path whole),
-  `src/doctor.rs` (package checks; the Supervisor check's `sweep.sh` probe at the package path),
+  `src/init.rs` `GITIGNORE_ENTRIES` (runtime paths, PK-19),
+  `src/doctor.rs` (package checks; stale rendered root skills against a fresh render of the
+  current config; one not-initialised line when `.git-paw/config.toml` is absent; the Supervisor
+  check's `sweep.sh` probe at the package path),
   `src/supervisor/drive.rs` (`SweepLearningSink` path). `src/worktree_provision.rs`
   (env files, ports, `on_create` hook) is untouched: helper provisioning is not in it.
 - **Assets:** every literal `.git-paw/scripts/<helper>` in bundled prose becomes a placeholder;
@@ -142,7 +164,8 @@ release review).
   `src/commands/supervisor.rs` ×1, `tests/git_integration.rs` ×1).
 - **Tests:** setup-cli grant-table, protection, undo and doctor tests re-pointed and extended
   (package-path entries, both deny rules, undo of a pre-package record, doctor ⚠ for a pre-package
-  record, wide package-path grant listed whole), `tests/cli_init_writes_*`,
+  record, wide package-path grant listed whole), `tests/cli_init_writes_*`, a `git add .git-paw/`
+  e2e after init and a session (PK-19), doctor stale-skill and not-initialised tests,
   `tests/worktree_helper_provisioning.rs` across launch paths, `tests/e2e_supervisor_launch.rs`
   (root package refresh), a bare-start fresh-clone e2e, `tests/sweep_sh_session_discovery.rs` (run
   from a linked worktree), boot-block and skill-content tests re-pointed to the rendered package

@@ -2,7 +2,7 @@
 
 ### Requirement: Bundled-scripts check
 
-The command SHALL verify, for every package in the bundled package registry, that the package is installed at the repository root under `.git-paw/skills/<package>/` with its `SKILL.md` present, and that each of the package's helper scripts exists under the package's `scripts/`, is executable, and matches the running binary's embedded version. A missing package, a missing or non-executable helper, or a stale helper SHALL be reported with a remedy to run `git paw init`. The command SHALL also check each helper's compatibility copy under `.git-paw/scripts/`; because nothing bundled invokes that path, a missing or stale compatibility copy SHALL be reported as ⚠ and SHALL NOT be ✗. The command SHALL also verify that a Python 3 interpreter is available on PATH (`python3`, or `python` reporting major version 3), since every bundled helper script requires one to run; when none is found it SHALL report ⚠ with a remedy to install Python 3. Because core git-paw orchestration (start/add/remove) does not require Python, a missing interpreter SHALL be ⚠ and SHALL NOT be ✗.
+The command SHALL verify, for every package in the bundled package registry, that the package is installed at the repository root under `.git-paw/skills/<package>/` with its `SKILL.md` present, and that each of the package's helper scripts exists under the package's `scripts/`, is executable, and matches the running binary's embedded version. A missing package, a missing or non-executable helper, or a stale helper SHALL be reported with a remedy to run `git paw init`. A root package's `SKILL.md` or reference whose content differs from what the running binary renders from the current config SHALL be reported ⚠ as stale, with a remedy to run `git paw start` or `git paw init`. When the repository is not initialised (no `.git-paw/config.toml`), the command SHALL report the packages, helpers and compatibility copies as one ⚠ line stating the repository is not initialised, with the remedy `git paw init`, instead of one line per file, and SHALL NOT report ✗ for them. The command SHALL also check each helper's compatibility copy under `.git-paw/scripts/`; because nothing bundled invokes that path, a missing or stale compatibility copy SHALL be reported as ⚠ and SHALL NOT be ✗. The command SHALL also verify that a Python 3 interpreter is available on PATH (`python3`, or `python` reporting major version 3), since every bundled helper script requires one to run; when none is found it SHALL report ⚠ with a remedy to install Python 3. Because core git-paw orchestration (start/add/remove) does not require Python, a missing interpreter SHALL be ⚠ and SHALL NOT be ✗.
 
 #### Scenario: A bundled script is missing
 
@@ -28,6 +28,21 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report ⚠ for the compatibility copy
 - **AND** SHALL NOT report ✗
+
+#### Scenario: A root skill rendered before a config change is stale
+
+- **GIVEN** an initialised repository whose `.git-paw/skills/orchestrator/SKILL.md` renders `[supervisor] test_command` as `(not configured)`
+- **AND** `[supervisor] test_command = "make test"` was then added to `.git-paw/config.toml`
+- **WHEN** `git paw doctor` is run
+- **THEN** the Bundled-scripts group SHALL report ⚠ for the `orchestrator` package as stale with a remedy naming `git paw start` or `git paw init`
+- **AND** `.git-paw/skills/orchestrator/SKILL.md` SHALL be byte-identical afterwards
+
+#### Scenario: An uninitialised repository is reported once
+
+- **GIVEN** a git repository where `git paw init` never ran, so there is no `.git-paw/config.toml`
+- **WHEN** `git paw doctor` is run
+- **THEN** the Bundled-scripts group SHALL report exactly one package line, ⚠, stating the repository is not initialised with the remedy `git paw init`
+- **AND** SHALL report no ✗ for a package, helper or compatibility copy
 
 #### Scenario: No Python 3 interpreter on PATH
 
