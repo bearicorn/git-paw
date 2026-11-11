@@ -448,7 +448,7 @@ mod tests {
         let clis = HashMap::new();
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Manual, &clis),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
 
@@ -459,7 +459,7 @@ mod tests {
         let clis = HashMap::new();
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Manual, &clis),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local"
         );
     }
 
@@ -484,7 +484,7 @@ mod tests {
         let clis = HashMap::new();
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &clis),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --permission-mode acceptEdits"
         );
     }
 
@@ -527,7 +527,7 @@ mod tests {
         let e = entry("claude", Some("abc-123"));
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &HashMap::new()),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
         );
     }
 
@@ -546,7 +546,7 @@ mod tests {
         )]);
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &clis),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
         );
     }
 
@@ -642,7 +642,7 @@ mod tests {
                 (
                     "feat/a",
                     Path::new("/repo/.git-paw/worktrees/feat-a"),
-                    "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local"
+                    "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local"
                 ),
                 (
                     "feat/b",

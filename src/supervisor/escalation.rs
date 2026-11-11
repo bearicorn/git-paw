@@ -1283,7 +1283,9 @@ mod tests {
             );
             for (name, _) in &spec.env {
                 assert!(
-                    name != "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && name != "CLAUDE_CODE_PLUGIN_DIRS",
+                    name != "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+                        && name != "CLAUDE_CODE_PLUGIN_DIRS"
+                        && name != "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
                     "{:?}",
                     spec.env
                 );
