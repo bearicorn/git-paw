@@ -33,8 +33,8 @@ The system SHALL resolve each agent CLI, once per agent, into one record: its id
   `--cli "claude --model x"`)
 - **WHEN** a worker using it is launched at `agent_approval = "full-auto"`
 - **THEN** its id SHALL be `claude` and its family `claude`
-- **AND** the pane command SHALL be `claude --model x` followed by
-  `--dangerously-skip-permissions` and the session-id arguments
+- **AND** the pane command SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x` followed by
+  `--setting-sources project,local`, `--dangerously-skip-permissions` and the session-id arguments
 
 #### Scenario: Overrides resolve by id when the executable differs
 
@@ -143,7 +143,7 @@ same check and SHALL show the exact command each worker pane would run.
 
 - **GIVEN** `[clis.sonnet] command = "claude"`, `family = "claude"`, `args = "--model sonnet"`
 - **WHEN** `git paw start --dry-run` plans a worker using `sonnet`
-- **THEN** the plan SHALL show the pane command beginning `claude --model sonnet`
+- **THEN** the plan SHALL show the pane command beginning `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local`
 
 #### Scenario: A built-in CLI still launches by name
 
@@ -162,7 +162,7 @@ launch command SHALL be unchanged. Two `[clis.*]` entries MAY name the same `com
 
 - **GIVEN** `[clis.sonnet] command = "claude"`, `family = "claude"`, `args = "--model sonnet"`
 - **WHEN** a worker using `sonnet` is launched at `agent_approval = "manual"`
-- **THEN** the pane command SHALL be the executable followed by `--model sonnet`
+- **THEN** the pane command SHALL be the family's operator-isolation `env` prefix, the executable, `--model sonnet`, then the isolation arguments
 
 #### Scenario: Two profiles of one executable
 
@@ -172,11 +172,11 @@ launch command SHALL be unchanged. Two `[clis.*]` entries MAY name the same `com
 
 ### Requirement: Every worker launch path builds its command through one builder
 
-Every worker launch path SHALL build the pane command with one builder — bare start, spec-driven
-start, supervised start, `git paw add`, session recovery, and the launch-readiness relaunch alike —
-in this order: the executable, the CLI's `args`, the approval flags resolved for the
-effective approval level, then the session-id arguments for a fresh launch or the resume arguments
-for a recovery with a recorded session id. An empty part SHALL contribute no separator.
+Every worker launch path SHALL build the pane command with one builder (bare, spec-driven and
+supervised start, `git paw add`, recovery and the readiness relaunch), in this order: the
+operator-isolation `env NAME=value …` prefix, the executable, the CLI's `args`, the isolation
+arguments, native sandbox arguments, approval flags, then session-id or resume arguments. An
+empty part SHALL contribute no separator.
 
 #### Scenario: Start and add build identical commands
 
@@ -189,8 +189,8 @@ for a recovery with a recorded session id. An empty part SHALL contribute no sep
 - **GIVEN** a stopped session whose entry has `cli = "claude"` and a recorded session id, and
   `agent_approval = "auto"`
 - **WHEN** the session is recovered
-- **THEN** the pane command SHALL contain `--permission-mode acceptEdits` followed by
-  `--resume <id>`
+- **THEN** the pane command SHALL contain `--setting-sources project,local`, then
+  `--permission-mode acceptEdits`, then `--resume <id>`
 
 #### Scenario: Empty parts leave no separators
 
@@ -543,3 +543,73 @@ Test: `tests/source_audit.rs::a_cli_name_comparison_in_a_test_item_is_not_a_find
 - **THEN** no production file outside `src/agent_cli/` SHALL have a finding
 
 Test: `tests/source_audit.rs::cli_names_are_compared_only_inside_agent_cli`
+
+### Requirement: Operator isolation is a provider facet
+
+Each provider family SHALL declare its operator-isolation launch environment and arguments: what keeps a worker from loading the operator's personal configuration and extensions and from writing memory the operator's sessions share. An environment entry MAY assign the empty value to clear an inherited variable. A family that encodes none SHALL contribute nothing, so the `generic` fallback launches unchanged.
+
+#### Scenario: The claude family declares its isolation
+
+- **GIVEN** the `claude` provider family
+- **WHEN** its operator isolation is resolved
+- **THEN** the arguments SHALL be `--setting-sources project,local`
+- **AND** the environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_PLUGIN_DIRS=` (empty), in that order
+
+Test: `agent_cli::tests::the_claude_family_declares_its_isolation`
+
+#### Scenario: A family without isolation facts contributes nothing
+
+- **GIVEN** `[clis.agent] command = "/opt/agent"`, `args = "--quiet"` and no `family` (so `generic`)
+- **WHEN** its worker pane command is built at `agent_approval = "manual"`
+- **THEN** the command SHALL be exactly `/opt/agent --quiet`, with no `env` prefix and no assignment before the executable
+
+Test: `agent_cli::tests::a_family_without_isolation_facts_contributes_nothing`
+
+### Requirement: Operator isolation is placed by the launch builder
+
+The launch builder SHALL write the isolation environment as `env NAME=value …` before the executable, so it works in every pane shell, and the isolation arguments after the CLI's `args` and before any native sandbox arguments and the approval flags. This SHALL hold on every worker launch path that builds through the one builder, including recovery with a resume id.
+
+#### Scenario: A claude worker is launched isolated
+
+- **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, and `agent_approval = "auto"`
+- **WHEN** the pane command of a worker using `opus` is built for a fresh launch assigned the session id `abc`
+- **THEN** it SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id abc`
+
+Test: `agent_cli::tests::a_claude_worker_is_launched_isolated`
+
+#### Scenario: Recovery keeps the isolation
+
+- **GIVEN** a stopped session whose entry has `cli = "claude"`, no `[clis.claude]` entry, and a recorded session id
+- **WHEN** the session is recovered
+- **THEN** the pane command SHALL start with `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude`
+- **AND** it SHALL contain `--setting-sources project,local` before `--resume <id>`
+
+Test: `agent_cli::tests::recovery_keeps_the_isolation`, `tests/worker_operator_isolation_e2e.rs::recovery_through_start_keeps_the_isolation`
+
+#### Scenario: Start and add stay identical
+
+- **GIVEN** the same claude-family CLI, approval level and configuration
+- **WHEN** one worker is launched by `git paw start` and another by `git paw add`
+- **THEN** both pane commands SHALL carry the same isolation environment and arguments
+
+Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_workers_with_identical_isolation`
+
+### Requirement: A CLI may inherit the operator's configuration
+
+`[clis.<name>]` SHALL accept an optional boolean `inherit_operator_config`, default `false`. When it is `true`, the launch builder SHALL add neither that CLI's isolation environment nor its isolation arguments. A config without the key SHALL load unchanged and SHALL NOT gain the key when written back.
+
+#### Scenario: Opting out restores the previous launch
+
+- **GIVEN** `[clis.claude] command = "claude"` with `inherit_operator_config = true` and `agent_approval = "manual"`
+- **WHEN** a worker using `claude` is launched
+- **THEN** its pane command SHALL contain none of `--setting-sources`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY` and `CLAUDE_CODE_PLUGIN_DIRS`
+
+Test: `agent_cli::tests::opting_out_restores_the_previous_launch`
+
+#### Scenario: An existing config round-trips without the key
+
+- **GIVEN** a config whose `[clis.*]` entries have no `inherit_operator_config`
+- **WHEN** it is loaded and written back
+- **THEN** the written file SHALL NOT contain `inherit_operator_config`
+
+Test: `config::tests::an_existing_config_round_trips_without_the_inherit_operator_config_key`
