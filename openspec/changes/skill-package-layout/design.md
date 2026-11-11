@@ -70,7 +70,7 @@ MILESTONE asks that "the boot block and the skill export stay in one place".
 ### D2 — A static registry, not a directory walk
 
 `skills::bundled_packages() -> &'static [BundledPackage]`, each entry an explicit list of
-`(relative path, include_str!(…))` pairs plus a `ProvisionGate` (`RootOnly` for `orchestrator`
+`(relative path, include_str!(…))` pairs plus a `ProvisionGate` (`RootOnly` (decided 2026-11-11; it replaces the never-used `Always` gate) for `orchestrator`
 and `cli-setup`, `BrokerEnabled` for `coordination`, `DocsBaseUrlConfigured` for `docs-fetch`).
 The gate governs worktree selection only: `git paw init` installs every package's helpers at the
 root as it does today, and `export_skills` writes the `RootOnly` packages' skills to
@@ -144,9 +144,8 @@ behavioral (rendered text, helper output) and stop failing on a file move.
   "works from both the bundled `assets/scripts/` tree" and the deployed directory — and those
   comments are installed verbatim] → rewording them changes the installed bytes that *Packaging
   preserves deployed output* pins, so this change leaves them as they are; `skill-package-deploy`,
-  which changes the deployed helpers anyway, rewords them. (Needs a maintainer call if the
-  comments should be fixed here instead, with the byte-identity requirement scoped to
-  non-comment lines.)
+  which changes the deployed helpers anyway, rewords them. (Decided 2026-11-11: leave them here,
+  so byte identity stays whole.)
 - [`git mv` loses `git log` continuity for some tools] → use `git mv` so rename detection works.
 
 ## Migration Plan

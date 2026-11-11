@@ -242,17 +242,16 @@ compatibility copies keep the old path working.
 
 ## Open Questions
 
-- **Decision for the user — move the invocation path or not.** Recommended: move it (D3, with the
-  compatibility copy). Alternative: keep `.git-paw/scripts/` as the invocation path and treat
+- **Decided 2026-11-11 — move the invocation path** (D3, with the compatibility copy). Alternative: keep `.git-paw/scripts/` as the invocation path and treat
   packages as the source/export unit only — zero allow-rule churn, but packages do not own their
   helpers once installed.
-- **Decision for the user — inline vs reference-only skill bodies** in the managed block (D6).
+- **Decided 2026-11-11 — skill bodies stay inlined** in the managed block, with the `## Skills`
+  index beside them (D6).
 - **Decided (2026-10-20):** recorded `setup-cli` grants are migrated by the user — doctor reports
   them out of date and the user re-runs `--undo` then `--allowlist` — never by git-paw (D4).
-- **Decision for the user — DF-06 scope:** should a bare/spec-driven `start` also refresh *stale*
-  root packages (recommended, D7: same rule as the supervised launch), or only install *missing*
-  ones?
-- **Decision for the user — config resolution from a worktree (DF-54 follow-on):** the helpers
+- **Decided 2026-11-11 — DF-06 scope:** a bare or spec-driven `start` also refreshes *stale*
+  root packages, the same rule as the supervised launch (D7).
+- **Follow-up, not in this change — config resolution from a worktree (DF-54 follow-on):** the helpers
   still read `.git-paw/config.toml` from the current checkout, i.e. a worktree's committed copy,
   which can lag an uncommitted edit in the main checkout (e.g. `[broker] port`). Agents normally get
   `GIT_PAW_BROKER_URL`, so this change leaves it; resolving the config from `MAIN_ROOT` too would be

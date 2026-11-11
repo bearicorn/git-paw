@@ -64,11 +64,11 @@ every global profile. `[agents]` is ruled out because "agent" already means a ru
 (`agent_id`, `agent.status`). `[profiles]` stays clean after v0.21.0. "Profile" is already used for
 the prompt-shape profile (`[clis.<name>].prompt_profile`), v0.19.0's internal `CliProfile`, v0.19.0's
 `agent_cli::AgentProfiles` (the drive loop's per-agent recorded-CLI map, `cli-profile-threading`) and
-v1.1.0's repository profile DTO; the Rust type is `AgentProfile`, docs say "agent profile", and the
-user-facing key `profiles` does not clash with any existing key. `AgentProfile` (a configured entry)
-next to `AgentProfiles` (a runtime map of something else) is a naming hazard; see Open Questions. *Alternatives:* two tables
+v1.1.0's repository profile DTO; the Rust type is `ProfileEntry`, docs say "agent profile", and the
+user-facing key `profiles` does not clash with any existing key. It was named `ProfileEntry`, not
+`AgentProfile`, so it cannot be confused with `AgentProfiles` (decided 2026-11-11). *Alternatives:* two tables
 (`[worker_profiles]`, `[delegate_profiles]`) — rejected, two namespaces for one concept; `[personas]` —
-rejected, carries the vendor-file meaning the user decision retired. **Decision for the user.**
+rejected, carries the vendor-file meaning the user decision retired. **Decided 2026-11-11.**
 
 ### D2 — The second kind is `delegate`, not `helper`
 
@@ -252,15 +252,16 @@ recorded `cli` still launches).
 
 ## Open Questions
 
-- Names: `[profiles]` + `kind`, capability `cli-agent-profiles` (D1) — confirm. Also the Rust type
-  name: `AgentProfile` sits next to v0.19.0's unrelated `agent_cli::AgentProfiles`; recommend a
-  name that cannot be confused with it (for example `ProfileEntry`, matching `CustomCli` as a
-  config entry), or confirm `AgentProfile`.
+- **Decided 2026-11-11 — names:** `[profiles]` + `kind`, capability `cli-agent-profiles` (D1). The
+  Rust type is `ProfileEntry`, so it cannot be confused with v0.19.0's `agent_cli::AgentProfiles`.
 - Should delegate runs count toward `[supervisor] budget_max_*` and be refused after a breach?
   v0.19.0's budget has landed: it lives in the drive loop (`src/supervisor/drive/budget.rs`), which
   counts workers and its own headless invocations and keeps its breach in memory. Counting delegates
   means the loop reading `runs.jsonl` runs started during its run; refusing them after a breach
   means persisting the breach somewhere `git paw delegate` can read. Recommended: count them in a
   follow-up; until then they are reported per profile but not added to totals or the cap.
-- `profile` in `[presets]` and in v0.18.0's MCP `start_session`: recommended follow-ups.
-- Concurrency constants (4 readers, 1 writer) and the 600 s / 64 KiB defaults — confirm.
+  **Decided 2026-11-11** as recommended.
+- **Decided 2026-11-11:** `profile` in `[presets]` and in v0.18.0's MCP `start_session` are
+  follow-ups.
+- **Decided 2026-11-11:** 4 concurrent read-only delegates, 1 writer, a 600 s timeout and a 64 KiB
+  output cap.

@@ -214,10 +214,8 @@ Rollback: revert. No on-disk state changes.
 
 ## Open Questions
 
-- **Decision for the user: the order.** Recommended: repository → user → embedded (D1).
-  Alternative: user → repository → embedded.
-- **Decision for the user: a linked worktree's `.agents/skills/` is not honoured** (D2/D6).
-  Recommended as specified.
+- **Decided 2026-11-11: the order** is repository → user → embedded (D1).
+- **Decided 2026-11-11: a linked worktree's `.agents/skills/` is never honoured** (D2/D6).
 - **Decided (2026-10-20): `cli-setup` is not overridable** (D9); an override directory for it is
   ignored with a doctor warning.
 - Should the standing HOME guard (`core-ci-hygiene` *Tests invoking git paw subcommands SHALL

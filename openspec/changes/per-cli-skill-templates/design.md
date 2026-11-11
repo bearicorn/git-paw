@@ -49,8 +49,8 @@ MILESTONE names `claude.md`, `codex.md`, `agy.md`, `generic.md`. Four full copie
 coordination skill would differ in a handful of lines and drift in everything else. A fragment per
 family per slot (`skill`, `boot`) carries only what differs, rendered into `{{CLI_NOTES}}` /
 `{{CLI_BOOT_NOTES}}`. The four names survive as the family directories.
-*Alternative:* full per-CLI templates as MILESTONE literally states — rejected on drift; listed as
-a decision for the user.
+*Alternative:* full per-CLI templates as MILESTONE literally states — rejected on drift
+(decided 2026-11-11: fragments).
 
 ### D2 — Selection key: the profile's `CliFamily`, Null Object fallback
 
@@ -123,6 +123,6 @@ Rollback: revert; rendering returns to the single text.
 
 ## Open Questions
 
-- **Decision for the user:** fragments (recommended) vs four full per-CLI templates.
+- **Decided 2026-11-11:** one base template plus per-CLI fragments.
 - Whether `codex` / `agy` fragments ship in v0.20.0 depends on task 2.3's verification; if neither
   verifies, the release ships `claude` + `generic` only and says so.

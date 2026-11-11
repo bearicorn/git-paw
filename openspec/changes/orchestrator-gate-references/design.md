@@ -57,7 +57,7 @@ residue (the gate briefs and the verdict shape) ships as skill-package content.
 supports subagents — rejected: vendor-specific export surface, facts unverifiable for 2 of 3 named
 CLIs, duplicates gate content into a second place, and contradicts v0.18.0's no-vendor-dir stance;
 (b) ship nothing in v0.20.0 and leave gate delegation to v0.18.0 — moot: v0.18.0 shipped without
-it, and references need v0.20.0's package machinery. **Listed as a decision for the user.**
+it, and references need v0.20.0's package machinery. (Decided 2026-10-19; see Open Questions.)
 
 ### D2 — Move, never copy: three audit gates become references
 
@@ -108,6 +108,7 @@ package manager or recipe — a consumer project never triggers it, and git-paw'
 stays in this repository's `AGENTS.md`.
 *Alternative:* have `git paw start` compare its own version with the repository's — rejected for
 now: it needs a notion of "this repository builds me" in code for one project's benefit.
+**Decided 2026-11-11:** a skill instruction only.
 
 ## Risks / Trade-offs
 

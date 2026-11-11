@@ -74,7 +74,7 @@ one-shot delegates alike, with as many of each as the user wants.
 
 ## Impact
 
-- **Code:** new `src/config/profiles.rs` (`AgentProfile`, `ProfileName`, `ProfileKind`, validation,
+- **Code:** new `src/config/profiles.rs` (`ProfileEntry`, `ProfileName`, `ProfileKind`, validation,
   merge); new `src/delegate.rs` (pure document / admission / output decisions) and
   `src/commands/delegate.rs` (shell); `src/supervisor/escalation.rs` (`HeadlessInvocation` /
   `resolve_handoff` generalised to take profile `args` and an optional operator-isolation facet —
