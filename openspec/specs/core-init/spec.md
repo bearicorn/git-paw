@@ -237,10 +237,13 @@ Each bundled helper (`broker.sh`, `sweep.sh`, `docs-fetch.sh`) SHALL obtain its
 shared functions — repository-root resolution, Python-3 interpreter detection,
 config-value reading, broker-URL / docs-base-URL discovery, and branch slugify —
 by sourcing `_paw_common.sh`, and SHALL NOT re-define those functions inline. A
-helper SHALL resolve the sourced path relative to its own script location so the
-source succeeds from both the bundled `assets/scripts/` tree and the deployed
-`.git-paw/scripts/` directory. The observable behavior of every helper SHALL be
-unchanged from the pre-refactor inline implementation.
+helper SHALL resolve the sourced path relative to its own script location, and
+the preamble SHALL be installed as a sibling of every helper wherever that
+helper is installed, so the source succeeds from any installed location of the
+helper. The preamble SHALL have exactly one source file in the bundled package
+tree; every package that ships a helper SHALL carry that same content. The
+observable behavior of every helper SHALL be unchanged from the pre-refactor
+inline implementation.
 
 The shared preamble SHALL remain project-agnostic: it SHALL source the broker URL
 and docs base URL from resolved configuration and SHALL NOT hard-code any
@@ -280,6 +283,18 @@ consumer's toolchain.
 - **THEN** the shared function SHALL resolve from `_paw_common.sh`
 - **AND** the result SHALL equal what the pre-refactor inline definition produced
   for the same inputs
+
+#### Scenario: A package installed into an arbitrary directory runs
+
+- **GIVEN** a helper-shipping package's scripts installed together into an empty
+  temporary directory
+- **WHEN** the helper is invoked from there
+- **THEN** it SHALL source the sibling `_paw_common.sh` and run
+
+#### Scenario: The preamble has one source
+
+- **WHEN** the bundled package tree is inspected
+- **THEN** exactly one `_paw_common.sh` source file SHALL exist
 
 ### Requirement: Init installs the orchestrator skill in the standardized format
 
