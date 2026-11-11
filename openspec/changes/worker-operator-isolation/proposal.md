@@ -18,6 +18,8 @@ extensions or writing that memory.
   recovery and the readiness relaunch.
 - **`claude` family:** `--setting-sources project,local` stops the operator's user-level settings
   from loading, which removes their user hooks and user-enabled plugins.
+  `CLAUDE_CODE_PLUGIN_DIRS=` (empty) stops plugins the operator's environment points at, which
+  the flag does not reach (verified, design D5).
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns auto memory off, so a worker can never write the
   repository's shared memory. Project and local settings still load, so the consumer's
   project configuration and the main checkout's local allow rules still apply. Authentication is

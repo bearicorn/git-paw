@@ -733,6 +733,13 @@ patterns (a `./`-rooted script, or the project/branch name), `user allowlist`
 otherwise. The hint is a starting point; the command never edits any settings
 file for you.
 
+A claude-family worker does not read your user allowlist: it launches with only
+the project and local setting sources, so a user-allowlist rule reaches it only
+when its `[clis.<name>]` entry sets `inherit_operator_config = true` (see
+[what a worker inherits](user-guide/security-posture.md#what-a-worker-inherits-from-you)).
+To stop a worker prompting, put the rule in the project-local allowlist, which
+[`git paw setup-cli`](user-guide/cli-setup.md) writes.
+
 **Examples:**
 ```bash
 # Active session, text table

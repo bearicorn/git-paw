@@ -5192,6 +5192,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         clis

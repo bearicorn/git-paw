@@ -532,6 +532,7 @@ fn config_survives_save_and_load() {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         )]),
         presets: HashMap::from([(
@@ -615,6 +616,48 @@ fn custom_cli_settings_path_parses_and_round_trips() {
     assert_eq!(reloaded.clis, config.clis);
 }
 
+/// `cli-provider` scenario "An existing config round-trips without the key".
+#[test]
+fn an_existing_config_round_trips_without_the_inherit_operator_config_key() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.opus]\n\
+             command = \"claude\"\n\
+             family = \"claude\"\n\
+             args = \"--model opus\"\n",
+    );
+
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert!(!config.clis["opus"].inherit_operator_config);
+
+    let round_trip_path = tmp.path().join("round-trip.toml");
+    save_config_to(&round_trip_path, &config).unwrap();
+    let written = std::fs::read_to_string(&round_trip_path).unwrap();
+    assert!(
+        !written.contains("inherit_operator_config"),
+        "an unset opt-out must not be written, got:\n{written}"
+    );
+}
+
+#[test]
+fn inherit_operator_config_parses_and_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.claude]\ncommand = \"claude\"\ninherit_operator_config = true\n",
+    );
+
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert!(config.clis["claude"].inherit_operator_config);
+    let round_trip_path = tmp.path().join("round-trip.toml");
+    save_config_to(&round_trip_path, &config).unwrap();
+    let reloaded = load_config_file(&round_trip_path).unwrap().unwrap();
+    assert_eq!(reloaded.clis, config.clis);
+}
+
 #[test]
 fn custom_cli_without_approval_args_parses_unchanged() {
     // A pre-v0.11.0 [clis.<name>] entry — no approval_args key — must
@@ -645,6 +688,7 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         args: None,
         sandbox: None,
         sandbox_args: None,
+        inherit_operator_config: false,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -1994,6 +2038,7 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
         args: None,
         sandbox: None,
         sandbox_args: None,
+        inherit_operator_config: false,
     }
 }
 
@@ -2071,6 +2116,7 @@ fn cli_with_session_templates(
         args: None,
         sandbox: None,
         sandbox_args: None,
+        inherit_operator_config: false,
     }
 }
 
@@ -3787,6 +3833,7 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     clis
@@ -3861,6 +3908,7 @@ fn clis_with_command(name: &str, command: &str) -> HashMap<String, CustomCli> {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     clis

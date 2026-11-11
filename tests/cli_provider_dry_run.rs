@@ -31,7 +31,8 @@ fn dry_run(repo: &Path, cli: &str) -> std::process::Output {
         .expect("run start --dry-run")
 }
 
-/// Scenario "A dry run shows the real launch command".
+/// Scenario "A dry run shows the real launch command", with the claude
+/// family's operator isolation in it.
 #[test]
 fn a_dry_run_shows_the_command_and_args_the_pane_would_run() {
     let tr = setup_test_repo();
@@ -48,8 +49,11 @@ fn a_dry_run_shows_the_command_and_args_the_pane_would_run() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("runs: echo --model sonnet"),
-        "plan should show the pane command; got:\n{stdout}"
+        stdout.contains(
+            "runs: env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= echo --model sonnet \
+             --setting-sources project,local"
+        ),
+        "plan should show the isolated pane command; got:\n{stdout}"
     );
     assert!(
         stdout.contains(WORKER_HEADER),

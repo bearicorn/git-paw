@@ -1094,6 +1094,7 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///         args: None,
 ///         sandbox: None,
 ///         sandbox_args: None,
+///         inherit_operator_config: false,
 ///     },
 /// );
 /// assert_eq!(

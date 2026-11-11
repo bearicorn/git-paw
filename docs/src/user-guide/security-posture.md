@@ -19,6 +19,46 @@ can: your whole home directory, your SSH keys, your cloud credentials, your othe
 repositories, and your login keychain. git-paw does not change your OS's
 permission model; it automates running code within it.
 
+## What a worker inherits from you
+
+A worker runs as your user, in your environment, with your agent CLI's login.
+By default git-paw keeps it away from your **personal** CLI setup, wherever the
+CLI's [provider family](../supported-clis.md#operator-isolation) encodes how.
+For a `claude`-family worker (verified against Claude Code 2.1.322):
+
+| | A worker gets it? | How |
+|---|---|---|
+| Your user-level settings (`~/.claude/settings.json`): permission rules, model default, `env` block, hooks, enabled plugins | **No** | `--setting-sources project,local` leaves out the `user` source (verified for the `env` block; hooks follow from the same exclusion — no user hook was probed) |
+| Plugins your environment points at through `CLAUDE_CODE_PLUGIN_DIRS` | **No** | `CLAUDE_CODE_PLUGIN_DIRS=` (empty) for the worker; the flag alone does not stop them |
+| Auto memory, which Claude Code shares across every worktree of a repository | **No** — neither read nor written | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
+| The repository's project settings (`.claude/settings.json`) and the main checkout's `.claude/settings.local.json` | Yes | both sources stay on, so [`git paw setup-cli`](cli-setup.md) rules still apply |
+| Project skills, commands, `CLAUDE.md`/`AGENTS.md`, a project `.mcp.json` (git-paw's MCP boot form) | Yes | |
+| Managed (organisation) settings and their plugins | Yes | the CLI always applies them |
+| Your login | Yes | the worker keeps your config directory |
+
+git-paw reads and writes no settings file to do this: it is a fixed environment
+prefix and a fixed argument on the worker's launch line, both visible in
+`git paw start --dry-run`. Your own driving session and the drive loop's
+[headless orchestrator one-shot](#the-headless-orchestrator-one-shot) are not
+workers and launch unchanged.
+
+**Workers may prompt more.** Your user-level allow rules and model default no
+longer reach them. Put repository allow rules in project-local settings
+(`git paw setup-cli`) and the model in `[clis.<name>].args`. A git-paw MCP
+server registered only at user scope was not part of the verification;
+register it per project (`.mcp.json`) to be sure a worker sees it.
+
+**Opting out.** A setup that needs your user settings to work at all — a proxy
+endpoint or a model provider in the user settings' `env` block — sets
+`inherit_operator_config = true` on that CLI's
+[`[clis.<name>]` entry](../configuration/README.md#custom-clis). Its workers
+then launch with your full configuration, as before.
+
+**Not closed here.** Answering "Yes, and don't ask again" in a worker writes
+the rule into the **main checkout's** `.claude/settings.local.json` (Claude
+Code keeps one project-local file per repository), so a rule one worker
+accepts applies to every worker and to your own session in that repository.
+
 ## git-paw decides nothing about your agent's commands
 
 **git-paw makes no safety judgement about a command an agent asks to run, and it

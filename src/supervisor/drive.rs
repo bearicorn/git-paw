@@ -4096,6 +4096,7 @@ mod tests {
                         args: None,
                         sandbox: None,
                         sandbox_args: None,
+                        inherit_operator_config: false,
                     },
                 )
             })
@@ -8486,6 +8487,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         let merge_check = FakeMergeCheck::default();
@@ -10909,6 +10911,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         )])
     }
