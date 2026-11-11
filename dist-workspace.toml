@@ -19,3 +19,7 @@ install-updater = true
 tap = "bearicorn/homebrew-tap"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+
+# GitHub retired the macos-14 runner dist defaults to for Apple silicon.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
