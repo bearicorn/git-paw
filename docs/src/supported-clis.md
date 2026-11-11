@@ -68,6 +68,25 @@ entry — resolves the `generic` family.
 with the default prompt-shape profile, exactly as it treats any CLI it knows
 nothing about. Nothing fails because a CLI is `generic`.
 
+### Operator isolation
+
+A family can also declare what keeps a worker away from your personal setup.
+Only `claude` declares any so far; every other family adds nothing until its
+facts are verified (the v0.23.0 per-CLI audit).
+
+| Family | Environment (`env NAME=value …` before the executable) | Arguments after `args` |
+|--------|-----------------------------------|------------------------|
+| `claude` | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS=` | `--setting-sources project,local` |
+| every other family | none | none |
+
+So a `claude` worker at `auto` launches as
+`env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id <id>`.
+`git paw start --dry-run` prints the exact line. A declared variant
+(`family = "claude"`) gets the same isolation; `inherit_operator_config = true`
+on its [`[clis.<name>]` entry](configuration/README.md#custom-clis) turns it
+off for that CLI. What each part does, and what a worker still inherits, is in
+[Security Posture](user-guide/security-posture.md#what-a-worker-inherits-from-you).
+
 ### Declaring a variant
 
 A `[clis.<name>]` entry whose key is not a known CLI name is `generic` unless

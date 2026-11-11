@@ -1353,6 +1353,14 @@ benefits every project. Both are rules in the agent CLI's own settings — the
 `SUGGEST` column is a hint, not a rule, and `git paw approvals` never edits
 any settings file for you.
 
+A **user allowlist** rule does not reach a claude-family worker by default: the
+worker launches with only the project and local setting sources (see
+[what a worker inherits](security-posture.md#what-a-worker-inherits-from-you)).
+It reaches workers only when the CLI's `[clis.<name>]` entry sets
+`inherit_operator_config = true`. To stop workers prompting, put the rule in
+the project-local allowlist instead — [`git paw setup-cli`](cli-setup.md)
+writes it.
+
 When `[supervisor] learnings = true`, the first sighting of each pattern also
 emits a `permission_pattern` learning so it surfaces in
 [Learnings Mode](learnings.md) alongside the other patterns.
