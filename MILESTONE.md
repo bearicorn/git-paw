@@ -795,7 +795,7 @@ notice and touches nothing in the tree.
 
 **Built 2026-11-10 as the v0.18.0 dogfood.** git-paw v0.18.0 built this cycle on itself: an
 external Claude Code session was the orchestrator, and the workers ran Opus 5.5 at medium effort.
-The findings are DF-01 to DF-57; those not fixed here are carried into v0.20.0, v0.21.0, v0.23.0
+The findings are DF-01 to DF-60; those not fixed here are carried into v0.20.0, v0.21.0, v0.23.0
 and v0.24.0 below.
 - **Verification:** the five gates, plus a fork-based regression review and adversarial review of
   each change before merging. They earned their cost: on the first merge alone they found three
@@ -1131,6 +1131,33 @@ Stale premises found while speccing:
     replayed hook or the worker CLI's status polling.
   - **DF-54** — `sweep.sh` run from inside a worker's worktree finds no session: discovery reads the
     current directory's `.git-paw/`, not the main repository root's.
+
+**Carried from the v0.19.0 release reviews (2026-11-11).**
+- **Helpers and broker:**
+  - Write refreshed helper scripts atomically (temp file plus rename), so a running `sweep.sh`
+    never reads a half-written script after a supervised launch refreshes it.
+  - **DF-58** — a stale installed `git-paw` silently reintroduces fixed bugs during a dogfood run;
+    the orchestrator skill should say to drive the session with the binary built from the branch.
+  - Menu glyph literals remain in `permission_prompt.rs`, `tmux/readiness.rs` and `sweep.sh`; read
+    them from the prompt profile as `__send` now does.
+- **Spec set:**
+  - `Test:` pointers for the scenarios worker-usage-budget and worker-friction-fixes added.
+  - Scenario renames and moves that strict validation rejects inside a MODIFIED block (stale
+    "README Features section" scenario titles, "lists all three specs.type values", two
+    mis-grouped code-architecture scenarios, git-operations "…unaffected"): do them as
+    REMOVED + ADDED requirements in one spec-hygiene change.
+- **DX and errors:**
+  - `start`'s uncommitted-spec warning says "use --force to proceed" but the launch proceeds
+    anyway: refuse without `--force`, or reword.
+  - `BudgetCost::new` returns `Result<_, String>`; a budget abandon is reported as
+    `PawError::SessionError`; budget escalation text is assembled in Rust rather than `assets/`.
+  - A stopped rebase in a worktree at a different path (after a `worktree_placement` change) is
+    not detected.
+- **CI:** add an MSRV job (`cargo +1.96 check --all-targets`); track the two tmux timing tests that
+  flake under load (`coding_agents_resolve_flags_from_agent_approval`,
+  `stop_revokes_the_drive_loop_binding`).
+- **Architecture:** the config loader still prints warnings with a process-global dedupe; return
+  them as values like the agent-CLI layer now does (with F10–F15 in v0.24.0).
   - **DF-21** — `verify-now` fires per section commit, and there is no "change complete" signal.
   - **DF-37, DF-40** — there is no "branch under verification, frozen" signal, so workers amend
     their branch while the orchestrator's gates run on it.
