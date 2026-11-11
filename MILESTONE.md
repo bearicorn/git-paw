@@ -940,9 +940,16 @@ from the operator's own CLI config; a per-profile config directory is the natura
   so its memory writes would leak into the operator's own sessions.
 - **DF-48** — idle workers' prompt caches go cold, so each late nudge re-caches 300–500k tokens.
 
-None of the six specced changes covers these yet. Per-profile config isolation needs its own
-change after `agent-profiles` (to spec). DF-48 is a drive-loop cost item rather than an isolation
-one; it stays listed here until it is specced or moved.
+**Specced 2026-11-11 as `worker-operator-isolation`** (DF-14, DF-27, DF-39, DF-40). By default every
+worker launches without the operator's personal extensions. For the `claude` family that means
+`--setting-sources project,local` (no user hooks, plugins or settings) and
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (no write to the repository-shared memory). Project and local
+settings still apply. `[clis.<name>] inherit_operator_config = true` opts a CLI out. Other families
+wait for the v0.23.0 audit. The orchestrator and its headless one-shot are untouched. Per-profile
+config directories were rejected, because a fresh `CLAUDE_CONFIG_DIR` forces a new login. The
+change is independent of the skill packages and lands before `agent-profiles`, which reuses the
+facet for delegates. DF-48 is a drive-loop cost item rather than an isolation one, so it stays
+listed here until it is specced or moved.
 
 **Pulled in 2026-11-11 from v0.21.0**, because `skill-package-deploy` rewrites helper
 installation and discovery anyway:
