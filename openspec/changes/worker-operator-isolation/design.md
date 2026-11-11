@@ -26,7 +26,8 @@ Claude Code facts, from the official docs (code.claude.com, read 2026-11-11):
 - `--safe-mode` keeps authentication but also turns off CLAUDE.md, skills, custom commands and MCP.
 - `--bare` does not read OAuth or Keychain credentials at all.
 - **Not stated by the docs:** that excluding `user` drops user-enabled plugins and user-settings
-  hooks. Plugin enable state lives in `enabledPlugins` in settings, and synced plugins are
+  hooks, or that `CLAUDE_CODE_PLUGIN_DIRS` in the environment loads plugins whatever the setting
+  sources. Plugin enable state lives in `enabledPlugins` in settings, and synced plugins are
   documented as not loading without `user`, so it is inferred. Verified at implementation (D5).
 
 ## Goals / Non-Goals
@@ -60,8 +61,10 @@ the repository declares. Alternatives:
   would have to read the operator's settings to list their plugins, and a second `--settings` next
   to a user-supplied one has undocumented merge behaviour.
 
-### D2 — Memory off through the environment, not a settings flag
+### D2 — Memory off, and inherited plugin directories cleared, through the environment
 
+`CLAUDE_CODE_PLUGIN_DIRS=` (empty) likewise clears plugin directories the worker would inherit
+from the operator's environment, which `--setting-sources` does not reach (D5).
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is per process, needs no JSON quoting in a shell line, and
 does not compete with a user's own `--settings` in `args` or `approval_args`. Relocating memory
 with `autoMemoryDirectory` was rejected: a worker's memory would outlive its worktree and still need
@@ -100,6 +103,43 @@ Like `cli-setup-consent`, the row ships only after a recorded check against a re
 
 If plugins or hooks still load, the row keeps only what is verified. The change then records the
 gap in the docs rather than shipping a claim.
+
+**Record (Claude Code 2.1.322, 2026-11-12).** Probed with `claude -p --output-format stream-json
+--verbose` from a linked worktree of a scratch repository, reading the `init` event (plugins, MCP
+servers, slash commands, skills, `memory_paths`), the plugin hook log events, tool results and
+permission denials. The operator's user settings define no `hooks` and no `enabledPlugins`; their
+`env` block sets `CLAUDE_CODE_PLUGIN_DIRS` to three plugin directories whose plugins carry hooks,
+and the operator's shell inherits the same variable (Claude Code exports the settings `env` block
+to its child processes, so a `git paw` run from inside a Claude Code session carries it into tmux).
+
+| Probe | Sources | `CLAUDE_CODE_PLUGIN_DIRS` | Operator plugins and their hooks |
+|---|---|---|---|
+| A (today's worker) | all | inherited | load and fire |
+| B (flags only) | `project,local` | inherited | **load and fire** |
+| D | all | unset | load (re-supplied by the user settings `env` block) |
+| C | `project,local` | unset | none |
+| I | `project,local` | empty (`CLAUDE_CODE_PLUGIN_DIRS=`) | none |
+
+- **User settings are excluded by `--setting-sources project,local`.** D against C: with the
+  variable unset, the user settings `env` block alone brings the plugins back, and excluding `user`
+  removes them. The user-settings `hooks` key comes from the same source; no user hook existed to
+  fire, so that part rests on the same exclusion.
+- **An inherited `CLAUDE_CODE_PLUGIN_DIRS` survives the flag** (B). The DF-14 hook chatter came
+  from exactly these plugins. The row therefore also assigns `CLAUDE_CODE_PLUGIN_DIRS=`: the empty
+  value loads no plugin directory, the same as unsetting it (I against C), and keeps the facet a
+  plain list of `NAME=value` pairs that works as a shell prefix and as `SpawnSpec` environment.
+  No other inherited variable was found to load operator extensions; the v0.23.0 audit re-checks.
+- **Managed settings still apply** (they always do): the organisation's managed plugins loaded in
+  every probe. claude.ai connectors also did not load in C and I; they are operator-personal too.
+- **The main checkout's `.claude/settings.local.json` allow rule applies in the isolated worker**
+  (E): `git config fg.allowed yes` (allowed there) ran, `git config fg.denied yes` was denied.
+- **A project skill and command load and run** (`fg-skill` invoked, `fg-cmd` listed), and the
+  project-scope git-paw MCP server (`.mcp.json`, `git paw mcp`) connected in every probe. An MCP
+  server registered at user scope (`~/.claude.json`) was not probed: the operator has none.
+- **Auto memory is off** (G against H): with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` the `init` event
+  has no `memory_paths` and a "save this to your auto memory" request wrote nothing. The control
+  (H) wrote `MEMORY.md` into the **main checkout's** project memory directory from the worktree,
+  confirming the shared-memory leak.
 
 ## Risks / Trade-offs
 

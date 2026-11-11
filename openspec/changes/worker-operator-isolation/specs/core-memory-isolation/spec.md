@@ -7,8 +7,10 @@ By default, every coding-agent worker git-paw launches SHALL run with its CLI fa
 #### Scenario: A worker does not run the operator's user plugins or hooks
 
 - **GIVEN** an operator whose user-level Claude Code settings enable a plugin and define a hook
+- **AND** whose environment sets `CLAUDE_CODE_PLUGIN_DIRS` to a directory of plugins that carry hooks
 - **WHEN** a claude-family worker is launched by `git paw start` with default configuration
 - **THEN** the worker's CLI SHALL be started with the `user` setting source excluded (`--setting-sources project,local`), so it loads neither that plugin nor that hook
+- **AND** its environment SHALL carry `CLAUDE_CODE_PLUGIN_DIRS=` (empty), so it loads none of the plugins, nor their hooks, that the inherited variable points at
 
 #### Scenario: A worker does not write the shared auto memory
 
@@ -32,4 +34,4 @@ The operator's own driving session and the drive loop's headless orchestrator on
 - **GIVEN** an unattended session whose drive loop hands a judgment call to a headless orchestrator one-shot of a claude-family CLI
 - **WHEN** the one-shot is spawned
 - **THEN** its argv SHALL NOT contain `--setting-sources`
-- **AND** its added environment SHALL NOT contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+- **AND** its added environment SHALL contain neither `CLAUDE_CODE_DISABLE_AUTO_MEMORY` nor `CLAUDE_CODE_PLUGIN_DIRS`
