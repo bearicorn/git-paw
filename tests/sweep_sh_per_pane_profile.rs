@@ -8,6 +8,9 @@
 //! outcomes can only come from the per-pane profile. Hermetic: no tmux
 //! server, no broker.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -52,12 +55,7 @@ fn two_cli_repo() -> (TempDir, std::path::PathBuf) {
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "init"]);
 
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let scripts = root.join(".git-paw/scripts");
-    fs::create_dir_all(&scripts).expect("mk scripts");
-    for name in ["_paw_common.sh", "sweep.sh"] {
-        fs::copy(assets.join(name), scripts.join(name)).expect("copy helper");
-    }
+    let scripts = packages::install_package("orchestrator", &root.join(".git-paw/scripts"));
     fs::write(root.join(".git-paw/config.toml"), MYCLI_PROFILE).expect("config");
 
     let sessions = root.join(".git-paw/sessions");

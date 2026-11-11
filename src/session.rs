@@ -811,7 +811,7 @@ pub fn discard_authority_handoff_in(session_name: &str, dir: &Path) -> Result<()
 // ---------------------------------------------------------------------------
 //
 // Distinct from the global receipt above: this is the lightweight discovery
-// surface the bundled `assets/scripts/sweep.sh` helper reads to find the
+// surface the bundled `sweep.sh` helper (orchestrator package) reads to find the
 // active session name and its agent roster from inside the repo, without
 // reaching into the XDG state dir. `git paw start` writes it; `purge` removes
 // it (design `session-json-location`).

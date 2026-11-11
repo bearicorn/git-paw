@@ -3,7 +3,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! that pin the `/agents` + `/tell` "Routing through the supervisor" section
-//! into the bundled `assets/agent-skills/orchestrator.md` so a future edit can't
+//! into the bundled `assets/agent-skills/orchestrator/SKILL.md` so a future edit can't
 //! silently drop the routing conventions (tasks 4, 5, 6, 7.1, 8). The
 //! executable behaviour is unit-tested in `git_paw::coordination`; these
 //! scenarios cover the prose-only requirements that have no other asserting
@@ -16,10 +16,9 @@
 //! and SHALL state the roster is re-read after `git paw add` /
 //! `git paw remove`.
 
-use std::fs;
-
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 
@@ -302,7 +301,8 @@ fn pane_resolution_re_resolves_after_add_or_remove() {
 // carry none of the supervisor-only routing patterns.
 #[test]
 fn coordination_skill_has_no_routing_patterns() {
-    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+    let coordination = git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path");
     assert!(
         !coordination.contains("/tell"),

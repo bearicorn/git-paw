@@ -1020,7 +1020,7 @@ approval_args = {{ "auto" = "{SENTINEL_FLAG}" }}
 // immediately (it explicitly asserts no `"Enter"` element in the args).
 //
 // A live pane-content probe analogous to the spec-driven test above is not
-// meaningful here: `assets/boot-block-template.md` (unlike the task-prompt
+// meaningful here: `assets/agent-skills/coordination/assets/boot-block.md` (unlike the task-prompt
 // templates) ends with its own trailing newline, so every line of the bare
 // boot block — including its last — is already terminated by the time
 // `tmux send-keys -l` delivers it, with or without a following `Enter`

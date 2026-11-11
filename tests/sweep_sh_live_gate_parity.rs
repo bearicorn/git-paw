@@ -18,6 +18,9 @@
 //! subprocess reads the same embedded profile the in-process Rust gate
 //! does". `one_source_is_read_by_both_consumers` pins that directly.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -51,17 +54,7 @@ fn init_git_repo(dir: &Path) {
 /// preamble it sources — into `<repo>/.git-paw/scripts/`, mirroring the
 /// co-deployment `git paw init` guarantees.
 fn install_sweep(repo: &Path) -> std::path::PathBuf {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let dst_dir = repo.join(".git-paw/scripts");
-    fs::create_dir_all(&dst_dir).expect("mk scripts dir");
-    fs::copy(
-        assets.join("_paw_common.sh"),
-        dst_dir.join("_paw_common.sh"),
-    )
-    .expect("copy _paw_common.sh");
-    let dst = dst_dir.join("sweep.sh");
-    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
-    dst
+    packages::install_helper("sweep.sh", &repo.join(".git-paw/scripts"))
 }
 
 /// Directory holding the freshly built binary, prepended to the child's
@@ -330,7 +323,8 @@ fn fixtures() -> Vec<(&'static str, String, bool)> {
 /// parse (guards the embedded-Python heredoc quote-tracking landmine).
 #[test]
 fn sweep_sh_parses_under_bash_n() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh");
+    let install = tempfile::TempDir::new().expect("tempdir");
+    let src = packages::install_helper("sweep.sh", install.path());
     let out = script_cmd::bash()
         .arg("-n")
         .arg(&src)

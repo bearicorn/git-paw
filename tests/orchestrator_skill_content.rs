@@ -1,6 +1,6 @@
 //! Skill-content assertions for the `orchestrator-skill-export` conversion of
 //! the bundled supervisor skill into the orchestrator skill
-//! (`assets/agent-skills/orchestrator.md`).
+//! (`assets/agent-skills/orchestrator/SKILL.md`).
 //!
 //! Each test pins a WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! scenario from the change's `skill-agent`, `supervisor-skill-discipline`
@@ -14,7 +14,8 @@ use git_paw::specs::SpecBackendKind;
 
 /// The raw orchestrator template, frontmatter included.
 fn template() -> String {
-    std::fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

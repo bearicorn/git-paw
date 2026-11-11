@@ -7,6 +7,9 @@
 //! `git paw __send` call and exits with a scripted status; every other git
 //! call goes to the real git.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -34,17 +37,7 @@ fn init_git_repo(dir: &Path) {
 
 /// Copies the bundled sweep.sh and the preamble it sources into the repo.
 fn install_sweep(repo: &Path) -> PathBuf {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let dst_dir = repo.join(".git-paw/scripts");
-    fs::create_dir_all(&dst_dir).expect("mk scripts dir");
-    fs::copy(
-        assets.join("_paw_common.sh"),
-        dst_dir.join("_paw_common.sh"),
-    )
-    .expect("copy _paw_common.sh");
-    let dst = dst_dir.join("sweep.sh");
-    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
-    dst
+    packages::install_helper("sweep.sh", &repo.join(".git-paw/scripts"))
 }
 
 /// Writes the `git` stub into `bin` and returns `bin`.

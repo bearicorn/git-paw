@@ -1,7 +1,7 @@
 //! The bundled shell helper derives the same `agent_id` as the Rust side.
 //!
 //! `agent-id-slug-safety` (`broker-protocol`, "Branch slug function"): the
-//! shell `slugify` in `assets/scripts/_paw_common.sh` — the fallback
+//! shell `slugify` in `assets/agent-skills/_shared/scripts/_paw_common.sh` — the fallback
 //! `broker.sh` uses when no `--agent` is given — SHALL return the same string
 //! as [`git_paw::broker::messages::slugify_branch`] for every input.
 //!
@@ -11,6 +11,9 @@
 //! the test while disagreeing with what agents actually run. Two
 //! implementations of one rule are exactly how the derivation drifted from the
 //! `/publish` validator in the first place (PP-26).
+
+#[path = "helpers/packages.rs"]
+mod packages;
 
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
@@ -43,7 +46,9 @@ done
 #[test]
 fn shell_slugify_matches_slugify_branch_for_every_corpus_entry() {
     let corpus = slug_corpus::branch_corpus();
-    let common_sh = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/scripts/_paw_common.sh");
+    let install = tempfile::TempDir::new().expect("tempdir");
+    let common_sh =
+        packages::install_package("orchestrator", install.path()).join("_paw_common.sh");
 
     let mut child = script_cmd::bash()
         .arg("-c")

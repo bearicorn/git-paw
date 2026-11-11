@@ -1,4 +1,4 @@
-//! Convention enforcement for `assets/scripts/sweep.sh`.
+//! Convention enforcement for the bundled `sweep.sh` helper.
 //!
 //! Pins the v0-5-0-audit-cleanup §10 fix: stdin-claiming pipe shapes
 //! (`python3 - <<`, `sh - <<`, etc.) must not return. When a heredoc
@@ -7,6 +7,9 @@
 //! The fix is to pass the script via `-c "$(cat <<'EOF' ... EOF)"` so
 //! the interpreter takes its script from an argument and leaves stdin
 //! free for the pipe.
+
+#[path = "helpers/packages.rs"]
+mod packages;
 
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
@@ -56,13 +59,7 @@ fn scan(body: &str) -> Vec<String> {
 
 #[test]
 fn sweep_sh_has_no_stdin_claiming_pipe_pattern() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("scripts")
-        .join("sweep.sh");
-    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", path.display());
-    });
+    let body = bundled_script("sweep.sh");
 
     let hits = scan(&body);
 
@@ -70,7 +67,7 @@ fn sweep_sh_has_no_stdin_claiming_pipe_pattern() {
         hits.is_empty(),
         "sweep.sh contains stdin-claiming pipe pattern(s); use `-c \"$(cat <<'EOF' ... EOF)\"` \
          instead of `interpreter - <<` to keep stdin free for upstream pipes.\n  in {}:\n{}",
-        path.display(),
+        packages::script_source("sweep.sh"),
         hits.join("\n")
     );
 }
@@ -176,13 +173,7 @@ fn extract_function(body: &str, name: &str) -> String {
 /// the `-c "$(cat` marker.
 #[test]
 fn cmd_status_publish_keeps_c_cat_heredoc_shape() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("scripts")
-        .join("sweep.sh");
-    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", path.display());
-    });
+    let body = bundled_script("sweep.sh");
     let func = extract_function(&body, "cmd_status_publish");
 
     assert!(
@@ -252,13 +243,9 @@ fn discovery_file_fixtures_never_use_the_global_session_shape() {
     );
 }
 
-/// Reads a bundled script under `assets/scripts/`.
+/// Reads a bundled helper script from the package registry.
 fn bundled_script(name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("scripts")
-        .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    packages::script(name).to_string()
 }
 
 /// `broker-agent-helper` "Root-side helper verbs carry the authority
@@ -316,11 +303,21 @@ fn broker_sh_has_no_credential_verb() {
             "broker.sh must not dispatch a `{verb}` subcommand"
         );
     }
+    // The preamble resolves the project root at source time, so the package
+    // is installed into a throwaway git repository.
+    let install = tempfile::TempDir::new().expect("tempdir");
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(install.path())
+        .status()
+        .expect("git init");
+    assert!(git.success());
+    packages::install_package("coordination", install.path());
     let out = script_cmd::bash()
         // Relative, so the usage line's `$0` carries no checkout path.
         .arg("broker.sh")
         .arg("--help")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts"))
+        .current_dir(install.path())
         .output()
         .expect("run broker.sh --help");
     // The help names the resolved project root; drop the checkout path so a
@@ -330,6 +327,7 @@ fn broker_sh_has_no_credential_verb() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+    .replace(&install.path().display().to_string(), "<checkout>")
     .replace(env!("CARGO_MANIFEST_DIR"), "<checkout>");
     for word in ["verified", "feedback", "authority"] {
         assert!(

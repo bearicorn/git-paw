@@ -483,7 +483,7 @@ pub struct PawConfig {
 
 /// Default documentation site the `docs-fetch` helper targets when
 /// `docs_base_url` is unset. Kept in sync with the fallback baked into
-/// `assets/scripts/docs-fetch.sh`.
+/// `assets/agent-skills/docs-fetch/scripts/docs-fetch.sh`.
 pub const DEFAULT_DOCS_BASE_URL: &str = "https://bearicorn.github.io/git-paw";
 
 impl PawConfig {

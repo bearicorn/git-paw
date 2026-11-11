@@ -261,13 +261,14 @@ pub fn start(
 
     let mut worktree_entries = Vec::new();
 
-    // Resolve coordination skill once if broker is enabled
-    let skill_content = if broker_config.enabled {
-        let template = crate::skills::resolve("coordination")?;
-        Some(template)
-    } else {
-        None
+    // Resolve the coordination skill once when the worktree package
+    // selection includes it (broker enabled). The bare path injects no
+    // docs-fetch skill.
+    let worktree_inputs = crate::skills::WorktreeInputs {
+        broker_enabled: broker_config.enabled,
+        docs_base_url_configured: config.docs_base_url.is_some(),
     };
+    let skill_content = crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
 
     let worktree_runtime = config.worktree_runtime();
 
@@ -768,12 +769,14 @@ fn launch_spec_session(
         repo_root,
     );
 
-    // Resolve coordination skill once if broker is enabled
-    let skill_template = if broker_config.enabled {
-        Some(crate::skills::resolve("coordination")?)
-    } else {
-        None
+    // Resolve the coordination skill once when the worktree package
+    // selection includes it (broker enabled). The spec-driven path injects no
+    // docs-fetch skill.
+    let worktree_inputs = crate::skills::WorktreeInputs {
+        broker_enabled: broker_config.enabled,
+        docs_base_url_configured: config.docs_base_url.is_some(),
     };
+    let skill_template = crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
 
     let mut worktree_entries = Vec::new();
 

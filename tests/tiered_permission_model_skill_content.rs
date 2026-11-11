@@ -2,7 +2,7 @@
 //!
 //! These are WHEN-the-skill-is-rendered / THEN-the-prose-SHALL-state
 //! requirements pinning the permission ladder into
-//! `assets/agent-skills/orchestrator.md` so a future edit cannot silently
+//! `assets/agent-skills/orchestrator/SKILL.md` so a future edit cannot silently
 //! re-introduce a git-paw command classifier: the agent CLI's own permission
 //! system decides first, anything it still prompts for is relayed to the
 //! human, and `sweep.sh approve` runs only on the human's explicit
@@ -14,10 +14,9 @@
 //! *Prompt-free operation is attributed to the agent CLI's permission
 //! system*.
 
-use std::fs;
-
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

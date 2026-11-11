@@ -370,18 +370,24 @@ mod tests {
     use super::*;
     use crate::init;
 
-    /// The bundled `sweep.sh`, read at compile time so the dispatch guard
-    /// below sees the same copy the binary ships.
-    const SWEEP_SOURCE: &str = include_str!("../../assets/scripts/sweep.sh");
+    /// The bundled `sweep.sh` from the package registry, so the dispatch
+    /// guard below sees the same copy the binary ships.
+    fn sweep_source() -> &'static str {
+        init::bundled_scripts()
+            .into_iter()
+            .find(|(name, _)| *name == "sweep.sh")
+            .map(|(_, content)| content)
+            .expect("sweep.sh is bundled")
+    }
 
     /// Extracts the subcommands `sweep.sh`'s `main` dispatch recognises.
     ///
     /// The dispatch is a `case` whose arms read `  <name>) cmd_<fn> "$@" ;;`.
     /// The help and catch-all arms are not subcommands.
     fn dispatched_sweep_subcommands() -> Vec<String> {
-        let body = SWEEP_SOURCE
+        let body = sweep_source()
             .split_once("main() {")
-            .map_or(SWEEP_SOURCE, |(_, rest)| rest);
+            .map_or(sweep_source(), |(_, rest)| rest);
         let mut found = Vec::new();
         for line in body.lines() {
             let line = line.trim();

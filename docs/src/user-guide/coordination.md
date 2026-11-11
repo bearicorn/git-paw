@@ -129,8 +129,9 @@ publish verbs.
 of the binary that launched the session, on every launch path, so a worktree's
 helper always matches that binary's version. Re-attaching a worktree that
 already has the scripts rewrites them rather than failing — which also means
-**local edits to a worktree's helper copy are overwritten**. Edit
-`assets/scripts/` (when developing git-paw itself) rather than a deployed copy.
+**local edits to a worktree's helper copy are overwritten**. Edit the helper
+in its skill package under `assets/agent-skills/<package>/scripts/` (when
+developing git-paw itself) rather than a deployed copy.
 
 **Why a script and not a `git paw publish` subcommand?** The helper is an
 agent-internal mechanism. A user-facing subcommand would surface in `--help`
@@ -1162,7 +1163,7 @@ detector-comparable:
   region that was never declared.
 
 This guidance is taught to agents by the bundled coordination skill
-(`assets/agent-skills/coordination.md`, the "Declaring regions" section),
+(`assets/agent-skills/coordination/SKILL.md`, the "Declaring regions" section),
 which is the authoritative source.
 
 ### Context budget
@@ -1190,7 +1191,7 @@ guidance has four parts:
   agent commits (or publishes an `agent.artifact`) first, then clears or
   compacts.
 
-The bundled coordination skill (`assets/agent-skills/coordination.md`, the
+The bundled coordination skill (`assets/agent-skills/coordination/SKILL.md`, the
 "Context budget" section) is the **authoritative** source for the exact
 heuristics, the named moments, and the per-CLI compact/clear mechanism table
 (`claude`, `claude-oss`, and a generic fallback). This chapter only

@@ -11,7 +11,10 @@
 //! stack-specific) assumptions into a bundled asset that ships to
 //! polyglot users.
 
-use git_paw::skills::{GateCommands, render, resolve};
+use git_paw::skills::{
+    BundledFile, GateCommands, SkillFormat, SkillTemplate, Source, bundled_package,
+    bundled_packages, render, resolve,
+};
 use git_paw::specs::SpecBackendKind;
 
 /// Forbidden tokens that SHALL NOT appear in the rendered supervisor
@@ -214,8 +217,8 @@ fn audit_catches_a_rust_leak_regression() {
 /// is scanned directly against the forbidden-token list.
 #[test]
 fn audit_passes_for_coordination_skill() {
-    use std::fs;
-    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+    let coordination = git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path");
     assert_no_forbidden_tokens(&coordination, "coordination");
 }
@@ -226,10 +229,11 @@ fn audit_passes_for_coordination_skill() {
 /// out that and any similarly stack-naming meta-commentary.
 #[test]
 fn no_meta_commentary_names_a_stack() {
-    use std::fs;
-    let supervisor = fs::read_to_string("assets/agent-skills/orchestrator.md")
+    let supervisor = git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("supervisor.md is at the expected path");
-    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+    let coordination = git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path");
 
     // Phrases that name a stack in meta-commentary about git-paw's own
@@ -286,12 +290,14 @@ fn agent_feedback_examples_cover_three_failure_shapes() {
 /// to run dev commands bare AND the command-string-whitelisting rationale.
 #[test]
 fn bundled_skills_contain_no_exit_probe_guidance_and_rationale() {
-    use std::fs;
-    for (path, label) in [
-        ("assets/agent-skills/orchestrator.md", "supervisor"),
-        ("assets/agent-skills/coordination.md", "coordination"),
+    for (name, label) in [
+        ("orchestrator", "supervisor"),
+        ("coordination", "coordination"),
     ] {
-        let body = fs::read_to_string(path).expect("skill file is at the expected path");
+        let body = bundled_package(name)
+            .expect("package is registered")
+            .skill_md
+            .content;
 
         // The guidance: run dev commands bare; reject the exit-probe wrapper.
         assert!(
@@ -483,10 +489,11 @@ fn audit_excludes_allowlist_prose_via_sentinel() {
 /// approvable — that framing is exactly what the retirement removed.
 #[test]
 fn no_dev_allowlist_placeholder_remains() {
-    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agent-skills");
-    for name in ["orchestrator.md", "coordination.md"] {
-        let raw = std::fs::read_to_string(assets.join(name))
-            .unwrap_or_else(|e| panic!("{name} is readable: {e}"));
+    for name in ["orchestrator", "coordination"] {
+        let raw = bundled_package(name)
+            .expect("package is registered")
+            .skill_md
+            .content;
         assert!(
             !raw.contains("{{DEV_ALLOWLIST_PRESET}}"),
             "{name} must not carry the retired dev-allowlist placeholder"
@@ -584,8 +591,8 @@ fn audit_skills_carry_no_hardcoded_commit_convention() {
 /// recommendation.
 #[test]
 fn exported_coordination_asset_carries_no_commit_convention() {
-    use std::fs;
-    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+    let coordination = git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path");
     assert_no_commit_convention(&coordination, "coordination-source");
 }
@@ -620,16 +627,13 @@ fn commit_convention_audit_catches_a_hardcoded_prefix_regression() {
 // forbidden list now includes vendor product names/paths (task 5.2, D5).
 // ---------------------------------------------------------------------------
 
-/// Every bundled asset carrying agent-facing prose that the no-leak audit
-/// covers, beyond the rendered supervisor/coordination skills already
-/// audited above. Includes the prose relocated out of compiled Rust by
+/// Every bundled asset outside the skill packages carrying agent-facing prose
+/// that the no-leak audit covers. The skill packages' own text files are
+/// enumerated from the registry instead (see
+/// [`registered_package_text_files`]). Includes the prose relocated out of compiled Rust by
 /// `compiled-prose-to-assets` and the hook bodies (`git-hook-injection`
 /// scenario "Hook assets are covered by the export audit").
 const AUDITED_PROSE_ASSETS: &[&str] = &[
-    "assets/agent-skills/docs-fetch.md",
-    "assets/agent-skills/cli-setup.md",
-    "assets/boot-block-template.md",
-    "assets/boot-block-mcp-template.md",
     "assets/inter-agent-rules.md",
     "assets/governance-section-header.md",
     "assets/spec-path-doctrine/openspec.md",
@@ -858,4 +862,122 @@ fn escalation_framing_is_loaded_from_the_bundled_asset() {
         source.contains("include_str!(\"../../assets/escalation-framing.md\")"),
         "the framing prose must come from the bundled asset"
     );
+}
+
+// ---------------------------------------------------------------------------
+// skill-package-layout: the audited set is derived from the bundled package
+// registry (core-lang-agnostic, *The no-leak audit covers every registered
+// package file*).
+// ---------------------------------------------------------------------------
+
+/// The prose (non-script) files of a package: `SKILL.md`, references, assets.
+fn prose_files(files: &[BundledFile]) -> impl Iterator<Item = &BundledFile> {
+    files.iter().filter(|f| !f.path.starts_with("scripts/"))
+}
+
+/// Renders one package text file for every backend set the audit covers
+/// (each backend alone, all together, none), returning `(label, text)` pairs.
+/// Placeholder substitution is a no-op on files without placeholders.
+fn rendered_for_every_backend(package: &str, file: &BundledFile) -> Vec<(String, String)> {
+    let template = SkillTemplate {
+        name: package.to_string(),
+        content: file.content.to_string(),
+        source: Source::Embedded,
+        format: SkillFormat::Standardized,
+        metadata: None,
+        resource_paths: None,
+    };
+    let mut sets: Vec<Vec<SpecBackendKind>> =
+        SpecBackendKind::ALL.iter().map(|k| vec![*k]).collect();
+    sets.push(SpecBackendKind::ALL.to_vec());
+    sets.push(Vec::new());
+    let mut out = vec![(format!("{package}/{}", file.path), file.content.to_string())];
+    for backends in sets {
+        out.push((
+            format!("{package}/{} {backends:?}", file.path),
+            render(
+                &template,
+                "feat/audit",
+                "http://127.0.0.1:9119",
+                "git-paw",
+                &GateCommands::default(),
+                &backends,
+            ),
+        ));
+    }
+    out
+}
+
+/// Runs the no-leak audit over `files` of package `package`.
+fn audit_package_files(package: &str, files: &[BundledFile]) {
+    for file in prose_files(files) {
+        for (label, text) in rendered_for_every_backend(package, file) {
+            assert_no_forbidden_tokens(&text, &label);
+        }
+    }
+}
+
+/// Every registered prose file, as `(package, package-relative path)` — the
+/// audit's input set.
+fn registered_package_text_files() -> Vec<(&'static str, BundledFile)> {
+    let mut set = Vec::new();
+    for package in bundled_packages() {
+        let files: Vec<BundledFile> = package.files().copied().collect();
+        for file in prose_files(&files) {
+            set.push((package.name, *file));
+        }
+    }
+    set
+}
+
+#[test]
+fn audit_covers_every_registered_package_text_file() {
+    let audited = registered_package_text_files();
+    assert!(!audited.is_empty(), "the audit's input set is empty");
+    for (package, file) in &audited {
+        audit_package_files(package, std::slice::from_ref(file));
+    }
+}
+
+/// Scenario "Every registered prose file is in the audited set".
+#[test]
+fn every_registered_prose_file_is_in_the_audited_set() {
+    let audited = registered_package_text_files();
+    for package in bundled_packages() {
+        let mut expected = vec![package.skill_md.path];
+        expected.extend(package.references.iter().map(|f| f.path));
+        expected.extend(package.assets.iter().map(|f| f.path));
+        for path in expected {
+            assert!(
+                audited
+                    .iter()
+                    .any(|(name, file)| *name == package.name && file.path == path),
+                "{}/{path} is registered but not audited",
+                package.name
+            );
+        }
+    }
+}
+
+/// Scenario "A newly registered reference is audited automatically".
+#[test]
+fn a_newly_registered_reference_is_audited_automatically() {
+    let coordination = bundled_package("coordination").expect("registered");
+    let mut files: Vec<BundledFile> = coordination.files().copied().collect();
+    files.push(BundledFile {
+        path: "references/leak.md",
+        source: "assets/agent-skills/coordination/references/leak.md",
+        content: "Run `cargo test` before every commit.\n",
+    });
+    let result = std::panic::catch_unwind(|| audit_package_files("coordination", &files));
+    let message = result
+        .expect_err("the audit must fail on a forbidden token in a new reference")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    assert!(
+        message.contains("references/leak.md"),
+        "names the file: {message}"
+    );
+    assert!(message.contains("cargo"), "names the token: {message}");
 }

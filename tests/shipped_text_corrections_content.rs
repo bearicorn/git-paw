@@ -14,8 +14,7 @@ use std::fs;
 
 #[test]
 fn boot_block_template_exports_description_does_not_invite_cherry_picking() {
-    let content = fs::read_to_string("assets/boot-block-template.md")
-        .expect("boot-block-template.md exists at expected path");
+    let content = boot_block_asset("assets/boot-block.md");
 
     // The exports description must be removed entirely or reworded.
     // Check that the old cherry-pick language is gone.
@@ -27,8 +26,7 @@ fn boot_block_template_exports_description_does_not_invite_cherry_picking() {
 
 #[test]
 fn boot_block_mcp_template_exports_description_does_not_invite_cherry_picking() {
-    let content = fs::read_to_string("assets/boot-block-mcp-template.md")
-        .expect("boot-block-mcp-template.md exists at expected path");
+    let content = boot_block_asset("assets/boot-block-mcp.md");
 
     // The exports description must be removed entirely or reworded.
     // Check that the old cherry-pick language is gone.
@@ -153,4 +151,12 @@ fn all_task_prompts_reference_commit_not_agent_done() {
             );
         }
     }
+}
+
+/// A boot-block template from the coordination package's `assets/`.
+fn boot_block_asset(path: &str) -> &'static str {
+    git_paw::skills::bundled_package("coordination")
+        .and_then(|p| p.assets.iter().find(|f| f.path == path))
+        .unwrap_or_else(|| panic!("coordination package has no {path}"))
+        .content
 }

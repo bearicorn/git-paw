@@ -1,5 +1,5 @@
 //! Skill-content assertions for the conflict-acknowledgement guidance in
-//! the bundled coordination skill (`assets/agent-skills/coordination.md`).
+//! the bundled coordination skill (`assets/agent-skills/coordination/SKILL.md`).
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! requirements, following the pattern in
@@ -14,10 +14,9 @@
 //! adjudication as a defect report — a silent regression no compile or
 //! behavioural test would catch.
 
-use std::fs;
-
 fn coordination_skill() -> String {
-    fs::read_to_string("assets/agent-skills/coordination.md")
+    git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path")
 }
 

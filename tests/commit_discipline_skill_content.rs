@@ -13,15 +13,15 @@
 //! - the **supervisor cross-reference** in `supervisor.md`
 //!   (`supervisor relies on agents standing by` post-commit).
 
-use std::fs;
-
 fn coordination_skill() -> String {
-    fs::read_to_string("assets/agent-skills/coordination.md")
+    git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path")
 }
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

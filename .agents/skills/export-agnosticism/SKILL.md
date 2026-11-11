@@ -28,8 +28,11 @@ export.
 
 ## Export-surface inventory — check EVERY one
 
-- **Skills** — `assets/agent-skills/{coordination,orchestrator,docs-fetch,cli-setup}.md`
-  (`orchestrator` was `supervisor`, still resolvable under that alias).
+- **Skills** — the bundled packages `assets/agent-skills/<pkg>/` for
+  `{coordination,orchestrator,docs-fetch,cli-setup}`: each `SKILL.md` plus its `references/` and
+  `assets/` (the boot-block templates live in `coordination/assets/`), all registered in
+  `skills::bundled_packages()` (`orchestrator` was `supervisor`, still resolvable under that
+  alias).
 - **Exported skill files** — `git paw init` (and `git paw start`) writes
   `.git-paw/skills/orchestrator/SKILL.md` (the orchestrator skill rendered with the consumer's gate
   commands and configured spec format, no session value — no broker URL, no tmux session name, no
@@ -42,7 +45,9 @@ export.
   `assets/governance-section-header.md`, `assets/spec-path-doctrine/*.md`, `assets/boot-task-prompts/*.md`, `assets/task-prompts/**/*.md`.
   Compiled code keeps the assembly around them (placeholder substitution, conditional inclusion,
   per-backend selection, dedupe, region gating) — only the sentences live in the asset.
-- **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including
+- **Scripts & mirrored logic (code)** — the package helpers
+  `assets/agent-skills/{orchestrator/scripts/sweep,coordination/scripts/broker,docs-fetch/scripts/docs-fetch}.sh`
+  and the shared `assets/agent-skills/_shared/scripts/_paw_common.sh`, including
   the live-prompt gate mirrored into `sweep.sh` from `supervisor::permission_prompt`. The
   root-side `sweep.sh answer` and `sweep.sh advanced-main` verbs publish with supervisor authority
   and are never granted by `setup-cli`, like the verdict verbs.

@@ -27,45 +27,38 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/session-learnings.md",
 ];
 
-/// Bundled shared shell preamble, embedded at compile time and written to
-/// `<repo>/.git-paw/scripts/_paw_common.sh` by [`run_init`]. The sibling
-/// helpers ([`SWEEP_SCRIPT`], [`BROKER_SCRIPT`], [`DOCS_FETCH_SCRIPT`]) source
-/// it for their shared discovery functions rather than each re-defining them,
-/// so it MUST be installed wherever any of them is.
-const COMMON_SCRIPT: &str = include_str!("../assets/scripts/_paw_common.sh");
-
-/// Bundled supervisor-sweep helper script, embedded at compile time and
-/// written to `<repo>/.git-paw/scripts/sweep.sh` by [`run_init`].
-const SWEEP_SCRIPT: &str = include_str!("../assets/scripts/sweep.sh");
-
-/// Bundled agent-side broker helper script, embedded at compile time and
-/// written to `<repo>/.git-paw/scripts/broker.sh` by [`run_init`]. The
-/// analogue of [`SWEEP_SCRIPT`] for the coding-agent side — it wraps every
-/// agent→broker `curl` so the boot block calls one stable script path
-/// instead of inlining raw `curl` commands.
-const BROKER_SCRIPT: &str = include_str!("../assets/scripts/broker.sh");
-
-/// Bundled agent-side docs-fetch helper script, embedded at compile time and
-/// written to `<repo>/.git-paw/scripts/docs-fetch.sh` by [`run_init`]. Like
-/// [`BROKER_SCRIPT`], it wraps the agent's `curl` behind one stable script
-/// path so the launch path can grant that exact path instead of a broad
-/// `curl *` rule.
-const DOCS_FETCH_SCRIPT: &str = include_str!("../assets/scripts/docs-fetch.sh");
-
 /// The bundled helper scripts [`run_init`] installs, as
 /// `(file name, embedded content)` pairs in install order.
 ///
+/// Derived from the bundled package registry
+/// ([`crate::skills::bundled_packages`]): every package's scripts in registry
+/// order, each file name once (the shared `_paw_common.sh` preamble every
+/// helper-shipping package lists is installed once, first).
+///
 /// Exposed so diagnostics (`git paw doctor`) can compare the copies on disk
 /// under `.git-paw/scripts/` against the running binary's embedded versions
-/// without duplicating the `include_str!` set.
+/// without duplicating the embedded set.
 #[must_use]
-pub fn bundled_scripts() -> [(&'static str, &'static str); 4] {
-    [
-        ("_paw_common.sh", COMMON_SCRIPT),
-        ("sweep.sh", SWEEP_SCRIPT),
-        ("broker.sh", BROKER_SCRIPT),
-        ("docs-fetch.sh", DOCS_FETCH_SCRIPT),
-    ]
+pub fn bundled_scripts() -> Vec<(&'static str, &'static str)> {
+    let mut scripts: Vec<(&'static str, &'static str)> = Vec::new();
+    for file in crate::skills::bundled_packages()
+        .iter()
+        .flat_map(|p| p.scripts)
+    {
+        if !scripts.iter().any(|(name, _)| *name == file.file_name()) {
+            scripts.push((file.file_name(), file.content));
+        }
+    }
+    scripts
+}
+
+/// Embedded content of the bundled helper `name`, for tests.
+#[cfg(test)]
+fn bundled_script(name: &str) -> &'static str {
+    bundled_scripts()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map_or("", |(_, content)| content)
 }
 
 /// The `.gitignore` entries [`run_init`] guarantees are present.
@@ -248,11 +241,14 @@ pub fn refresh_root_scripts(repo_root: &Path) -> Result<Vec<(String, WriteOutcom
 /// the running binary's version rather than the repo's possibly-stale copy.
 ///
 /// Idempotent — always (re)writes the scripts and re-sets the executable bit,
-/// so re-attaching a reused worktree refreshes them without error. `broker.sh`
-/// is provisioned when `broker_enabled`; `docs-fetch.sh` when
-/// `docs_base_url_configured` (mirroring the docs-fetch skill's injection gate).
-/// The shared `_paw_common.sh` preamble accompanies whichever helper is
+/// so re-attaching a reused worktree refreshes them without error. The scripts
+/// written are exactly those of the packages
+/// [`crate::skills::packages_for_worktree`] selects: `broker.sh` when
+/// `broker_enabled`, `docs-fetch.sh` when `docs_base_url_configured`. The
+/// shared `_paw_common.sh` preamble accompanies whichever helper is
 /// provisioned — each one sources it, so a helper without it cannot run.
+/// Helpers always come from the binary's embedded registry, never from a skill
+/// override directory.
 pub fn provision_worktree_helpers(
     worktree_root: &Path,
     broker_enabled: bool,
@@ -260,14 +256,19 @@ pub fn provision_worktree_helpers(
 ) -> Result<(), PawError> {
     let scripts_dir = worktree_root.join(".git-paw").join("scripts");
     create_dir_if_missing(&scripts_dir)?;
-    if broker_enabled || docs_base_url_configured {
-        install_script(&scripts_dir.join("_paw_common.sh"), COMMON_SCRIPT)?;
-    }
-    if broker_enabled {
-        install_script(&scripts_dir.join("broker.sh"), BROKER_SCRIPT)?;
-    }
-    if docs_base_url_configured {
-        install_script(&scripts_dir.join("docs-fetch.sh"), DOCS_FETCH_SCRIPT)?;
+    let inputs = crate::skills::WorktreeInputs {
+        broker_enabled,
+        docs_base_url_configured,
+    };
+    let mut installed: Vec<&str> = Vec::new();
+    for file in crate::skills::packages_for_worktree(inputs)
+        .into_iter()
+        .flat_map(|p| p.scripts)
+    {
+        if !installed.contains(&file.file_name()) {
+            install_script(&scripts_dir.join(file.file_name()), file.content)?;
+            installed.push(file.file_name());
+        }
     }
     Ok(())
 }
@@ -302,9 +303,21 @@ impl WriteOutcome {
 }
 
 /// The exported skill directories under `<repo>/.git-paw/skills/`, relative
-/// to the repository root, in write order.
-pub const EXPORTED_SKILL_DIRS: [&str; 2] =
-    [".git-paw/skills/orchestrator", ".git-paw/skills/cli-setup"];
+/// to the repository root, in write order — one per root-only bundled package
+/// ([`crate::skills::ProvisionGate::RootOnly`]), in registry order.
+#[must_use]
+pub fn exported_skill_dirs() -> Vec<String> {
+    root_only_packages()
+        .map(|p| format!("{SKILLS_DIR}/{}", p.name))
+        .collect()
+}
+
+/// The root-only bundled packages, in registry order.
+fn root_only_packages() -> impl Iterator<Item = &'static crate::skills::BundledPackage> {
+    crate::skills::bundled_packages()
+        .iter()
+        .filter(|p| p.gate == crate::skills::ProvisionGate::RootOnly)
+}
 
 /// Writes the exported skills — the orchestrator skill rendered by
 /// [`crate::skills::render_standardized`] and the resolved `cli-setup`
@@ -332,18 +345,22 @@ pub fn export_skills(
         .into_iter()
         .collect();
     let supervisor = config.supervisor.clone().unwrap_or_default();
-    let orchestrator =
-        crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL).map_err(skill_err)?;
-    let orchestrator_md =
-        crate::skills::render_standardized(&orchestrator, &supervisor.gate_commands(), &backends);
-    let cli_setup = crate::skills::resolve("cli-setup").map_err(skill_err)?;
-    let cli_setup_md = crate::skills::to_skill_md(&cli_setup);
+    let mut rendered = Vec::new();
+    for package in root_only_packages() {
+        let template = crate::skills::resolve(package.name).map_err(skill_err)?;
+        let content = if package.name == crate::skills::ORCHESTRATOR_SKILL {
+            crate::skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
+        } else {
+            crate::skills::to_skill_md(&template)
+        };
+        rendered.push((format!("{SKILLS_DIR}/{}", package.name), content));
+    }
 
     // A committed symlink anywhere on the way would redirect the writes
     // outside the repository; these directories hold binary-managed files only.
     for dir in [".git-paw", SKILLS_DIR]
         .into_iter()
-        .chain(EXPORTED_SKILL_DIRS)
+        .chain(rendered.iter().map(|(dir, _)| dir.as_str()))
     {
         refuse_symlink(&repo_root.join(dir))?;
     }
@@ -357,13 +374,10 @@ pub fn export_skills(
         ignore_rel.clone(),
         write_managed_file(&repo_root.join(&ignore_rel), "*\n")?,
     )];
-    for (dir, content) in EXPORTED_SKILL_DIRS
-        .iter()
-        .zip([orchestrator_md, cli_setup_md])
-    {
+    for (dir, content) in &rendered {
         create_dir_if_missing(&repo_root.join(dir))?;
         let rel = format!("{dir}/SKILL.md");
-        let outcome = write_managed_file(&repo_root.join(&rel), &content)?;
+        let outcome = write_managed_file(&repo_root.join(&rel), content)?;
         outcomes.push((rel, outcome));
     }
     Ok(outcomes)
@@ -371,7 +385,7 @@ pub fn export_skills(
 
 /// The directory the exported skills live under, relative to the repository
 /// root.
-const SKILLS_DIR: &str = ".git-paw/skills";
+pub const SKILLS_DIR: &str = ".git-paw/skills";
 
 /// Fails when `path` exists as a symlink.
 fn refuse_symlink(path: &Path) -> Result<(), PawError> {
@@ -1805,7 +1819,10 @@ test_command = "just check"
         );
         // Version-matched: content is byte-identical to the embedded asset the
         // running binary ships (the same one `git paw init` installs).
-        assert_eq!(fs::read_to_string(&broker).unwrap(), BROKER_SCRIPT);
+        assert_eq!(
+            fs::read_to_string(&broker).unwrap(),
+            bundled_script("broker.sh")
+        );
     }
 
     // Scenario: docs-fetch helper provisioned only when configured — docs-fetch.sh
@@ -1828,7 +1845,10 @@ test_command = "just check"
             is_executable(&docs_fetch),
             "docs-fetch.sh must be provisioned and executable when configured"
         );
-        assert_eq!(fs::read_to_string(&docs_fetch).unwrap(), DOCS_FETCH_SCRIPT);
+        assert_eq!(
+            fs::read_to_string(&docs_fetch).unwrap(),
+            bundled_script("docs-fetch.sh")
+        );
         assert!(
             is_executable(&set.path().join(".git-paw/scripts/broker.sh")),
             "broker.sh is provisioned alongside docs-fetch.sh"
@@ -1867,7 +1887,7 @@ test_command = "just check"
         );
         assert_eq!(
             fs::read_to_string(&broker).unwrap(),
-            BROKER_SCRIPT,
+            bundled_script("broker.sh"),
             "re-attach refreshes the helper to the running binary's version"
         );
     }
@@ -1883,7 +1903,10 @@ test_command = "just check"
 
         let outcomes = refresh_root_scripts(dir.path()).unwrap();
 
-        assert_eq!(fs::read_to_string(&sweep).unwrap(), SWEEP_SCRIPT);
+        assert_eq!(
+            fs::read_to_string(&sweep).unwrap(),
+            bundled_script("sweep.sh")
+        );
         assert!(is_executable(&sweep));
         let changed: Vec<&str> = outcomes
             .iter()
