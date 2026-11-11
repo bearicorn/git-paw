@@ -1,8 +1,9 @@
-## Purpose
+# skill-packages Specification
 
+## Purpose
 Defines how git-paw's bundled skills are packaged and delivered: each bundled skill is an agentskills.io package (a `SKILL.md` with frontmatter plus the `scripts/`, `references/` and `assets/` it owns), a compiled registry is the single source of the bundled set for every consumer (skill resolution, init, worktree provisioning, the root-only `.git-paw/skills/` export, doctor, the `git paw setup-cli` grant table's helper coverage, the no-leak audit), which packages reach an agent worktree is a pure decision, overrides change skill text but never the helpers git-paw installs, and requirements that still name pre-package asset paths are read against the package files.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Bundled skills ship as agentskills.io packages
 
