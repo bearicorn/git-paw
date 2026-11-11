@@ -678,21 +678,18 @@ pub fn supervisor(
     )?;
 
     // Resolve the coordination skill once for all agent panes.
-    let coordination_template = if broker_config.enabled {
-        Some(crate::skills::resolve("coordination")?)
-    } else {
-        None
+    let worktree_inputs = crate::skills::WorktreeInputs {
+        broker_enabled: broker_config.enabled,
+        docs_base_url_configured: config.docs_base_url.is_some(),
     };
+    let coordination_template =
+        crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
 
     // Resolve the docs-fetch skill once, gated on an explicitly-configured
     // `docs_base_url`. Left unset (the default points at git-paw's own site),
     // the skill is not injected — a consumer only gets it once they have
     // pointed git-paw at their own docs, keeping the exported skill agnostic.
-    let docs_fetch_template = if config.docs_base_url.is_some() {
-        Some(crate::skills::resolve("docs-fetch")?)
-    } else {
-        None
-    };
+    let docs_fetch_template = crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch")?;
 
     // Peer branches for the inter-agent rules block. Held as a slice rather
     // than a pre-rendered string: `build_inter_agent_rules` interpolates each
@@ -1158,7 +1155,7 @@ fn announce_orchestrator_paths(out: &mut dyn Output) {
     ));
     out.line(&format!(
         "Orchestrator skill:   {}/SKILL.md",
-        crate::init::EXPORTED_SKILL_DIRS[0]
+        crate::init::exported_skill_dirs()[0]
     ));
 }
 
