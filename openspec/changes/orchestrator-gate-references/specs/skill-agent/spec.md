@@ -105,6 +105,27 @@ Any requirement that the orchestrator (formerly supervisor) skill include, conta
 - **THEN** the procedure SHALL be found in `references/gates/spec-audit.md`
 - **AND** the requirement SHALL be satisfied
 
+### Requirement: The orchestrator Baseline step installs dependencies before recording
+
+The orchestrator `SKILL.md` Baseline step SHALL instruct the orchestrator, before recording the baseline, to make sure the checkout it runs the gate commands in (the root checkout or the verify worktree) has the project's dependencies installed the way the project's own setup or its `on_create` hook installs them, and, when the baseline fails for missing dependencies, to install them and re-run rather than record a red baseline. It SHALL name no package manager.
+
+#### Scenario: The Baseline step prepares the checkout first
+
+- **WHEN** the rendered orchestrator `SKILL.md` Baseline step is inspected
+- **THEN** it SHALL instruct making sure the root checkout or verify worktree has the project's dependencies installed, as the project's own setup or `on_create` hook does, before recording the baseline
+
+#### Scenario: A baseline that fails for missing dependencies is not recorded
+
+- **WHEN** the rendered orchestrator `SKILL.md` Baseline step is inspected
+- **THEN** it SHALL instruct installing the missing dependencies and re-running the baseline when it fails for missing dependencies
+- **AND** SHALL forbid recording that failing run as the baseline
+
+#### Scenario: The Baseline instruction names no package manager
+
+- **WHEN** the Baseline step is audited
+- **THEN** it SHALL contain no package-manager or build-tool command
+- **AND** the rendered orchestrator package SHALL pass the no-language-leak audit
+
 ### Requirement: A self-hosted session runs the binary built from the branch under test
 
 The orchestrator `SKILL.md` SHALL state that when the repository being orchestrated is the source of the git-paw that runs the session (a self-hosted or dogfood session), the session SHALL run the git-paw built from the branch under test, not a previously installed copy, because a stale binary silently brings back bugs the branch has already fixed. The instruction SHALL name no build tool or build command.

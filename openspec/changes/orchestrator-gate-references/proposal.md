@@ -45,6 +45,12 @@ top of the v0.20.0 packages.
   installed copy, and to have the human rebuild and restart on that build otherwise — a stale
   installed binary silently brings back bugs the branch has fixed. Phrased generically: it names no
   build tool or command (the project's own build supplies it).
+- **The Baseline step prepares the checkout's dependencies (PK-10).** A real v0.19.0 run installed
+  dependencies only per worktree (an `on_create` hook), so the root checkout could not run the gate
+  commands and the baseline was recorded red. The orchestrator `SKILL.md` Baseline step now says to
+  make sure the root checkout (or verify worktree) has the project's dependencies installed the way
+  the project's own setup or `on_create` hook does, and to install them and re-run rather than
+  record a baseline that failed for missing dependencies. It names no package manager.
 
 ## Capabilities
 
@@ -57,7 +63,8 @@ top of the v0.20.0 packages.
 - `skill-agent`: orchestrator package carries the audit gates as self-contained references, with
   Workflow pointers; delegation contract (verdict shape, orchestrator-only publishing, inline
   fallback); package-wide satisfaction of orchestrator-skill content requirements; self-hosted
-  sessions run the binary built from the branch under test.
+  sessions run the binary built from the branch under test; the Baseline step installs the
+  project's dependencies before recording (PK-10).
 - `mcp-server`: `get_skill` includes a package's references.
 
 ## Impact
@@ -66,7 +73,8 @@ top of the v0.20.0 packages.
   `assets/agent-skills/orchestrator.md`, 2,051 lines; `skill-package-layout` moves it): the bodies
   of Workflow steps 6 (Spec audit), 6a (Doc audit), 6b (Security audit) and the Spec Audit
   Procedure with its governance sub-step move out; a short "Delegating gates" section, per-gate
-  pointers, and the self-hosted-session check (in Bootstrap) are added.
+  pointers, the self-hosted-session check (in Bootstrap) and the dependency-preparation instruction
+  in Workflow step 1 (Baseline, PK-10) are added.
   `assets/agent-skills/orchestrator/references/gates/*.md` (new, rendered with the gate-command
   placeholders).
 - **Code:** `src/skills.rs` (render references; full-package render helper), registry entries,
@@ -80,7 +88,8 @@ top of the v0.20.0 packages.
   `SKILL.md` and are restated in each reference — `tests/governance_supervisor_boot.rs`,
   `tests/skill_stuck_shapes_prose.rs`, `tests/lang_agnostic_skill_audit.rs`) assert against the
   rendered package rather than `SKILL.md` alone; new tests for reference self-containment, the
-  Workflow pointers, the delegation section, the self-hosted-session check, and `get_skill`.
+  Workflow pointers, the delegation section, the self-hosted-session check, the Baseline
+  dependency instruction (`tests/orchestrator_skill_content.rs`), and `get_skill`.
 - **Docs:** `docs/src/user-guide/supervisor.md` (verification section: references + delegation),
   `docs/src/user-guide/skill-templates.md` (references), `docs/src/user-guide/mcp.md` (`get_skill`).
 - **Export-agnosticism:** references are new export surfaces; `skill-package-layout`'s registry-driven

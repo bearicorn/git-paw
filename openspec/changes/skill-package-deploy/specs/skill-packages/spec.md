@@ -56,6 +56,18 @@ Every `git paw start` — bare, spec-driven or supervised — SHALL, before any 
 - **WHEN** `git paw start --branches a` is run
 - **THEN** `.gitignore`, `AGENTS.md` and `.git-paw/config.toml` SHALL be byte-identical afterwards
 
+### Requirement: The root package refresh renders from the current config
+
+When `git paw start` refreshes the root packages, it SHALL compare each rendered file (`SKILL.md`, references) with a fresh render from the config as it is at that start, not with what `git paw init` rendered, and SHALL rewrite it when they differ, so a config change made after `git paw init`, such as a `[supervisor]` gate command, reaches the root packages on the next start.
+
+#### Scenario: A gate command configured after init reaches the root skill on the next start
+
+- **GIVEN** a repository where `git paw init` wrote `.git-paw/skills/orchestrator/SKILL.md` while no `[supervisor] test_command` was set, so the file renders it as `(not configured)`
+- **AND** `[supervisor] test_command = "make test"` was then added to `.git-paw/config.toml`
+- **WHEN** `git paw start --branches a` is run
+- **THEN** `.git-paw/skills/orchestrator/SKILL.md` SHALL contain `make test` where the skill's test-command placeholder renders
+- **AND** SHALL NOT render the test command as `(not configured)`
+
 ### Requirement: Every launch path installs the worktree's selected packages
 
 Every launch path that creates or re-attaches an agent worktree — bare, spec-driven and supervisor-mode `git paw start`, and `git paw add` — SHALL install exactly the packages selected for that worktree into `<worktree>/.git-paw/skills/` before the agent's boot prompt is submitted.
