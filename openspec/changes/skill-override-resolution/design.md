@@ -218,9 +218,7 @@ Rollback: revert. No on-disk state changes.
 - **Decided 2026-11-11: a linked worktree's `.agents/skills/` is never honoured** (D2/D6).
 - **Decided (2026-10-20): `cli-setup` is not overridable** (D9); an override directory for it is
   ignored with a doctor warning.
-- Should the standing HOME guard (`core-ci-hygiene` *Tests invoking git paw subcommands SHALL
-  override HOME and XDG_DATA_HOME*, archived with v0.17.0) also require removing
-  `XDG_CONFIG_HOME`? Recommendation: yes. It is now a main-spec requirement, so it can be
-  MODIFIED here (with its guard test) or in a small follow-up; not modified yet — a user decision.
-- Should an override's `references/` be honoured? They are text, not scripts. Recommendation: not
-  in this change; `skill-package-layout`'s boundary stands.
+- **Decided 2026-11-11:** the standing HOME guard also requires removing `XDG_CONFIG_HOME`, as an
+  ADDED `core-ci-hygiene` requirement enforced by the same convention test (task 2.5).
+- **Decided 2026-11-11:** an override's `references/` are not honoured; `skill-package-layout`'s
+  boundary stands.

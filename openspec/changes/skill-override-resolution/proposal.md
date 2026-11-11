@@ -56,6 +56,8 @@ override boundary; this change makes the overrides themselves real, with one ord
   still names the one-argument `skills::resolve("cli-setup")` informally; it is read as the
   two-argument call and left for the pre-freeze wording sweep.
 - `mcp-server`: ADDED — `get_skill` reports the production resolver's source.
+- `core-ci-hygiene`: ADDED — binary tests also remove `XDG_CONFIG_HOME`, enforced by the standing
+  convention test.
 - `preflight-diagnostics`: ADDED — doctor reports each bundled skill's source and warns on an
   ignored `cli-setup` override.
 
