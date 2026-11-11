@@ -36,24 +36,246 @@ use std::path::{Path, PathBuf};
 
 use crate::config::CustomCli;
 
-/// The embedded coordination skill, compiled into the binary.
+/// One file of a bundled skill package, embedded at compile time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundledFile {
+    /// Path relative to the package root (e.g. `"scripts/broker.sh"`).
+    pub path: &'static str,
+    /// Repository-relative path of the source file the content is embedded
+    /// from (e.g. `"assets/agent-skills/coordination/scripts/broker.sh"`).
+    pub source: &'static str,
+    /// The embedded file content.
+    pub content: &'static str,
+}
+
+impl BundledFile {
+    /// The file's name — its last path component, which is also the name a
+    /// helper script is deployed under in `.git-paw/scripts/`.
+    #[must_use]
+    pub fn file_name(&self) -> &'static str {
+        self.path.rsplit('/').next().unwrap_or(self.path)
+    }
+}
+
+/// Where a bundled package may be provisioned beyond the repository root.
 ///
-/// New embedded skills are added by adding a new `include_str!` constant
-/// and a corresponding match arm in [`embedded_default`].
-const COORDINATION_DEFAULT: &str = include_str!("../assets/agent-skills/coordination.md");
+/// The gate governs agent-worktree selection only (see
+/// [`packages_for_worktree`]); `git paw init` installs every package's
+/// helpers at the root regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisionGate {
+    /// Root only: never provisioned into an agent worktree. Its skill is
+    /// exported to `.git-paw/skills/` instead.
+    RootOnly,
+    /// Provisioned into an agent worktree when the broker is enabled.
+    BrokerEnabled,
+    /// Provisioned into an agent worktree when `docs_base_url` is explicitly
+    /// configured.
+    DocsBaseUrlConfigured,
+}
 
-/// The embedded orchestrator skill, compiled into the binary. Also served
-/// under its legacy name `supervisor` (see [`skill_name_candidates`]).
-const ORCHESTRATOR_DEFAULT: &str = include_str!("../assets/agent-skills/orchestrator.md");
+/// A bundled skill shipped as an agentskills.io package: a `SKILL.md` plus
+/// the scripts, references and assets the package owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundledPackage {
+    /// The package (and skill) name, equal to its directory name.
+    pub name: &'static str,
+    /// The package's `SKILL.md`.
+    pub skill_md: BundledFile,
+    /// Helper scripts under `scripts/`, in install order. Every package that
+    /// ships a helper lists the shared `_paw_common.sh` preamble first.
+    pub scripts: &'static [BundledFile],
+    /// Reference documents under `references/`.
+    pub references: &'static [BundledFile],
+    /// Assets under `assets/` (e.g. the boot-block templates).
+    pub assets: &'static [BundledFile],
+    /// Where the package is provisioned.
+    pub gate: ProvisionGate,
+}
 
-/// The embedded docs-fetch skill, compiled into the binary.
-const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch.md");
+impl BundledPackage {
+    /// Every file of the package — `SKILL.md`, scripts, references, assets.
+    pub fn files(&self) -> impl Iterator<Item = &BundledFile> {
+        std::iter::once(&self.skill_md)
+            .chain(self.scripts)
+            .chain(self.references)
+            .chain(self.assets)
+    }
 
-/// The embedded cli-setup skill, compiled into the binary.
+    /// The package's helper scripts other than the shared preamble.
+    pub fn helpers(&self) -> impl Iterator<Item = &BundledFile> {
+        self.scripts
+            .iter()
+            .filter(|f| f.file_name() != PAW_COMMON_SCRIPT)
+    }
+}
+
+/// File name of the shared shell preamble every helper sources.
+pub const PAW_COMMON_SCRIPT: &str = "_paw_common.sh";
+
+/// The shared shell preamble; one source, listed in every helper-shipping
+/// package's scripts.
+const PAW_COMMON: BundledFile = BundledFile {
+    path: "scripts/_paw_common.sh",
+    source: "assets/agent-skills/_shared/scripts/_paw_common.sh",
+    content: include_str!("../assets/agent-skills/_shared/scripts/_paw_common.sh"),
+};
+
+/// The registered bundled packages, in registry order.
 ///
-/// Carries the consent rules for `git paw setup-cli` — the only command that
-/// writes into an agent CLI's own settings file.
-const CLI_SETUP_DEFAULT: &str = include_str!("../assets/agent-skills/cli-setup.md");
+/// Order matters: [`crate::init::bundled_scripts`] installs scripts in this
+/// order (first occurrence of each), [`crate::init::export_skills`] writes the
+/// root-only packages in this order, and [`packages_for_worktree`] returns
+/// its selection in this order.
+static BUNDLED_PACKAGES: [BundledPackage; 4] = [
+    BundledPackage {
+        name: "orchestrator",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/orchestrator/SKILL.md",
+            content: include_str!("../assets/agent-skills/orchestrator/SKILL.md"),
+        },
+        scripts: &[
+            PAW_COMMON,
+            BundledFile {
+                path: "scripts/sweep.sh",
+                source: "assets/agent-skills/orchestrator/scripts/sweep.sh",
+                content: include_str!("../assets/agent-skills/orchestrator/scripts/sweep.sh"),
+            },
+        ],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    },
+    BundledPackage {
+        name: "coordination",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/coordination/SKILL.md",
+            content: include_str!("../assets/agent-skills/coordination/SKILL.md"),
+        },
+        scripts: &[
+            PAW_COMMON,
+            BundledFile {
+                path: "scripts/broker.sh",
+                source: "assets/agent-skills/coordination/scripts/broker.sh",
+                content: include_str!("../assets/agent-skills/coordination/scripts/broker.sh"),
+            },
+        ],
+        references: &[],
+        assets: &[
+            BundledFile {
+                path: "assets/boot-block.md",
+                source: "assets/agent-skills/coordination/assets/boot-block.md",
+                content: include_str!("../assets/agent-skills/coordination/assets/boot-block.md"),
+            },
+            BundledFile {
+                path: "assets/boot-block-mcp.md",
+                source: "assets/agent-skills/coordination/assets/boot-block-mcp.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/boot-block-mcp.md"
+                ),
+            },
+        ],
+        gate: ProvisionGate::BrokerEnabled,
+    },
+    BundledPackage {
+        name: "docs-fetch",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/docs-fetch/SKILL.md",
+            content: include_str!("../assets/agent-skills/docs-fetch/SKILL.md"),
+        },
+        scripts: &[
+            PAW_COMMON,
+            BundledFile {
+                path: "scripts/docs-fetch.sh",
+                source: "assets/agent-skills/docs-fetch/scripts/docs-fetch.sh",
+                content: include_str!("../assets/agent-skills/docs-fetch/scripts/docs-fetch.sh"),
+            },
+        ],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::DocsBaseUrlConfigured,
+    },
+    // Carries the consent rules for `git paw setup-cli` — the only command
+    // that writes into an agent CLI's own settings file. Ships no helper.
+    BundledPackage {
+        name: "cli-setup",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/cli-setup/SKILL.md",
+            content: include_str!("../assets/agent-skills/cli-setup/SKILL.md"),
+        },
+        scripts: &[],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    },
+];
+
+/// The compile-time registry of every bundled skill package — the single
+/// source of the bundled skill set for embedded resolution, `git paw init`,
+/// worktree provisioning, the `.git-paw/skills/` export, doctor and the
+/// `git paw setup-cli` grant table.
+#[must_use]
+pub fn bundled_packages() -> &'static [BundledPackage] {
+    &BUNDLED_PACKAGES
+}
+
+/// Looks up a registered bundled package by its name.
+#[must_use]
+pub fn bundled_package(name: &str) -> Option<&'static BundledPackage> {
+    BUNDLED_PACKAGES.iter().find(|p| p.name == name)
+}
+
+/// The inputs that decide which bundled packages an agent worktree receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorktreeInputs {
+    /// Whether the broker is enabled for the session.
+    pub broker_enabled: bool,
+    /// Whether `docs_base_url` is explicitly configured.
+    pub docs_base_url_configured: bool,
+}
+
+/// Decides which bundled packages an agent worktree receives, in registry
+/// order. Pure: no I/O. Root-only packages are never selected.
+#[must_use]
+pub fn packages_for_worktree(inputs: WorktreeInputs) -> Vec<&'static BundledPackage> {
+    BUNDLED_PACKAGES
+        .iter()
+        .filter(|p| match p.gate {
+            ProvisionGate::RootOnly => false,
+            ProvisionGate::BrokerEnabled => inputs.broker_enabled,
+            ProvisionGate::DocsBaseUrlConfigured => inputs.docs_base_url_configured,
+        })
+        .collect()
+}
+
+/// Resolves the skill text of the bundled package `name` when
+/// [`packages_for_worktree`] selects it for `inputs`, or `Ok(None)` when it
+/// does not.
+///
+/// # Errors
+///
+/// Returns the [`resolve`] error for a selected package.
+pub fn resolve_for_worktree(
+    inputs: WorktreeInputs,
+    name: &str,
+) -> Result<Option<SkillTemplate>, SkillError> {
+    if packages_for_worktree(inputs).iter().any(|p| p.name == name) {
+        resolve(name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Returns the content of the named file of the coordination package.
+fn coordination_asset(path: &str) -> &'static str {
+    bundled_package("coordination")
+        .and_then(|p| p.assets.iter().find(|f| f.path == path))
+        .map_or("", |f| f.content)
+}
 
 /// The governance section heading + intro sentence, compiled into the
 /// binary. See [`governance_section_paths`] for the bullet-list assembly
@@ -155,17 +377,11 @@ pub enum SkillError {
 
 /// Looks up the embedded default for a skill by name.
 ///
-/// Returns `Some(content)` if an embedded skill exists with that name,
-/// or `None` otherwise. New embedded skills are added by introducing a
-/// new `include_str!` constant and a new match arm here.
+/// Returns `Some(content)` — the registered package's `SKILL.md` — if a
+/// bundled package exists with that name, or `None` otherwise. New embedded
+/// skills are added by registering a package in [`bundled_packages`].
 fn embedded_default(skill_name: &str) -> Option<&'static str> {
-    match skill_name {
-        "coordination" => Some(COORDINATION_DEFAULT),
-        "orchestrator" => Some(ORCHESTRATOR_DEFAULT),
-        "docs-fetch" => Some(DOCS_FETCH_DEFAULT),
-        "cli-setup" => Some(CLI_SETUP_DEFAULT),
-        _ => None,
-    }
+    bundled_package(skill_name).map(|p| p.skill_md.content)
 }
 
 /// The canonical name of the orchestrator skill.
@@ -482,9 +698,9 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) ->
 /// Boot-block renderer taking an already-resolved `agent_id`.
 fn boot_block_for_id(agent_id: &str, broker_url: &str, mcp_capable: bool) -> String {
     let template = if mcp_capable {
-        include_str!("../assets/boot-block-mcp-template.md")
+        coordination_asset("assets/boot-block-mcp.md")
     } else {
-        include_str!("../assets/boot-block-template.md")
+        coordination_asset("assets/boot-block.md")
     };
 
     template
@@ -7263,5 +7479,114 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let tmpl = resolve("coordination").unwrap();
         assert!(tmpl.content.contains("Commands you must not run"));
         assert!(tmpl.content.contains(OPSX_REGION_BEGIN));
+    }
+
+    // --- skill-packages: worktree package selection ---
+
+    fn selection(broker_enabled: bool, docs_base_url_configured: bool) -> Vec<&'static str> {
+        packages_for_worktree(WorktreeInputs {
+            broker_enabled,
+            docs_base_url_configured,
+        })
+        .iter()
+        .map(|p| p.name)
+        .collect()
+    }
+
+    #[test]
+    fn worktree_package_selection_table() {
+        // (broker enabled, docs configured, expected selection)
+        let cases: [(bool, bool, &[&str]); 4] = [
+            (true, false, &["coordination"]),
+            (true, true, &["coordination", "docs-fetch"]),
+            (false, false, &[]),
+            (false, true, &["docs-fetch"]),
+        ];
+        for (broker, docs, expected) in cases {
+            assert_eq!(
+                selection(broker, docs),
+                expected,
+                "broker={broker} docs={docs}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_only_packages_never_reach_a_worktree() {
+        for broker in [false, true] {
+            for docs in [false, true] {
+                let selected = selection(broker, docs);
+                assert!(!selected.contains(&"orchestrator"), "{selected:?}");
+                assert!(!selected.contains(&"cli-setup"), "{selected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_for_worktree_resolves_only_selected_packages() {
+        let inputs = WorktreeInputs {
+            broker_enabled: true,
+            docs_base_url_configured: false,
+        };
+        assert!(
+            resolve_for_worktree(inputs, "coordination")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            resolve_for_worktree(inputs, "docs-fetch")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_for_worktree(inputs, "orchestrator")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // --- skill-packages: embedded resolution comes from the registry ---
+
+    #[test]
+    fn embedded_resolution_returns_each_registered_skill_md() {
+        let empty = tempfile::tempdir().unwrap();
+        let mut checked = 0;
+        for package in bundled_packages() {
+            let tmpl = resolve_with_config_dir(package.name, Some(empty.path())).unwrap();
+            if tmpl.source != Source::Embedded {
+                // A repo-level `.agents/skills/` override shadows this name.
+                continue;
+            }
+            let (_, body) = parse_standardized_metadata(package.skill_md.content).unwrap();
+            assert_eq!(tmpl.content, body, "{}", package.name);
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no package resolved from the embedded registry"
+        );
+    }
+
+    #[test]
+    fn boot_blocks_render_from_the_coordination_package_assets() {
+        let coordination = bundled_package("coordination").unwrap();
+        for (mcp, path) in [
+            (false, "assets/boot-block.md"),
+            (true, "assets/boot-block-mcp.md"),
+        ] {
+            let template = coordination
+                .assets
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap()
+                .content;
+            assert!(!template.is_empty());
+            assert_eq!(
+                build_boot_block("feat/x", "http://b", mcp),
+                template
+                    .replace("{{BRANCH_ID}}", "feat-x")
+                    .replace("{{GIT_PAW_BROKER_URL}}", "http://b")
+            );
+        }
     }
 }

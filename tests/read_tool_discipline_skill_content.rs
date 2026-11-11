@@ -4,13 +4,12 @@
 //! pinning the `skill-agent` capability's file-reading and scratch-file
 //! discipline into the bundled coordination skill
 //! (`### Prefer native read tools over shell pipelines` in
-//! `assets/agent-skills/coordination.md`), following the pattern established
+//! `assets/agent-skills/coordination/SKILL.md`), following the pattern established
 //! in `tests/commit_discipline_skill_content.rs`.
 
-use std::fs;
-
 fn coordination_skill() -> String {
-    fs::read_to_string("assets/agent-skills/coordination.md")
+    git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path")
 }
 

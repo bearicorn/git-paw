@@ -3,29 +3,29 @@
     {
       "compatibility": "git-paw v0.5.0+",
       "description": "Coordination skills for git-paw agents to communicate via the broker system",
-      "id": "assets/agent-skills/coordination.md",
+      "id": "assets/agent-skills/coordination/SKILL.md",
       "license": "MIT",
       "metadata": null,
       "name": "coordination",
-      "source": "assets/agent-skills/coordination.md"
+      "source": "assets/agent-skills/coordination/SKILL.md"
     },
     {
       "compatibility": "git-paw v0.10.0+",
       "description": "Consult git-paw's documentation on demand via the bundled docs-fetch helper",
-      "id": "assets/agent-skills/docs-fetch.md",
+      "id": "assets/agent-skills/docs-fetch/SKILL.md",
       "license": "MIT",
       "metadata": null,
       "name": "docs-fetch",
-      "source": "assets/agent-skills/docs-fetch.md"
+      "source": "assets/agent-skills/docs-fetch/SKILL.md"
     },
     {
       "compatibility": "git-paw v0.3.0+",
       "description": "Orchestrate a git-paw session from your own agent session - monitor the coding agents, verify their work through the five gates, and merge their branches",
-      "id": "assets/agent-skills/orchestrator.md",
+      "id": "assets/agent-skills/orchestrator/SKILL.md",
       "license": "MIT",
       "metadata": null,
       "name": "orchestrator",
-      "source": "assets/agent-skills/orchestrator.md"
+      "source": "assets/agent-skills/orchestrator/SKILL.md"
     },
     {
       "compatibility": "git-paw (Rust, cargo, tmux)",

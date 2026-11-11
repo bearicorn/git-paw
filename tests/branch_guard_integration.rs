@@ -212,8 +212,10 @@ fn install_git_hooks_is_idempotent_no_duplicate_blocks() {
 
 #[test]
 fn coordination_skill_teaches_stay_inside_your_worktree() {
-    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agent-skills/coordination.md");
-    let body = fs::read_to_string(skill).expect("read coordination.md");
+    let body = git_paw::skills::bundled_package("coordination")
+        .expect("coordination package is registered")
+        .skill_md
+        .content;
     assert!(
         body.contains("### Stay inside your worktree"),
         "coordination skill must include the 'Stay inside your worktree' section"

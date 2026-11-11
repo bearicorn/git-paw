@@ -17,6 +17,9 @@
 //! deterministic-id scheme* is covered here too, as a parity test against
 //! `LearningRecord::deterministic_id`.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -49,12 +52,9 @@ fn init_git_repo(dir: &Path) {
 /// Copies the bundled helpers (and the preamble they source) into
 /// `<repo>/.git-paw/scripts/`, mirroring `git paw init`'s co-deployment.
 fn install_helpers(repo: &Path) -> (PathBuf, PathBuf) {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
     let dst = repo.join(".git-paw/scripts");
-    fs::create_dir_all(&dst).expect("mk scripts dir");
-    for name in ["_paw_common.sh", "broker.sh", "sweep.sh"] {
-        fs::copy(assets.join(name), dst.join(name)).unwrap_or_else(|e| panic!("copy {name}: {e}"));
-    }
+    packages::install_package("coordination", &dst);
+    packages::install_package("orchestrator", &dst);
     (dst.join("broker.sh"), dst.join("sweep.sh"))
 }
 
@@ -485,10 +485,9 @@ fn a_non_loopback_broker_url_override_is_ignored() {
 /// Scenario "Every broker call in the bundled helpers is bounded".
 #[test]
 fn every_broker_curl_in_the_helpers_passes_the_bounds() {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
     let mut unbounded = Vec::new();
     for name in ["_paw_common.sh", "broker.sh", "sweep.sh"] {
-        let body = fs::read_to_string(assets.join(name)).expect("read helper");
+        let body = packages::script(name);
         for (n, line) in body.lines().enumerate() {
             let code = line.trim_start();
             if code.starts_with('#') || !code.contains("curl ") {

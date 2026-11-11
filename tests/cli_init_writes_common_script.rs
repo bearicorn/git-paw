@@ -3,6 +3,9 @@
 //! Mirrors `cli_init_writes_broker_script` for the preamble (`core-init` /
 //! "Init installs the shared shell preamble").
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 use std::fs;
 use std::process::Command as StdCommand;
 use std::time::Duration;
@@ -125,10 +128,7 @@ fn init_overwrites_existing_common_script() {
         !content.contains("# stale local content"),
         "init should have overwritten the local stub"
     );
-    let bundled = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/_paw_common.sh"),
-    )
-    .expect("read bundled _paw_common.sh");
+    let bundled = packages::script("_paw_common.sh");
     assert_eq!(
         content, bundled,
         "the deployed preamble should be the bundled content verbatim"

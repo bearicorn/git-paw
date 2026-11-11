@@ -1,7 +1,7 @@
 # Supervisor
 
 This chapter mirrors the user-facing prose for the bundled orchestrator
-skill (`assets/agent-skills/orchestrator.md`, exported to
+skill (`assets/agent-skills/orchestrator/SKILL.md`, exported to
 `.git-paw/skills/orchestrator/SKILL.md`; `supervisor` remains an alias of its
 name) — the doctrine the orchestrator runs against in supervisor mode. Sections
 here document the same rules the skill teaches, so users reading the mdBook can
@@ -1512,7 +1512,7 @@ a transient timeout no longer loses work:
 Each successful recovery emits a `recovery_cycles` `agent.learning`
 record, so recurrent timeouts surface in the learnings output. See the
 "Stream-timeout recovery" section of the bundled
-`assets/agent-skills/supervisor.md` skill for the full doctrine, and
+`assets/agent-skills/orchestrator/SKILL.md` skill for the full doctrine, and
 [Learnings Mode](learnings.md) for how the `recovery_cycles` records are
 aggregated.
 

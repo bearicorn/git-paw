@@ -72,7 +72,7 @@ openspec/changes/_release-notes/
 .git-paw/session-summary.md
 
 # Bundled helpers (sweep.sh/broker.sh/docs-fetch.sh) are provisioned into
-# .git-paw/scripts/ by `git paw init` from assets/scripts/ — never tracked.
+# .git-paw/scripts/ by `git paw init` from assets/agent-skills/*/scripts/ — never tracked.
 .git-paw/scripts/*
 
 # Root-level operator scratch logs (drive/sweep/verify/docbuild/baseline runs)

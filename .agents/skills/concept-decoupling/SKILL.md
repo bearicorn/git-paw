@@ -61,7 +61,7 @@ files call its API.
 - **Deep:** the tool's model is baked into unrelated modules and into persisted state. This is
   what blocks a swap.
 
-Grep the model-leaking symbols across `src/` *and* `assets/scripts/` (the bundled shell helpers
+Grep the model-leaking symbols across `src/` *and* `assets/agent-skills/<pkg>/scripts/` (the bundled shell helpers
 read the same state). For tmux: `pane_current_path`, `pane_index`, hand-built
 `"{session}:0.{n}"` targets, `send-keys` / `capture-pane` / `pipe-pane` spawned outside
 `src/tmux/`, the persisted `pane_index` in the session file, pane-keyed claim files, and
@@ -169,7 +169,7 @@ must become a type end to end *before* the thing it describes can be removed.
 
 - **State:** a leaked persisted field (e.g. `pane_index` in the session file) is a back-compat
   obligation — keep it additive and loadable.
-- **Scripts:** `assets/scripts/` read the same files and HTTP shapes; change them together and
+- **Scripts:** the package helpers under `assets/agent-skills/<pkg>/scripts/` read the same files and HTTP shapes; change them together and
   keep the parity tests.
 - **Tests:** a fake per port replaces per-call fakes.
 - **Exhaustive matches and struct literals:** follow the AGENTS.md enum-variant ripple checklist —

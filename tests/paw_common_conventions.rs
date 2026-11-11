@@ -1,4 +1,4 @@
-//! Drift guard for the shared shell preamble `assets/scripts/_paw_common.sh`.
+//! Drift guard for the shared shell preamble `_paw_common.sh`.
 //!
 //! Mirrors `sweep_sh_conventions` / `broker_sh_conventions` for the
 //! de-duplication contract (`core-init` / "Init installs the shared shell
@@ -6,6 +6,9 @@
 //! re-define a function the preamble provides. Without this guard a later edit
 //! can silently reintroduce an inline copy — the exact drift this change
 //! retired — and nothing would fail until the two copies diverged in behavior.
+
+#[path = "helpers/packages.rs"]
+mod packages;
 
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
@@ -27,16 +30,15 @@ const SHARED_FUNCTIONS: &[&str] = &[
     "slugify",
 ];
 
-fn script_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("scripts")
-        .join(name)
+fn read_script(name: &str) -> String {
+    packages::script(name).to_string()
 }
 
-fn read_script(name: &str) -> String {
-    let path = script_path(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+/// Writes the bundled script `name` alone into `dir`; returns its path.
+fn write_script(name: &str, dir: &Path) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, packages::script(name)).expect("write script");
+    path
 }
 
 /// Returns the script's non-comment lines, so a comment mentioning a function
@@ -47,8 +49,7 @@ fn code_lines(body: &str) -> impl Iterator<Item = &str> {
 
 /// Scenario `Bundled helpers source the shared preamble and do not re-define
 /// it`, part (a): each helper sources `_paw_common.sh`, resolved relative to
-/// its own location so the same line works from `assets/scripts/` and from a
-/// deployed `.git-paw/scripts/`.
+/// its own location so the same line works wherever its package is installed.
 #[test]
 fn every_helper_sources_the_shared_preamble() {
     for helper in HELPERS {
@@ -68,8 +69,8 @@ fn every_helper_sources_the_shared_preamble() {
         assert!(
             resolves_relative,
             "{helper} must resolve _paw_common.sh relative to its own location \
-             (`$(dirname \"${{BASH_SOURCE[0]:-$0}}\")`), so the source works from both \
-             assets/scripts/ and a deployed .git-paw/scripts/"
+             (`$(dirname \"${{BASH_SOURCE[0]:-$0}}\")`), so the source works from \
+             any installed location of the helper"
         );
     }
 }
@@ -119,8 +120,7 @@ fn the_preamble_defines_every_shared_function() {
 fn a_helper_without_the_preamble_fails_loudly() {
     for helper in HELPERS {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let lone = tmp.path().join(helper);
-        std::fs::copy(script_path(helper), &lone).expect("copy helper");
+        let lone = write_script(helper, tmp.path());
 
         let out = script_cmd::bash()
             .arg(&lone)
@@ -143,8 +143,9 @@ fn a_helper_without_the_preamble_fails_loudly() {
 /// quote-tracking landmine that a move between files can easily trip.
 #[test]
 fn all_bundled_scripts_parse_under_bash_n() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
     for script in ALL_SCRIPTS {
-        let path = script_path(script);
+        let path = write_script(script, tmp.path());
         let out = script_cmd::bash()
             .arg("-n")
             .arg(&path)
@@ -156,4 +157,58 @@ fn all_bundled_scripts_parse_under_bash_n() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// `core-init` scenario `A package installed into an arbitrary directory
+/// runs`: each helper-shipping package's scripts, installed together into an
+/// empty temporary directory, run from there by sourcing the sibling preamble.
+#[test]
+fn a_package_installed_into_an_arbitrary_directory_runs() {
+    for package in git_paw::skills::bundled_packages() {
+        for helper in package.helpers() {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            packages::install_package(package.name, tmp.path());
+            let out = script_cmd::bash()
+                .arg(tmp.path().join(helper.file_name()))
+                .arg("--help")
+                // The preamble resolves the project root at source time.
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("run installed helper");
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                out.status.success(),
+                "{} from package {} must run from an arbitrary install dir; stderr:\n{stderr}",
+                helper.file_name(),
+                package.name
+            );
+            assert!(
+                !stderr.contains("_paw_common.sh"),
+                "{} must find its sibling preamble; stderr:\n{stderr}",
+                helper.file_name()
+            );
+        }
+    }
+}
+
+/// `core-init` scenario `The preamble has one source`: exactly one
+/// `_paw_common.sh` source file exists in the bundled asset tree.
+#[test]
+fn the_preamble_has_one_source() {
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.file_name().is_some_and(|n| n == "_paw_common.sh") {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+        &mut found,
+    );
+    assert_eq!(found.len(), 1, "one preamble source expected: {found:?}");
 }

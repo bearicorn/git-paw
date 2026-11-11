@@ -2,7 +2,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! that pin the tip-resolution and merge-base verification guidance into the
-//! bundled `assets/agent-skills/orchestrator.md`, so a future edit cannot
+//! bundled `assets/agent-skills/orchestrator/SKILL.md`, so a future edit cannot
 //! silently re-introduce the stale-`$SHA` snapshot bug that produced the
 //! v0.9.0 doc-audit false negative.
 //!
@@ -10,12 +10,11 @@
 //! grep-style assertions are the sole enforcement for the modified
 //! `agent-skills` and `supervisor-skill-discipline` requirements.
 
-use std::fs;
-
 /// Raw contents of the bundled supervisor skill — used for the exact recipe
 /// line checks where shell quoting (`"$TIP"` vs `"$SHA"`) matters.
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

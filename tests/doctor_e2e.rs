@@ -1105,3 +1105,30 @@ fn undo_and_reapply_converge_when_entries_pre_existed() {
     let (status, detail) = setup_status(&sandbox);
     assert_eq!(status, "ok", "undo + re-apply converges: {detail}");
 }
+
+/// skill-packages: *A registered helper is installed by init and checked by
+/// doctor* — every script of every registered bundled package is installed
+/// by `git paw init` and reported in doctor's bundled-scripts group.
+#[test]
+fn every_registered_helper_is_installed_by_init_and_reported_by_doctor() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (_, document) = sandbox.doctor_json();
+
+    let helpers: Vec<&str> = git_paw::skills::bundled_packages()
+        .iter()
+        .flat_map(|p| p.scripts)
+        .map(git_paw::skills::BundledFile::file_name)
+        .collect();
+    assert!(!helpers.is_empty(), "the registry lists helper scripts");
+    for name in helpers {
+        let installed = sandbox.repo.join(".git-paw").join("scripts").join(name);
+        assert!(installed.is_file(), "init should install {name}");
+        assert!(
+            checks(&document)
+                .iter()
+                .any(|c| c["group"] == "Bundled scripts" && c["name"] == name),
+            "doctor should report {name}; document: {document}"
+        );
+    }
+}

@@ -1,4 +1,4 @@
-//! Convention enforcement for `assets/scripts/broker.sh`.
+//! Convention enforcement for the bundled `broker.sh` helper.
 //!
 //! Mirrors `sweep_sh_conventions` for the agent-side helper: the
 //! stdin-claiming pipe shape (`python3 - <<`, `sh - <<`, etc.) must not be
@@ -9,7 +9,8 @@
 //! argument and leaves stdin free for the pipe (`agent-broker-helper` §
 //! "Helper convention discipline").
 
-use std::path::Path;
+#[path = "helpers/packages.rs"]
+mod packages;
 
 /// Patterns whose presence in `broker.sh` would re-introduce the
 /// pipe/heredoc stdin collision.
@@ -52,21 +53,16 @@ fn scan(body: &str) -> Vec<String> {
 
 #[test]
 fn broker_sh_has_no_stdin_claiming_pipe_pattern() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("scripts")
-        .join("broker.sh");
-    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", path.display());
-    });
+    let path = packages::script_source("broker.sh");
+    let body = packages::script("broker.sh");
 
-    let hits = scan(&body);
+    let hits = scan(body);
 
     assert!(
         hits.is_empty(),
         "broker.sh contains stdin-claiming pipe pattern(s); use `-c \"$(cat <<'EOF' ... EOF)\"` \
          instead of `interpreter - <<` to keep stdin free for upstream pipes.\n  in {}:\n{}",
-        path.display(),
+        path,
         hits.join("\n")
     );
 }

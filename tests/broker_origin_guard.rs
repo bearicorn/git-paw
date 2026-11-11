@@ -8,6 +8,8 @@
 //! bundled shell helpers, the post-commit hook, and the Rust HTTP clients —
 //! still passes the guard.
 
+#[path = "helpers/packages.rs"]
+mod packages;
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -176,12 +178,8 @@ fn fixture_repo(dir: &Path, port: u16) {
     )
     .expect("write config.toml");
 
-    for script in ["_paw_common.sh", "broker.sh", "sweep.sh"] {
-        let src = repo_root().join("assets/scripts").join(script);
-        let dst = paw.join("scripts").join(script);
-        fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {script}: {e}"));
-        make_executable(&dst);
-    }
+    packages::install_package("coordination", &paw.join("scripts"));
+    packages::install_package("orchestrator", &paw.join("scripts"));
 
     fs::write(dir.join("seed.txt"), "seed\n").expect("write seed file");
     run(&["add", "seed.txt"]);
@@ -752,24 +750,20 @@ fn rust_clients_derive_the_host_header_from_the_broker_url() {
 /// accepts an absent `Origin` and refuses every non-loopback one.
 #[test]
 fn no_in_tree_client_sets_an_origin_header() {
-    let mut files: Vec<PathBuf> = rust_sources();
-    for dir in ["assets/scripts", "assets/hooks"] {
-        for entry in fs::read_dir(repo_root().join(dir))
-            .expect("read assets dir")
-            .flatten()
-        {
-            files.push(entry.path());
-        }
-    }
-    for path in files {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
+    let mut files: Vec<(String, String)> = rust_sources()
+        .into_iter()
+        .filter_map(|path| {
+            let text = fs::read_to_string(&path).ok()?;
+            Some((path.display().to_string(), text))
+        })
+        .collect();
+    files.extend(bundled_shell_clients());
+    for (path, text) in files {
         for (index, line) in text.lines().enumerate() {
             assert!(
                 !line.contains("Origin: "),
                 "{}:{} sets an Origin header, which the listener guard refuses: {}",
-                path.display(),
+                path,
                 index + 1,
                 line.trim()
             );
@@ -781,19 +775,26 @@ fn no_in_tree_client_sets_an_origin_header() {
 /// broker URL, which is what keeps the helpers inside the accepted set.
 #[test]
 fn bundled_shell_clients_do_not_override_the_host_header() {
-    for dir in ["assets/scripts", "assets/hooks"] {
-        for entry in fs::read_dir(repo_root().join(dir))
-            .expect("read assets dir")
-            .flatten()
-        {
-            let Ok(text) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            assert!(
-                !text.contains("Host:"),
-                "{} overrides the Host header",
-                entry.path().display()
-            );
+    for (path, text) in bundled_shell_clients() {
+        assert!(!text.contains("Host:"), "{path} overrides the Host header");
+    }
+}
+
+/// Every bundled shell client as `(label, text)`: the helper scripts of every
+/// registered skill package plus the git hooks under `assets/hooks/`.
+fn bundled_shell_clients() -> Vec<(String, String)> {
+    let mut clients: Vec<(String, String)> = git_paw::skills::bundled_packages()
+        .iter()
+        .flat_map(|p| p.scripts)
+        .map(|f| (f.source.to_string(), f.content.to_string()))
+        .collect();
+    for entry in fs::read_dir(repo_root().join("assets/hooks"))
+        .expect("read assets/hooks")
+        .flatten()
+    {
+        if let Ok(text) = fs::read_to_string(entry.path()) {
+            clients.push((entry.path().display().to_string(), text));
         }
     }
+    clients
 }
