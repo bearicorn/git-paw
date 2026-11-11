@@ -795,7 +795,7 @@ notice and touches nothing in the tree.
 
 **Built 2026-11-10 as the v0.18.0 dogfood.** git-paw v0.18.0 built this cycle on itself: an
 external Claude Code session was the orchestrator, and the workers ran Opus 5.5 at medium effort.
-The findings are DF-01 to DF-52; those not fixed here are carried into v0.20.0, v0.21.0, v0.23.0
+The findings are DF-01 to DF-57; those not fixed here are carried into v0.20.0, v0.21.0, v0.23.0
 and v0.24.0 below.
 - **Verification:** the five gates, plus a fork-based regression review and adversarial review of
   each change before merging. They earned their cost: on the first merge alone they found three
@@ -1126,7 +1126,11 @@ Stale premises found while speccing:
 - **Broker event semantics:**
   - **DF-35, DF-50** — a rebase re-publishes every commit as `agent.artifact committed` plus
     `supervisor.verify-now`, and an orchestrator's commit in a worker's worktree is published as
-    that agent's.
+    that agent's. It recurred on every orchestrator rebase of the v0.19 merges (DF-56: 24 and 27
+    false events), and one 27-commit rebase stopped on the worktree's `index.lock`, held by the
+    replayed hook or the worker CLI's status polling.
+  - **DF-54** — `sweep.sh` run from inside a worker's worktree finds no session: discovery reads the
+    current directory's `.git-paw/`, not the main repository root's.
   - **DF-21** — `verify-now` fires per section commit, and there is no "change complete" signal.
   - **DF-37, DF-40** — there is no "branch under verification, frozen" signal, so workers amend
     their branch while the orchestrator's gates run on it.
@@ -1377,7 +1381,11 @@ retirement):
   re-escalates overlaps the orchestrator already ruled on, with noise that scales with the
   struct-literal ripple.
 - **DF-51** — `/opsx:propose` leaves an untracked `openspec/config.yaml` that blocks `git paw
-  remove`.
+  remove`. It recurred when removing a merged worker (DF-57), which needed `--force`.
+- **DF-55** — a worker's own test runs trip a permission prompt on every compound command (a
+  redirect to a path built from a variable, or a trailing `; echo "x $?"`): about 12 prompts in
+  one review round. The bare-call rule shipped in v0.19 covers only helper calls; the durable fix
+  is CLI-side permission matching of compound commands.
 - **DF-49** — add a release-time `openspec validate --specs --strict` gate, so defects in the main
   specs surface before they block an archive.
 
