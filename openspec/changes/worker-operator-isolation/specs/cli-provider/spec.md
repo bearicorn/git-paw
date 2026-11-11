@@ -13,9 +13,9 @@ Each provider family SHALL declare its operator-isolation launch environment and
 
 #### Scenario: A family without isolation facts contributes nothing
 
-- **GIVEN** a CLI resolved to the `generic` family
-- **WHEN** its worker pane command is built at `agent_approval = "full-auto"` with no `args`
-- **THEN** the command SHALL be exactly the quoted executable
+- **GIVEN** `[clis.agent] command = "/opt/agent"`, `args = "--quiet"` and no `family` (so `generic`)
+- **WHEN** its worker pane command is built at `agent_approval = "manual"`
+- **THEN** the command SHALL be exactly `/opt/agent --quiet`, with no assignment before the executable
 
 ### Requirement: Operator isolation is placed by the launch builder
 
@@ -24,12 +24,12 @@ The launch builder SHALL write the isolation environment as `NAME=value` assignm
 #### Scenario: A claude worker is launched isolated
 
 - **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, and `agent_approval = "auto"`
-- **WHEN** a worker using `opus` is launched
-- **THEN** its pane command SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude --model opus --setting-sources project,local --permission-mode acceptEdits` followed by its session-id arguments
+- **WHEN** the pane command of a worker using `opus` is built for a fresh launch assigned the session id `abc`
+- **THEN** it SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id abc`
 
 #### Scenario: Recovery keeps the isolation
 
-- **GIVEN** a stopped session whose entry has `cli = "claude"` and a recorded session id
+- **GIVEN** a stopped session whose entry has `cli = "claude"`, no `[clis.claude]` entry, and a recorded session id
 - **WHEN** the session is recovered
 - **THEN** the pane command SHALL start with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude`
 - **AND** it SHALL contain `--setting-sources project,local` before `--resume <id>`

@@ -21,9 +21,12 @@ passed `None`, so the flat `<config_dir>/git-paw/agent-skills/<name>.md` overrid
 that fallback, so the user level has been unreachable in production since then. Only
 `skills::tests` passes `Some` (one test).
 
-Production callers: `commands/start.rs` (bare path and `launch_spec_session`),
-`commands/add.rs` (coordination, docs-fetch), `commands/supervisor.rs` (supervisor, coordination,
-docs-fetch), `mcp/tools/project.rs::get_skill`. `get_skill` already maps `Source` to
+Production callers: `commands/start.rs` (bare path and `launch_spec_session`, coordination),
+`commands/add.rs` (coordination, docs-fetch), `commands/supervisor.rs` (orchestrator boot context,
+coordination, docs-fetch), `init::export_skills` (orchestrator and cli-setup, written to
+`.git-paw/skills/` by `run_init` and by the supervised launch), `mcp/tools/project.rs::get_skill`.
+`commands/launch.rs::attach_agent` renders the templates `add` and the supervisor launch resolved
+and resolves none itself. `get_skill` already maps `Source` to
 `standard | user_override | embedded`, but resolves from the process cwd rather than its own
 `ctx.root`, so `git paw mcp --repo <path>` never sees that repository's overrides.
 
@@ -31,7 +34,8 @@ docs-fetch), `mcp/tools/project.rs::get_skill`. `get_skill` already maps `Source
 
 | Where | Order |
 |---|---|
-| **Spec**: `skill-agent` *Skill resolution order*, *User override directory may be absent*, *Unreadable user override is a hard error* (and its Purpose line, which v0.18.0 keeps) | v0.17.0: user flat file `<config_dir>/git-paw/agent-skills/<name>.md` → embedded. No repository level. Names `dirs::config_dir()`, which is the excluded crate. v0.18.0 `orchestrator-skill-export` restates *Skill resolution order* as the production order: `.agents/skills/` (cwd walk, ≤5 levels) → embedded, no user level. |
+| **Spec**: `skill-agent` *Skill resolution order* (main spec, as v0.18.0 `orchestrator-skill-export` restated it) | The production order: `.agents/skills/` (cwd and up to four ancestors) → embedded, no user level. |
+| **Spec**: `skill-agent` *User override directory may be absent*, *Unreadable user override is a hard error*, and the `## Purpose` line | Still the pre-v0.4.0 contract: a user flat file `<config_dir>/git-paw/agent-skills/<name>.md` → embedded ("user override then embedded default"). Names `dirs::config_dir()`, which is the excluded crate. |
 | **Spec**: `mcp-server` *Project knowledge tools* | `.agents/skills/` → user override → embedded |
 | **Docs**: `user-guide/skill-templates.md` *Skill Resolution* | `.agents/skills/` (walk up from cwd) → embedded. Its *Migration* section tells users to move skills **out of** `~/.config/git-paw/agent-skills/`. |
 | **Docs**: `user-guide/coordination.md` ("a user override at `<config_dir>/git-paw/agent-skills/coordination.md` wins"), `architecture.md` and `mcp.md` (`.agents/skills/` → user → embedded) | inconsistent with each other and with the above |
@@ -106,8 +110,9 @@ loader path.
   no git. It applies D1, D5 and the alias rule.
 - `resolve(name, repo_root: &Path)` is the shell. It builds the roots from
   `git::main_worktree_root(repo_root)` and `crate::dirs::config_dir()` and calls `resolve_from`.
-  Every production call site uses it, including the ones `skill-package-deploy` and v0.18.0
-  `orchestrator-skill-export` add (init install, worktree provisioning, orchestrator export).
+  Every production call site uses it, including v0.18.0's `init::export_skills` (the
+  `.git-paw/skills/` export) and the ones `skill-package-deploy` adds (init install, worktree
+  provisioning).
 - `resolve_with_config_dir` is removed. A source-audit guard test fails if any file under `src/`
   other than `src/skills.rs` names `resolve_from` or builds a `SkillRoots` outside `#[cfg(test)]`.
   That is the regression that went unnoticed for six months.
@@ -148,8 +153,10 @@ does), never approval. The one skill whose instructions are about granting permi
 
 ### D7 — Visibility
 
-`get_skill` resolves through `resolve(name, &ctx.root)`, so `source` reports what a launch from
-that repository would inject. Doctor adds one check, `skill sources`, listing each registered
+`get_skill` resolves through `resolve(name, &ctx.root)`, so `source` reports the level a launch or
+export from that repository would use. (The rendered content stays as v0.18.0 shipped it — the
+orchestrator skill as exported, other skills with gate commands unset — so the requirement pins
+the resolved template and source, not byte equality with a launch.) Doctor adds one check, `skill sources`, listing each registered
 package's source (`embedded`, `repo <path>` or `user <path>`). It is ✓ (informational) when all
 resolve and ✗ naming the override path when any fails, because `start` would fail the same way. It
 sits beside the package checks in the bundled-scripts group. Doctor stays read-only.
@@ -213,8 +220,9 @@ Rollback: revert. No on-disk state changes.
   Recommended as specified.
 - **Decided (2026-10-20): `cli-setup` is not overridable** (D9); an override directory for it is
   ignored with a doctor warning.
-- Should the v0.17.0 standing HOME guard (`core-ci-hygiene`) also require removing
-  `XDG_CONFIG_HOME`? Recommendation: yes, as a small follow-up once v0.17.0 archives; not
-  modified here because that requirement is still in flight.
+- Should the standing HOME guard (`core-ci-hygiene` *Tests invoking git paw subcommands SHALL
+  override HOME and XDG_DATA_HOME*, archived with v0.17.0) also require removing
+  `XDG_CONFIG_HOME`? Recommendation: yes. It is now a main-spec requirement, so it can be
+  MODIFIED here (with its guard test) or in a small follow-up; not modified yet — a user decision.
 - Should an override's `references/` be honoured? They are text, not scripts. Recommendation: not
   in this change; `skill-package-layout`'s boundary stands.

@@ -2,19 +2,26 @@
 
 The bundled skill set today (symbols, not line numbers):
 
-- `src/skills.rs` — `COORDINATION_DEFAULT` / `SUPERVISOR_DEFAULT` / `DOCS_FETCH_DEFAULT`, plus
-  v0.17.0's `cli-setup` default (`include_str!("../assets/agent-skills/*.md")`),
-  `embedded_default` (a four-arm `match` once `cli-setup` is in),
-  `build_boot_block` (`include_str!` of `assets/boot-block-template.md` /
+- `src/skills.rs` — `COORDINATION_DEFAULT` / `ORCHESTRATOR_DEFAULT` / `DOCS_FETCH_DEFAULT` /
+  `CLI_SETUP_DEFAULT` (`include_str!("../assets/agent-skills/*.md")`),
+  `embedded_default` (a four-arm `match`),
+  `build_boot_block` → `boot_block_for_id` (`include_str!` of `assets/boot-block-template.md` /
   `assets/boot-block-mcp-template.md`). The loader for directory-form skills
   (`load_skill_from_directory`, `parse_standardized_metadata`) already exists and already collects
   `scripts/`, `references/`, `assets/` as `resource_paths` — but only for `.agents/skills/` and the
   config-dir override, never for the embedded defaults.
 - `src/init.rs` — `COMMON_SCRIPT` / `SWEEP_SCRIPT` / `BROKER_SCRIPT` / `DOCS_FETCH_SCRIPT`,
-  `bundled_scripts()` (consumed by doctor), `run_init` (four hand-written install blocks) and
+  `bundled_scripts()` (consumed by doctor, `cli_setup`, and `refresh_root_scripts`, which
+  `run_init` and — since v0.19.0 — every supervised launch call to install the root helpers),
   `provision_worktree_helpers(root, broker_enabled, docs_base_url_configured)` (its own gate
-  logic). v0.17.0 `bundled-helper-discovery` moves the call into `worktree_provision::provision_worktree`.
-- `src/doctor.rs` — `check_bundled_scripts` over `init::bundled_scripts()`.
+  logic), and `EXPORTED_SKILL_DIRS` / `export_skills` (v0.18.0: writes the root-only
+  `orchestrator` and `cli-setup` skills to `.git-paw/skills/`, from `run_init` and the supervised
+  launch). v0.17.0 `bundled-helper-discovery` calls `provision_worktree_helpers` on every launch
+  path: `commands/start.rs` (bare and `launch_spec_session`) and `commands/launch.rs::attach_agent`
+  (used by `add` and the supervisor launch). `worktree_provision::provision_worktree` handles only
+  env files, ports and hooks.
+- `src/doctor.rs` — `check_bundled_scripts` over `init::bundled_scripts()`;
+  `src/cli_setup/doctor.rs` — the helper drift check (`helper_paths` / `helper_state`) over the same.
 - `src/cli_setup/facts.rs` (v0.17.0 `cli-setup-consent`) — the `setup-cli` grant table, one row
   per helper with a guard that every bundled script has a row, a fourth listing of the set. (The
   classifier's `MANAGED_HELPER_SCRIPTS`, an earlier copy, is deleted by v0.17.0
@@ -22,10 +29,13 @@ The bundled skill set today (symbols, not line numbers):
   skill file, with no helper.
 - Skill-to-worktree composition is repeated in `commands/start.rs` (bare and spec-driven paths),
   `commands/add.rs`, `commands/supervisor.rs`: each resolves `coordination` (and sometimes
-  `docs-fetch`) behind its own `if broker_config.enabled` / `docs_base_url` checks — the bare
-  `start` path never resolves `docs-fetch`, the others do.
-- Tests: ~30 files `include_str!` or copy from `assets/scripts/` or `assets/agent-skills/`; the
-  shell-helper tests copy `sweep.sh` + `_paw_common.sh` side by side into a tempdir.
+  `docs-fetch`) behind its own `if broker_config.enabled` / `docs_base_url` checks — neither
+  `start` path resolves `docs-fetch` (though both provision `docs-fetch.sh`), `add` and the
+  supervisor launch do and pass it to `attach_agent`.
+- Tests: ~45 files under `tests/` plus the test modules of `src/agents.rs` and
+  `src/cli_setup/facts.rs` `include_str!`, read or copy from `assets/scripts/` or
+  `assets/agent-skills/`; the shell-helper tests copy `sweep.sh` + `_paw_common.sh` side by side
+  into a tempdir.
 
 Constraints: single self-contained binary (`include_str!`, no runtime asset directory); no new
 crate (an `include_dir`-style crate is not on the approved list); `skills::resolve` and its
@@ -60,8 +70,11 @@ MILESTONE asks that "the boot block and the skill export stay in one place".
 ### D2 — A static registry, not a directory walk
 
 `skills::bundled_packages() -> &'static [BundledPackage]`, each entry an explicit list of
-`(relative path, include_str!(…))` pairs plus a `ProvisionGate` (`Always`, `BrokerEnabled`,
-`DocsBaseUrlConfigured`). A conformance test walks `assets/agent-skills/` at test time and fails
+`(relative path, include_str!(…))` pairs plus a `ProvisionGate` (`RootOnly` for `orchestrator`
+and `cli-setup`, `BrokerEnabled` for `coordination`, `DocsBaseUrlConfigured` for `docs-fetch`).
+The gate governs worktree selection only: `git paw init` installs every package's helpers at the
+root as it does today, and `export_skills` writes the `RootOnly` packages' skills to
+`.git-paw/skills/` in registry order (today's `EXPORTED_SKILL_DIRS` order). A conformance test walks `assets/agent-skills/` at test time and fails
 if a file on disk is not registered (or vice versa), so the static list cannot silently drift.
 *Alternatives:* a `build.rs` that generates the list (build-script complexity for three
 packages); an embed-a-directory crate (new dependency, not approved).
@@ -71,7 +84,8 @@ packages); an embed-a-directory crate (new dependency, not approved).
 The preamble lives once at `assets/agent-skills/_shared/scripts/_paw_common.sh` (`_shared` has no
 `SKILL.md` and is never a package). The registry lists that one embedded constant in each
 package's `scripts/`, so every installed package is self-contained and the helpers' existing
-sibling sourcing (`$(dirname "${BASH_SOURCE[0]}")/_paw_common.sh`) keeps working unchanged.
+sibling sourcing (`$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/_paw_common.sh`) keeps
+working unchanged.
 *Alternatives:* a copy per package in the repo (three files to keep identical); sourcing
 `../../_shared/` (breaks the package once it is installed on its own).
 Consequence: helpers no longer run from the source tree as-is (their sibling preamble is not
@@ -83,7 +97,8 @@ there). Nothing ships that relies on it; tests install a package into a tempdir 
 `skills::packages_for_worktree(inputs) -> Vec<&'static BundledPackage>` where `inputs` carries
 `broker_enabled` and `docs_base_url_configured` (and nothing I/O). `provision_worktree_helpers`
 becomes the shell that writes what it returns; the per-command composition in `start`/`add`/
-`supervisor` resolves skill text for exactly that set. This is the functional-core split
+`supervisor` (and `attach_agent`, which the latter two feed) resolves skill text for exactly that
+set. This is the functional-core split
 `docs/src/architecture-direction.md` asks for (see Risks for the one divergence it exposes).
 
 ### D5 — The override boundary: text, never scripts
@@ -101,8 +116,9 @@ About twenty requirements name a bundled file by its pre-package path (`assets/a
 coordination.md`, `assets/scripts/sweep.sh`, …) only to identify *which* asset they constrain.
 Rewriting each as MODIFIED would copy large requirement bodies to change one path. Instead
 `skill-packages` adds one requirement with the mapping table; the same device v0.18.0
-`orchestrator-skill-export` uses for the supervisor → orchestrator rename. The affected
-requirements (listed in tasks 6.2) are queued for the v1.0.0 pre-freeze wording sweep.
+`orchestrator-skill-export` uses for the supervisor → orchestrator rename (`skill-agent`
+*Orchestrator skill is the supervisor skill relocated*). The affected requirements (listed in
+tasks 6.2) are queued for the v1.0.0 pre-freeze wording sweep.
 
 ### D7 — Tests read the registry, not paths
 
@@ -123,13 +139,21 @@ behavioral (rendered text, helper output) and stop failing on a file move.
   is a behavior change and belongs to `skill-package-deploy`.
 - [Contributors and dogfood notes that say "copy `assets/scripts/broker.sh`"] → architecture doc
   and the export-agnosticism inventory updated; MEMORY-style notes are the maintainer's.
+- [The four shell helpers carry comments naming the source tree — `_paw_common.sh` says "edit
+  `assets/scripts/_paw_common.sh`", and `broker.sh` / `sweep.sh` / `docs-fetch.sh` say sourcing
+  "works from both the bundled `assets/scripts/` tree" and the deployed directory — and those
+  comments are installed verbatim] → rewording them changes the installed bytes that *Packaging
+  preserves deployed output* pins, so this change leaves them as they are; `skill-package-deploy`,
+  which changes the deployed helpers anyway, rewords them. (Needs a maintainer call if the
+  comments should be fixed here instead, with the byte-identity requirement scoped to
+  non-comment lines.)
 - [`git mv` loses `git log` continuity for some tools] → use `git mv` so rename detection works.
 
 ## Migration Plan
 
-1. Add the registry over the *current* paths; derive `embedded_default`, `bundled_scripts`,
-   `run_init`, provisioning, doctor and the `setup-cli` grant table's coverage guard from it. Suite green, no output
-   change.
+1. Add the registry over the *current* paths; derive `embedded_default`, `bundled_scripts` (and
+   so `refresh_root_scripts`), worktree provisioning, the root-only skill export, doctor and the
+   `setup-cli` grant table's coverage guard from it. Suite green, no output change.
 2. `git mv` assets into packages; update the registry's `include_str!` paths only.
 3. Re-point tests to the registry helpers; add the conformance and audit-coverage tests.
 4. Docs/inventory.
@@ -139,10 +163,13 @@ Rollback: revert; nothing on disk in consumer repos changes.
 
 - **The config-dir user override is unreachable in production.** `skills::resolve` calls
   `resolve_with_config_dir(name, None)`, so `<config_dir>/git-paw/agent-skills/<name>/SKILL.md` is
-  only consulted by a unit test, while `skill-agent`'s *Skill resolution order* names a flat
-  `<config_dir>/git-paw/agent-skills/<name>.md` as step 1 and `docs/src/user-guide/
-  skill-templates.md` documents `.agents/skills/` → embedded only. Reported, not fixed here (this
-  change preserves resolution exactly); needs a decision on which of the three is the contract.
-- Whether agentskills.io requires a skill's frontmatter `name` to equal its directory name (to
-  verify against the published spec). It matters for v0.18.0's `name: git-paw-orchestrator`
-  under an `orchestrator/` directory.
+  only consulted by a unit test. `skill-agent`'s *Skill resolution order* (as v0.18.0 restated it)
+  states this production order — `.agents/skills/` from the cwd up four ancestors, then embedded —
+  and `docs/src/user-guide/skill-templates.md` matches it, while `docs/src/architecture.md`,
+  `mcp-server` *Project knowledge tools* and the `src/skills.rs` module doc still name a user
+  level. Not fixed here (this change preserves resolution exactly); v0.20.0
+  `skill-override-resolution` decides the contract.
+- ~~Whether agentskills.io requires a skill's frontmatter `name` to equal its directory name.~~
+  Settled by v0.18.0: the orchestrator skill ships `name: orchestrator`, equal to its directory
+  name as the standardized format requires (`core-init` *Init installs the orchestrator skill in
+  the standardized format*), and every bundled skill's `name` already equals its package name.

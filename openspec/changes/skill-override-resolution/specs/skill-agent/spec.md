@@ -20,9 +20,10 @@ If no level has the requested name, the function SHALL return `Err(SkillError::U
 
 The returned `SkillTemplate` SHALL include a `source: Source` field — `Source::AgentsStandard` for level 1, `Source::User` for level 2, `Source::Embedded` for level 3 — and an `origin_path: Option<PathBuf>` naming the `SKILL.md` that supplied the content (`None` for the embedded default), for diagnostic purposes.
 
-#### Scenario: Resolve falls back to embedded when no override exists
+#### Scenario: Resolve falls back to embedded when no user override exists
 
-- **GIVEN** neither a repository override nor a user override exists for the `coordination` skill
+- **GIVEN** no user override exists for the `coordination` skill
+- **AND** no repository override exists for it either
 - **WHEN** `skills::resolve("coordination", repo_root)` is called
 - **THEN** the result is `Ok(SkillTemplate)` with `source = Source::Embedded`
 - **AND** `origin_path` is `None`
@@ -180,11 +181,34 @@ When a user override `SKILL.md` exists but cannot be read (permission denied, I/
 - **WHEN** `skills::resolve("coordination", repo_root)` is called
 - **THEN** the result is `Err(SkillError::UserOverrideRead { .. })`
 
+### Requirement: SkillTemplate value type
+
+The system SHALL define a public type `SkillTemplate` with at least these fields:
+
+- `name: String` — the skill name (e.g. `"coordination"`)
+- `content: String` — the unrendered template content
+- `source: Source` — an enum with at least the variants `Embedded` and `User`
+
+`SkillTemplate` SHALL derive `Debug` and `Clone`. The `Source` enum SHALL derive `Debug`, `Clone`, `Copy`, `PartialEq`, and `Eq`.
+
+#### Scenario: SkillTemplate from embedded source has correct fields
+
+- **WHEN** `skills::resolve("coordination", repo_root)` is called with no repository or user override
+- **THEN** the returned `SkillTemplate` has `name == "coordination"`
+- **AND** `source == Source::Embedded`
+- **AND** `content` is non-empty
+
+#### Scenario: SkillTemplate is cloneable
+
+- **GIVEN** a `SkillTemplate` returned by `skills::resolve`
+- **WHEN** `template.clone()` is called
+- **THEN** the clone has identical `name`, `content`, and `source` fields
+
 ## ADDED Requirements
 
 ### Requirement: Production callers resolve skills through the real search roots
 
-The system SHALL resolve every skill it renders, installs, injects or serves through `skills::resolve(skill_name, repo_root)` with the session's repository root, so that the user level is always consulted: on every launch path (bare and spec-driven `start`, supervisor `start`, `add`, re-attach), during package installation and worktree provisioning, in MCP `get_skill`, and in `git paw doctor`. The explicit-roots form `skills::resolve_from(skill_name, &SkillRoots)`, which reads only the roots it is given, SHALL be used only by `src/skills.rs` and by tests. The system SHALL provide no resolution entry point that omits the user level, and a source audit SHALL fail the suite when any production source file other than `src/skills.rs` calls `resolve_from` or constructs a `SkillRoots`.
+The system SHALL resolve every skill it renders, installs, injects, exports or serves through `skills::resolve(skill_name, repo_root)` with the repository root, so the user level is always consulted: on every launch path, in the `.git-paw/skills/` export, in MCP `get_skill` and in `git paw doctor`. Only `src/skills.rs` and tests SHALL call the explicit-roots `skills::resolve_from` or construct a `SkillRoots`, and a source audit SHALL fail the suite on any other production use.
 
 #### Scenario: A user override reaches the agent launched by start
 

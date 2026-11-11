@@ -2,7 +2,7 @@
 
 ### Requirement: The orchestrator package carries the audit gates as references
 
-The orchestrator package SHALL carry the spec-audit, doc-audit and security-audit gate procedures as references `references/gates/spec-audit.md`, `references/gates/doc-audit.md` and `references/gates/security-audit.md`, moved out of `SKILL.md` rather than copied. Each reference SHALL be self-contained: it SHALL state the inputs the gate needs (the re-resolved branch tip, the merge-base diff, the change id, and the gate's rendered tooling command or `(not configured)`), the procedure, and the finding format with the gate's bracketed prefix. The orchestrator `SKILL.md` SHALL keep the testing and regression gates inline and SHALL keep one heading per audit gate that names the reference's installed path and instructs reading it before running that gate. References SHALL be rendered with the same placeholder set as `SKILL.md`.
+The orchestrator package SHALL carry the spec-audit, doc-audit and security-audit gate procedures as references `references/gates/spec-audit.md`, `references/gates/doc-audit.md` and `references/gates/security-audit.md`, moved out of `SKILL.md` rather than copied. The spec-audit reference SHALL carry the Spec Audit Procedure with its governance-verification sub-step. References SHALL be rendered with the same placeholder set as `SKILL.md`.
 
 #### Scenario: The three audit references exist and are rendered
 
@@ -10,25 +10,50 @@ The orchestrator package SHALL carry the spec-audit, doc-audit and security-audi
 - **THEN** `references/gates/spec-audit.md`, `references/gates/doc-audit.md` and `references/gates/security-audit.md` SHALL be present
 - **AND** the spec-audit reference SHALL contain the rendered spec-validate command
 
+#### Scenario: Gate content is moved, not duplicated
+
+- **WHEN** the rendered orchestrator `SKILL.md` is inspected
+- **THEN** it SHALL NOT contain the Spec Audit Procedure body or the doc-audit surface list
+
+### Requirement: Each audit-gate reference is self-contained
+
+Each audit-gate reference SHALL read correctly with no other context: it SHALL state the inputs the gate needs (the re-resolved branch tip, the merge-base diff, the change id, and the gate's rendered tooling command or `(not configured)`), the rule to run that command bare and read its exit status without piping it, the procedure, and the finding format with the gate's bracketed prefix.
+
 #### Scenario: Each reference is self-contained
 
 - **WHEN** any audit-gate reference is read on its own
 - **THEN** it SHALL state that the gate runs against the re-resolved branch tip, that change contribution is diffed against the merge-base, and the bracketed prefix its findings use
 
-#### Scenario: Gate content is moved, not duplicated
+#### Scenario: Each reference restates the bare-command rule
 
-- **WHEN** the rendered orchestrator `SKILL.md` is inspected
-- **THEN** it SHALL NOT contain the Spec Audit Procedure body or the doc-audit surface list
-- **AND** it SHALL contain one heading per audit gate naming that gate's reference path
+- **WHEN** any audit-gate reference is read on its own
+- **THEN** it SHALL instruct running the gate's tooling command bare and reading its exit status directly
+- **AND** SHALL forbid piping that command into another command
+
+### Requirement: The orchestrator Workflow points each audit gate at its reference
+
+The orchestrator `SKILL.md` SHALL keep the testing and regression gates inline and SHALL keep one Workflow step per audit gate, in the five-gate order, that states the gate's purpose, names its reference by the repository-root-relative path where the package is installed, and instructs reading that reference before running the gate.
 
 #### Scenario: Testing and regression stay inline
 
 - **WHEN** the rendered orchestrator `SKILL.md` is inspected
 - **THEN** it SHALL contain the testing and regression-analysis gate procedures
 
+#### Scenario: Each audit gate step names its installed reference
+
+- **WHEN** the rendered orchestrator `SKILL.md` is inspected
+- **THEN** it SHALL contain one Workflow step per audit gate naming `.git-paw/skills/orchestrator/references/gates/<gate>.md` for that gate
+- **AND** each step SHALL instruct reading the reference before running the gate
+
+#### Scenario: A headless hand-off that reads SKILL.md reaches the gates
+
+- **GIVEN** an unattended merge hand-off whose stdin names `.git-paw/skills/orchestrator/SKILL.md` and asks for the branch to be verified against every gate
+- **WHEN** the one-shot follows that `SKILL.md`
+- **THEN** each audit gate step SHALL lead it to an installed reference path that exists at the repository root
+
 ### Requirement: The orchestrator skill delegates audit gates through a compressed-verdict contract
 
-The orchestrator `SKILL.md` SHALL include a delegation section stating that, when the orchestrator's CLI can run isolated subagents, the three audit gates MAY run concurrently, each in its own isolated context given only that gate's reference plus the branch, re-resolved tip and change id, and only after the testing and regression gates have passed. Each delegated gate SHALL return a compressed verdict — the gate name, `pass` or `fail`, and one line per finding in the form `[<gate prefix>] <location>: <issue>` — and SHALL NOT return raw tool output. Only the orchestrator itself SHALL publish verdicts: `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`, otherwise one `feedback-gate` call per finding. When the CLI cannot run isolated subagents, the orchestrator SHALL read each reference and run the gate inline. The section MAY also direct broad read-only exploration to an isolated read-only subagent that returns a map rather than file contents. The section SHALL name no vendor product, model, or persona file format or path.
+The orchestrator `SKILL.md` SHALL include a delegation section stating that, when its CLI can run isolated subagents and after testing and regression pass, the three audit gates MAY run concurrently, each in an isolated context given only its reference plus the branch, re-resolved tip and change id. Each SHALL return a compressed verdict — gate name, `pass` or `fail`, one line per finding as `[<gate prefix>] <location>: <issue>` — and no raw tool output.
 
 #### Scenario: The delegation section defines the verdict shape
 
@@ -36,11 +61,24 @@ The orchestrator `SKILL.md` SHALL include a delegation section stating that, whe
 - **THEN** its delegation section SHALL define a verdict of gate name, `pass`/`fail`, and one-line findings carrying the gate's bracketed prefix
 - **AND** SHALL state that delegated gates return no raw tool output
 
+#### Scenario: Delegation follows testing and regression
+
+- **WHEN** the delegation section is inspected
+- **THEN** it SHALL state that the audit gates are delegated only after the testing and regression gates have passed
+
+### Requirement: Only the orchestrator publishes verdicts for delegated gates
+
+The delegation section SHALL state that a delegated gate never publishes, and that the orchestrator itself publishes `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`, otherwise one `feedback-gate` call per finding.
+
 #### Scenario: Only the orchestrator publishes
 
 - **WHEN** the delegation section is inspected
 - **THEN** it SHALL state that a delegated gate never publishes `agent.verified` or `agent.feedback`
 - **AND** that `agent.verified` follows only when testing, regression and all three audit verdicts pass
+
+### Requirement: Delegation degrades to inline gates and names no vendor
+
+The delegation section SHALL instruct an orchestrator whose CLI cannot run isolated subagents to read each reference and run the gate inline. It MAY direct broad read-only exploration to an isolated read-only subagent that returns a map rather than file contents. It SHALL name no vendor product, model, or persona file format or path.
 
 #### Scenario: Inline fallback without subagents
 
@@ -62,3 +100,24 @@ Any requirement that the orchestrator (formerly supervisor) skill include, conta
 - **WHEN** its covering test renders the orchestrator package
 - **THEN** the procedure SHALL be found in `references/gates/spec-audit.md`
 - **AND** the requirement SHALL be satisfied
+
+### Requirement: A self-hosted session runs the binary built from the branch under test
+
+The orchestrator `SKILL.md` SHALL state that when the repository being orchestrated is the source of the git-paw that runs the session (a self-hosted or dogfood session), the session SHALL run the git-paw built from the branch under test, not a previously installed copy, because a stale binary silently brings back bugs the branch has already fixed. The instruction SHALL name no build tool or build command.
+
+#### Scenario: A self-hosted session checks the binary it runs
+
+- **WHEN** the rendered orchestrator `SKILL.md` is inspected
+- **THEN** it SHALL instruct the orchestrator, in a self-hosted session, to confirm at bootstrap that the `git paw` the session runs is the build from the branch under test rather than an installed copy
+- **AND** SHALL give the reason that a stale binary silently re-introduces bugs the branch has fixed
+
+#### Scenario: A stale binary is raised before work is driven
+
+- **WHEN** the rendered orchestrator `SKILL.md` is inspected
+- **THEN** it SHALL instruct the orchestrator, when the session runs a binary not built from the branch under test, to tell the human to rebuild with the project's own build and run the session on that build before it drives any agent
+
+#### Scenario: The instruction names no build command
+
+- **WHEN** the self-hosted-session instruction is audited
+- **THEN** it SHALL contain no build-tool, package-manager or build-recipe command
+- **AND** the rendered orchestrator package SHALL pass the no-language-leak audit

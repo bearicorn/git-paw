@@ -2,7 +2,7 @@
 
 ### Requirement: get_skill reports the source the production resolver chose
 
-The `get_skill` tool SHALL resolve the named skill through the same production entry point the launch paths use, rooted at the server's resolved repository, and SHALL report as `source` the level that supplied the content: `standard` for a repository `.agents/skills/` override, `user_override` for an override in the user configuration directory, `embedded` for the built-in default. The repository level SHALL therefore follow `--repo` rather than the server process's current directory, and a server rooted in a linked worktree SHALL read the repository level from the main working tree, never from that worktree. The returned content and source SHALL equal what a launch from that repository would inject for the same skill. The tool SHALL remain read-only.
+The `get_skill` tool SHALL resolve the named skill through the production entry point the launch paths use, rooted at the server's resolved repository rather than the process's current directory, and SHALL report as `source` the level that supplied the template: `standard` (repository `.agents/skills/`), `user_override` (user configuration directory) or `embedded`. That template and source SHALL be the ones a launch or export from that repository would use. The tool SHALL remain read-only.
 
 #### Scenario: A user override is reported as user_override
 

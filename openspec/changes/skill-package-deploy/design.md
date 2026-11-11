@@ -11,17 +11,42 @@ v0.17.0 `classifier-retirement` deletes the classifier, including its managed-he
 (`auto_approve::is_managed_script_invocation`), so git-paw itself approves no helper call. The one
 place git-paw pre-approves helpers is v0.17.0 `cli-setup-consent`'s `git paw setup-cli claude
 --allowlist` (`src/cli_setup/`): a grant table of exact relative paths under `.git-paw/scripts/`
-(`broker.sh *`, `docs-fetch.sh find *`, ten read-only `sweep.sh` subcommands once v0.18.0
-`orchestrator-read-surface` adds `events`), `ask` rules for `sweep.sh approve` and (v0.19.0
+(`broker.sh *`, `docs-fetch.sh find *`, ten read-only `sweep.sh` subcommands including v0.18.0
+`orchestrator-read-surface`'s `events`), `ask` rules for `sweep.sh approve` and (v0.19.0
 `verified-agent-send`) `sweep.sh tell`, the protection rules `Edit(**/.git-paw/scripts/**)` (deny)
 and `Edit(**/.git-paw/config.toml)` (ask), a setup record, an undo whose shape check accepts only
 `Bash(.git-paw/scripts/<name>…)` values, and a doctor setup check that compares
 the applied entries with what the running binary would plan. The row is `verified` only after a scripted fact gate
 (F1–F6) passed against the installed Claude Code for those exact entries and rules.
 
-Other path consumers: `doctor::check_bundled_scripts` (messages name `.git-paw/scripts/`),
-`drive::SweepLearningSink::record` (`repo_root/.git-paw/scripts/sweep.sh`), ~45 literals in
-bundled prose, 11 docs chapters, ~30 tests.
+Other path consumers: `doctor::check_bundled_scripts` (messages name `.git-paw/scripts/`) and the
+Supervisor check's `sweep.sh` probe, `drive::SweepLearningSink::record`
+(`repo_root/.git-paw/scripts/sweep.sh`), `cli_setup::doctor::{is_broad, helper_paths}` (keyed on
+`facts::HELPER_DIR`) and its `MAX_WORD` = 32 (sized for `.git-paw/scripts/docs-fetch.sh`; the
+package path `.git-paw/skills/docs-fetch/scripts/docs-fetch.sh` is 48), ~99 literals in seven
+bundled prose assets (`orchestrator.md` 67, `coordination.md` 16, `boot-block-template.md` 7,
+`docs-fetch.md` 4, `boot-block-mcp-template.md` 2, `orchestrator-session-context.md` 2,
+`escalation-framing.md` 1), 88 mentions in 16 docs chapters, 34 test files.
+
+State after v0.19.0 that this change builds on (verified 2026-11-11):
+- Root installs: `init::refresh_root_scripts` writes the four flat helpers and
+  `init::export_skills` writes `.git-paw/skills/{orchestrator,cli-setup}/SKILL.md` (plus a
+  self-ignoring `.git-paw/skills/.gitignore`). `run_init` calls both; a supervised launch calls
+  both through `supervisor::write_orchestrator_context` (`supervisor-launch` *A supervised launch
+  refreshes the bundled root helper scripts*). The bare and spec-driven `start` paths call neither,
+  so a fresh clone has no root helpers until `git paw init` (DF-06).
+- Writes: `write_managed_file` skips identical content (`WriteOutcome::Unchanged`) and otherwise
+  calls `fs::write` on the target in place; `install_script` then `chmod`s it. A reader that opens
+  the file mid-write sees a truncated script.
+- Worktree helpers: `init::provision_worktree_helpers` is called next to
+  `worktree_provision::provision_worktree` (env, ports, hook) at three sites — `commands/start.rs`
+  bare and spec-driven loops and `commands/launch.rs::attach_agent` (supervisor `start`, `add`).
+  Only `attach_agent` injects docs-fetch.
+- Discovery: `_paw_common.sh` sets `PROJECT_ROOT=$(git rev-parse --show-toplevel)` and
+  `PAW_DIR=$PROJECT_ROOT/.git-paw`; `sweep.sh` reads `$PAW_DIR/sessions/`, keeps
+  `.sweep-progress` / `.sweep-stuck-dedup` there, and claims panes at
+  `$PROJECT_ROOT/.git-paw/tmp/approve-pane-<N>.claim` — the same formula the binary uses at the
+  main root. Inside a linked worktree all of these point at the worktree (DF-54).
 
 ## Goals / Non-Goals
 
@@ -58,16 +83,23 @@ location (worktree: the agent's branch and session broker URL; repo root: curren
 configured broker URL, `[supervisor]` gate commands — the inputs MCP `get_skill` and v0.18.0's
 orchestrator export already use). `scripts/` are written `0o755`. `references/` are rendered like
 `SKILL.md`. A package's `assets/` are render-time inputs (boot-block templates, per-CLI fragments)
-and are not installed. Everything is overwritten on each install (binary-managed, as today).
+and are not installed. Every install writes each file that is missing or differs and leaves an
+identical one untouched (binary-managed, as `write_managed_file` does today), so init's
+`Updated …` lines and `supervisor-launch`'s "not rewritten" scenario keep their meaning.
 
 ### D2 — Prose names helpers by placeholder, rendered from the registry
 
 `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}`, `{{DOCS_FETCH_HELPER}}` render to the package invocation
 path (`.git-paw/skills/coordination/scripts/broker.sh`, …), derived from the registry so a future
 move is one edit. They join `render`'s known-placeholder set (no unknown-placeholder warning) and
-are substituted in `build_boot_block` too. A guard test fails if any registered template contains a
-literal `.git-paw/scripts/` or `.git-paw/skills/…/scripts/` path.
-*Alternative:* hand-edit the literals to the new path — rejected: the same ~45-site churn again on
+are substituted by every renderer of bundled prose: `render` (worktree skills, MCP `get_skill`),
+`render_standardized` (the exported orchestrator skill, MCP `get_skill` for it),
+`build_boot_block`, the orchestrator session context and the escalation framing (the last says
+"helpers under `.git-paw/scripts/`" today and is reworded to name the helpers). A guard test fails
+if any of those prose files contains a literal `.git-paw/scripts/` or `.git-paw/skills/…/scripts/`
+path. The helper scripts' own usage text is not prose an agent is told to follow and is left
+alone.
+*Alternative:* hand-edit the literals to the new path — rejected: the same ~99-site churn again on
 the next move, and nothing stops drift.
 
 ### D3 — The compatibility copy
@@ -108,6 +140,12 @@ the user, see Open Questions).
 - **Undo.** The shape check accepts `Bash(.git-paw/skills/<package>/scripts/<name>…)` as well as the
   old form, and protection is removed only when no allow entry under either `.git-paw/scripts/` or
   `.git-paw/skills/` remains. A v0.17.0–v0.19.0 record therefore undoes cleanly.
+- **Doctor's grant checks.** The broad-grant advisory's shape 8 (`is_broad`) recognises a helper
+  word at either `.git-paw/skills/<pkg>/scripts/` or `.git-paw/scripts/`, and `MAX_WORD` grows to
+  keep the longest package path (48 characters) whole, as *A wide helper grant is listed* requires
+  verbatim listing. The grant-residue check already matches a helper by its file name whatever path
+  names it, so it needs no spec change; its rendering inherits the larger `MAX_WORD`. The
+  modified-helper drift check (`helper_paths`) walks the paths the applied allow entries name.
 - **Migration is the user's.** A record written before this change no longer matches the plan, so
   doctor's existing out-of-date rule (`preflight-diagnostics` *Doctor reports CLI setup state*)
   reports ⚠ with the remedy `git paw setup-cli claude --undo` then `--allowlist`. `init`,
@@ -121,7 +159,8 @@ rejected: the granted package helpers would be editable without a prompt in `acc
 
 `packages_for_worktree` is consulted by bare `start`, spec-driven `start`, supervisor `start`
 and `add`; each writes the selected packages and injects the same set's skill text and index. This
-makes the `start` paths inject `docs-fetch` when `docs_base_url` is set, as `mcp-agent-docs`'
+makes the bare and spec-driven `start` paths inject `docs-fetch` when `docs_base_url` is set (today
+only `attach_agent` — supervisor `start` and `add` — does), as `mcp-agent-docs`'
 *Gated injection into agent sessions* already requires — a visible behavior change, called out in
 the changelog.
 
@@ -134,6 +173,43 @@ prompt tells agents to read `.git-paw/AGENTS.local.md` first, and a reference-on
 second hop that cheap workers are the most likely to skip.
 *Alternative:* reference-only (body lives only in `SKILL.md`) — smaller sidecar, single copy;
 rejected for now on reliability, listed as a decision.
+
+### D7 — Every `start` installs the root packages (DF-06)
+
+v0.19.0 already refreshes the root helpers on a supervised launch, so the gap is the bare and
+spec-driven `start` paths: after a fresh clone they launch agents whose orchestrator (the user's
+own root session) has no `sweep.sh`, and nothing tells the user to run `init`. One function —
+`init::refresh_root_scripts`, generalised to install every package plus its compatibility copies
+— is called by `run_init`, `write_orchestrator_context` and, before the first pane, both
+non-supervised `start` paths. It writes only missing or differing files, so a repeat start is a
+no-op on disk. It does not create the config, touch `.gitignore` (the self-ignoring
+`.git-paw/skills/.gitignore` keeps the packages out of `git add -A`) or inject the `AGENTS.md`
+pointer: those remain `init`'s, because they edit tracked files.
+*Alternative:* install only files that are missing, never refresh stale ones on a bare start —
+rejected as the default: the supervised path already refreshes, and two rules for the same files
+would let a bare start leave an old `sweep.sh` next to a new skill. Listed as a decision.
+
+### D8 — Atomic replacement of installed files
+
+`write_managed_file` (and so `install_script`) writes the new content to a temporary file created
+exclusively in the target's directory (`O_CREAT|O_EXCL`, a random suffix, owner-only until the
+final mode is set), sets the final mode (`0o755` for scripts), then `rename`s it over the target
+and removes the temporary on any error. A same-directory rename is atomic on POSIX filesystems, so
+a running `sweep.sh` (bash reads its script incrementally) keeps the old inode and the next run sees
+the complete new file. The existing symlink refusal stays (`rename` would replace a link rather than
+follow it, but refusing keeps the error explicit). No new dependency: `std::fs` only.
+
+### D9 — Session state resolves from the main checkout (DF-54)
+
+`_paw_common.sh` gains `MAIN_ROOT`: the parent of
+`git rev-parse --path-format=absolute --git-common-dir` (the main working tree for both the main
+checkout and every linked worktree). `sweep.sh` keeps `SESSIONS_DIR`, `.sweep-progress`,
+`.sweep-stuck-dedup` and the approve claims under `$MAIN_ROOT/.git-paw/`; the claim path then
+matches the binary's again, so the cross-process approval exclusion spans a worktree-run helper.
+`PROJECT_ROOT` keeps meaning "the current checkout", which `broker.sh` needs to derive the agent id
+from the worktree branch. Resolution depends on git, not on where the script lives, so it holds for
+the package path and the compatibility copy alike. `--path-format` needs git ≥ 2.31; on an older
+git the helper resolves the relative common dir against `PROJECT_ROOT` itself.
 
 ## Risks / Trade-offs
 
@@ -153,12 +229,14 @@ rejected for now on reliability, listed as a decision.
 
 ## Migration Plan
 
-1. Package install + compatibility copy in `run_init` and provisioning; doctor per package.
-2. Placeholders in templates; `build_boot_block`/`render` substitute; guard test; re-point tests.
+1. Atomic `write_managed_file`; package install + compatibility copy in `run_init`, the root
+   refresh (init, supervised launch, every `start`) and provisioning; doctor per package.
+2. Placeholders in templates; every renderer substitutes; guard test; re-point tests.
 3. `setup-cli` grant table, protection, undo and doctor at the package paths; fact gate re-run (or
    the row set plan-only).
 4. One selection across launch paths; managed-block index.
-5. Docs and upgrade note.
+5. `_paw_common.sh` / `sweep.sh` main-checkout resolution.
+6. Docs and upgrade note.
 Rollback: revert; consumer repos keep a stale `.git-paw/skills/` (gitignored, inert) and the
 compatibility copies keep the old path working.
 
@@ -171,5 +249,13 @@ compatibility copies keep the old path working.
 - **Decision for the user — inline vs reference-only skill bodies** in the managed block (D6).
 - **Decided (2026-10-20):** recorded `setup-cli` grants are migrated by the user — doctor reports
   them out of date and the user re-runs `--undo` then `--allowlist` — never by git-paw (D4).
+- **Decision for the user — DF-06 scope:** should a bare/spec-driven `start` also refresh *stale*
+  root packages (recommended, D7: same rule as the supervised launch), or only install *missing*
+  ones?
+- **Decision for the user — config resolution from a worktree (DF-54 follow-on):** the helpers
+  still read `.git-paw/config.toml` from the current checkout, i.e. a worktree's committed copy,
+  which can lag an uncommitted edit in the main checkout (e.g. `[broker] port`). Agents normally get
+  `GIT_PAW_BROKER_URL`, so this change leaves it; resolving the config from `MAIN_ROOT` too would be
+  a one-line follow-up.
 - When is the compatibility copy removed? Recommendation: at v1.0.0 under the deprecation policy,
   with `doctor` warning one release ahead.

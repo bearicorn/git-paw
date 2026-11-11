@@ -2,7 +2,7 @@
 
 ### Requirement: The no-leak audit covers every registered package file
 
-The no-language-leak audit SHALL enumerate its audited set from the bundled package registry, covering every text file of every registered package — `SKILL.md`, and every file under `references/` and `assets/` — rendered where the file is a template. A package, reference or asset added to the registry SHALL therefore be audited without editing the audit, satisfying the standing rule that a new export surface ships with its guard. Shell helpers under `scripts/` SHALL remain covered by their existing convention and stack-neutrality tests rather than the prose audit.
+The no-language-leak audit SHALL derive its audited set from the bundled package registry, covering every text file of every registered package — `SKILL.md` and every file under `references/` and `assets/`, rendered where templated — so a newly registered package, reference or asset is audited without editing the audit. Shell helpers under `scripts/` SHALL stay covered by their existing convention and stack-neutrality tests instead of the prose audit.
 
 #### Scenario: A newly registered reference is audited automatically
 

@@ -2,7 +2,7 @@
 
 ### Requirement: Vendor naming is confined to the matching CLI fragment
 
-The no-language-leak audit SHALL render every template that uses a CLI placeholder once per registered CLI family and once for `generic`, and SHALL treat a vendor product name or vendor-specific path as allowed only within text that came from that family's own fragment. Base templates and every `generic` fragment SHALL contain no vendor product name or path outside an explicitly-allowed span. A fragment that names a vendor other than its own family's SHALL fail the audit.
+The no-language-leak audit SHALL render every template that uses a CLI placeholder once per registered CLI family and once for `generic`. It SHALL allow a vendor product name or vendor-specific path only in text from that family's own fragment, including when it reads a package's `assets/cli/<family>/` files one by one. Base templates and every `generic` fragment SHALL contain no vendor product name or path outside an explicitly-allowed span.
 
 #### Scenario: Generic rendering is vendor-free
 

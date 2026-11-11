@@ -1,12 +1,12 @@
 ## Purpose
 
-Defines how git-paw's bundled skills are packaged and delivered: each bundled skill is an agentskills.io package (a `SKILL.md` with frontmatter plus the `scripts/`, `references/` and `assets/` it owns), a compiled registry is the single source of the bundled set for every consumer (skill resolution, init, worktree provisioning, doctor, the `git paw setup-cli` grant table's helper coverage, the no-leak audit), which packages reach an agent worktree is a pure decision, overrides change skill text but never the helpers git-paw installs, and requirements that still name pre-package asset paths are read against the package files.
+Defines how git-paw's bundled skills are packaged and delivered: each bundled skill is an agentskills.io package (a `SKILL.md` with frontmatter plus the `scripts/`, `references/` and `assets/` it owns), a compiled registry is the single source of the bundled set for every consumer (skill resolution, init, worktree provisioning, the root-only `.git-paw/skills/` export, doctor, the `git paw setup-cli` grant table's helper coverage, the no-leak audit), which packages reach an agent worktree is a pure decision, overrides change skill text but never the helpers git-paw installs, and requirements that still name pre-package asset paths are read against the package files.
 
 ## ADDED Requirements
 
 ### Requirement: Bundled skills ship as agentskills.io packages
 
-The system SHALL ship every bundled skill as an agentskills.io package: a directory `assets/agent-skills/<name>/` containing a `SKILL.md` whose frontmatter carries the required `name` and `description` fields followed by the skill body, plus that skill's own optional `scripts/`, `references/` and `assets/` subdirectories. Each bundled helper script SHALL belong to exactly one package — `broker.sh` and the boot-block templates to `coordination`, `sweep.sh` to `orchestrator`, `docs-fetch.sh` to `docs-fetch`. The bundled `cli-setup` skill SHALL be a package `cli-setup` that ships no helper script. The shared shell preamble `_paw_common.sh` SHALL have exactly one source file and SHALL be listed in the `scripts/` of every package that ships a helper. Every bundled package SHALL load successfully through the system's own standardized-skill loader.
+The system SHALL ship every bundled skill as an agentskills.io package: a directory `assets/agent-skills/<name>/` holding a `SKILL.md` with the required `name` and `description` frontmatter, plus its own optional `scripts/`, `references/` and `assets/`. Each bundled helper SHALL belong to exactly one package, `cli-setup` SHALL ship no helper, and `_paw_common.sh` SHALL have one source file listed in every helper-shipping package. Every package SHALL load through the standardized-skill loader.
 
 #### Scenario: Every bundled package validates as a standardized skill
 
@@ -18,6 +18,7 @@ The system SHALL ship every bundled skill as an agentskills.io package: a direct
 
 - **WHEN** the registered packages' scripts are enumerated
 - **THEN** `broker.sh` SHALL appear only in `coordination`, `sweep.sh` only in `orchestrator`, and `docs-fetch.sh` only in `docs-fetch`
+- **AND** both boot-block templates SHALL appear only in `coordination`
 
 #### Scenario: The cli-setup skill is a registered package without helpers
 
@@ -33,7 +34,7 @@ The system SHALL ship every bundled skill as an agentskills.io package: a direct
 
 ### Requirement: The package registry is the single source of the bundled skill set
 
-The system SHALL expose a compiled package registry listing every bundled package with its embedded `SKILL.md`, scripts, references, assets and provisioning gate. Embedded skill resolution, the set of helpers `git paw init` installs, the set provisioned into agent worktrees, the doctor bundled-scripts check, and the set of helper names the `git paw setup-cli` grant table must cover SHALL each be derived from the registry rather than from a separately maintained list. The registry SHALL embed its files at compile time so the binary needs no asset directory at runtime. A file present under a package directory but absent from the registry, or registered but absent on disk, SHALL fail the test suite.
+The system SHALL expose a compile-time registry of every bundled package (`SKILL.md`, scripts, references, assets, provisioning gate). Embedded resolution, the helpers `git paw init` installs, the worktree-provisioned set, the `.git-paw/skills/` exports, the doctor bundled-scripts check and the `git paw setup-cli` grant table's helper set SHALL each derive from it. A package file not registered, or registered but missing, SHALL fail the suite.
 
 #### Scenario: Embedded resolution comes from the registry
 
@@ -48,6 +49,11 @@ The system SHALL expose a compiled package registry listing every bundled packag
 - **THEN** init SHALL have installed that helper
 - **AND** the doctor bundled-scripts group SHALL report a result for it
 
+#### Scenario: The root-only skill exports come from the registry
+
+- **WHEN** `git paw init` runs in a fresh repository
+- **THEN** `.git-paw/skills/` SHALL hold a `SKILL.md` for exactly the registered root-only packages, `orchestrator` and `cli-setup`
+
 #### Scenario: An unregistered package file fails the suite
 
 - **GIVEN** a file added under `assets/agent-skills/<name>/` without a registry entry
@@ -61,7 +67,7 @@ The system SHALL expose a compiled package registry listing every bundled packag
 
 ### Requirement: Worktree package selection is a pure decision
 
-The system SHALL decide which bundled packages an agent worktree receives with a pure function of the session's inputs — whether the broker is enabled and whether `docs_base_url` is explicitly configured — performing no I/O. The selection SHALL include `coordination` when the broker is enabled and `docs-fetch` when `docs_base_url` is configured, in that order, and SHALL never include the root-only packages `orchestrator` and `cli-setup`. Code that writes package files into a worktree SHALL write exactly the selected set.
+The system SHALL decide which bundled packages an agent worktree receives with a pure function of whether the broker is enabled and whether `docs_base_url` is explicitly configured, performing no I/O. It SHALL select `coordination` when the broker is enabled and `docs-fetch` when `docs_base_url` is configured, in that order, and never the root-only `orchestrator` and `cli-setup`. Code that writes package files into a worktree SHALL write exactly the selected set.
 
 #### Scenario: Broker enabled, docs unset
 
@@ -101,22 +107,21 @@ The system SHALL apply a skill override (a `.agents/skills/<name>/` directory or
 
 ### Requirement: Requirements naming pre-package asset paths refer to package files
 
-The system SHALL treat any requirement that identifies a bundled asset by its pre-package source path as referring to the corresponding package file, per this mapping:
+The system SHALL read a requirement that names a bundled asset by its pre-package source path as naming the corresponding package file, with its content constraints unchanged: `assets/agent-skills/<name>.md` maps to `assets/agent-skills/<name>/SKILL.md` (`supervisor.md` to `orchestrator/SKILL.md`), each `assets/scripts/<helper>` to its owning package's `scripts/`, and the boot-block templates to `coordination/assets/`, per the scenarios below.
 
-| Pre-package path | Package file |
-|---|---|
-| `assets/agent-skills/coordination.md` | `assets/agent-skills/coordination/SKILL.md` |
-| `assets/agent-skills/supervisor.md` (or `orchestrator.md`) | `assets/agent-skills/orchestrator/SKILL.md` |
-| `assets/agent-skills/docs-fetch.md` | `assets/agent-skills/docs-fetch/SKILL.md` |
-| `assets/agent-skills/cli-setup.md` | `assets/agent-skills/cli-setup/SKILL.md` |
-| `assets/scripts/broker.sh` | `assets/agent-skills/coordination/scripts/broker.sh` |
-| `assets/scripts/sweep.sh` | `assets/agent-skills/orchestrator/scripts/sweep.sh` |
-| `assets/scripts/docs-fetch.sh` | `assets/agent-skills/docs-fetch/scripts/docs-fetch.sh` |
-| `assets/scripts/_paw_common.sh` | `assets/agent-skills/_shared/scripts/_paw_common.sh` |
-| `assets/boot-block-template.md` | `assets/agent-skills/coordination/assets/boot-block.md` |
-| `assets/boot-block-mcp-template.md` | `assets/agent-skills/coordination/assets/boot-block-mcp.md` |
+#### Scenario: Each pre-package path maps to one package file
 
-Such a requirement's content constraints SHALL apply unchanged to the mapped file.
+- **WHEN** a requirement names one of the pre-package paths below
+- **THEN** `assets/agent-skills/coordination.md` SHALL mean `assets/agent-skills/coordination/SKILL.md`
+- **AND** `assets/agent-skills/supervisor.md` or `assets/agent-skills/orchestrator.md` SHALL mean `assets/agent-skills/orchestrator/SKILL.md`
+- **AND** `assets/agent-skills/docs-fetch.md` SHALL mean `assets/agent-skills/docs-fetch/SKILL.md`
+- **AND** `assets/agent-skills/cli-setup.md` SHALL mean `assets/agent-skills/cli-setup/SKILL.md`
+- **AND** `assets/scripts/broker.sh` SHALL mean `assets/agent-skills/coordination/scripts/broker.sh`
+- **AND** `assets/scripts/sweep.sh` SHALL mean `assets/agent-skills/orchestrator/scripts/sweep.sh`
+- **AND** `assets/scripts/docs-fetch.sh` SHALL mean `assets/agent-skills/docs-fetch/scripts/docs-fetch.sh`
+- **AND** `assets/scripts/_paw_common.sh` SHALL mean `assets/agent-skills/_shared/scripts/_paw_common.sh`
+- **AND** `assets/boot-block-template.md` SHALL mean `assets/agent-skills/coordination/assets/boot-block.md`
+- **AND** `assets/boot-block-mcp-template.md` SHALL mean `assets/agent-skills/coordination/assets/boot-block-mcp.md`
 
 #### Scenario: A content requirement on a pre-package path is checked against the package file
 
@@ -139,3 +144,4 @@ Restructuring bundled skills into packages SHALL NOT change any file the system 
 
 - **WHEN** `git paw init` runs in a fresh repository after packaging
 - **THEN** the files it writes under `.git-paw/scripts/` SHALL have the same names, content and executable mode as before packaging
+- **AND** the skills it exports under `.git-paw/skills/` SHALL have the same paths and content as before packaging

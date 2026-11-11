@@ -47,7 +47,8 @@ extensions or writing that memory.
   launch builder places its environment before the executable and its arguments after the CLI's
   `args`; `[clis.<name>] inherit_operator_config` opts a CLI out.
 - `core-memory-isolation`: ADDED — workers are launched with the operator's personal extensions
-  and the repository-shared auto memory off, wherever the CLI's family encodes how.
+  and the repository-shared auto memory off, wherever the CLI's family encodes how; the operator's
+  session and the headless orchestrator one-shot are left as they were.
 
 ## Impact
 

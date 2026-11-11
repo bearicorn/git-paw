@@ -14,9 +14,9 @@
 ## 3. Every path, and the orchestrator left alone
 
 - [ ] 3.1 Integration test: `git paw start` and `git paw add` with the same claude-family CLI produce identical isolation (scenario "Start and add stay identical"); recovery through `git paw start` on a stopped session carries it
-- [ ] 3.2 Test that the drive loop's headless orchestrator one-shot argv contains neither `--setting-sources` nor the memory variable ("The orchestrator one-shot is unchanged")
-- [ ] 3.3 The dry-run launch line (`dry_run_launch_line`) shows the isolated command; assert it in its existing test
-- [ ] 3.4 Map the `core-memory-isolation` scenarios "A worker does not run the operator's user plugins or hooks", "A worker does not write the shared auto memory" and "Repository settings still apply to an isolated worker" to the launch-command assertions plus the 1.1 fact record (they depend on Claude Code's behaviour, which no in-repo test can run); note the mapping with `Test:` pointers
+- [ ] 3.2 Test in `src/supervisor/escalation.rs` that, for a claude-family `[supervisor] cli`, `resolve_handoff`'s argv contains no `--setting-sources` and `HandoffSetup::spawn_spec`'s `env` holds no `CLAUDE_CODE_DISABLE_AUTO_MEMORY` ("The orchestrator one-shot is unchanged")
+- [ ] 3.3 The dry-run launch line (`dry_run_launch_line`) shows the isolated command; assert it in its existing test (`src/commands/launch.rs` tests or `tests/cli_provider_dry_run.rs`)
+- [ ] 3.4 E2E with a stub `claude` script on `PATH` that records its argv and environment, launched by `git paw start` in a temp repo: it receives `--setting-sources project,local` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and no `.claude/settings*.json` is created or changed ("A worker does not run the operator's user plugins or hooks", "A worker does not write the shared auto memory", "Repository settings still apply to an isolated worker"); the Claude Code behaviour behind each scenario is covered by the 1.1 fact record. Add `Test:` pointers
 
 ## 4. Docs
 

@@ -1,26 +1,32 @@
 ## Context
 
-Per-CLI knowledge in bundled prose today:
-- `assets/agent-skills/coordination.md` → "Per-CLI mechanism" table: `claude` (`/compact`,
-  `/clear`), `claude-oss` (same), `other` (look for `/compact`, `/save`, `/reset`). Pinned by
-  `skill-agent`'s *Per-CLI compact mechanism table*, which requires the `claude-oss` row.
-- `assets/boot-block-template.md` and `assets/boot-block-mcp-template.md` → "PASTE HANDLING: When
-  you paste text, Claude may collapse it into `[Pasted text #N]`…", pinned by `boot-block`'s
-  *Paste handling instructions*.
-- The only other per-CLI branch at render time is `skills::cli_speaks_mcp` (the `[clis.<name>] mcp`
-  override, then a name match against `MCP_CAPABLE_CLIS`), which picks the boot-block form. v0.19.0 replaces name matching with a
-  resolved capability record (GP-29); this change does not touch the form choice.
+Per-CLI knowledge in bundled prose today (post v0.19.0):
+- `assets/agent-skills/coordination.md` (798 lines) → "Per-CLI mechanism" table: a `claude` row
+  (`/compact`, `/clear`) and an `other` row (look for `/compact`, `/save`, `/reset`). Pinned by
+  `skill-agent`'s *Per-CLI compact mechanism table*, which already forbids naming a custom variant
+  such as `claude-oss` (that row was dropped before v0.19.0). The `claude` row is vendor text
+  served to every agent whatever its CLI.
+- `assets/boot-block-template.md` and `assets/boot-block-mcp-template.md` → "### PASTE HANDLING":
+  "When you paste text, Claude may collapse it into `[Pasted text #N]`. After any paste operation,
+  send an additional Enter key…", pinned by `boot-block`'s *Paste handling instructions* (scenario
+  *Paste instruction format* asserts the Claude explanation for every boot block).
+- The only other per-CLI branch at render time is the boot-block form. v0.19.0 already resolves it
+  from the record: callers pass `CliProfile::resolve(cli, clis).mcp_capable()` (or the profile they
+  already hold) into `build_boot_block(branch_id, broker_url, mcp_capable: bool)`; the
+  `skills::cli_speaks_mcp` wrapper delegates to the same record and has no production caller left.
+  This change does not alter the form rule, only where `build_boot_block` reads it from.
 
-Per-CLI facts the code encodes for `codex` / `agy`: approval flags
-(`config::supervisor` maps `codex` → `--sandbox workspace-write` / bypass, `claude|agy` →
-`--dangerously-skip-permissions`) and MCP capability. Nothing about their compaction commands or
-paste behavior — those are **to verify** before any fragment states them.
+Per-CLI facts the code encodes for `codex` / `agy` live on their `CliProvider` impls in
+`src/agent_cli/mod.rs`: approval flags (`codex` → `--sandbox workspace-write` / bypass, `claude`
+and `agy` → `--dangerously-skip-permissions`), native sandbox args, session templates, MCP
+capability and prompt profiles. Nothing about their compaction commands or paste behavior — those
+are **to verify** before any fragment states them.
 
 ## Goals / Non-Goals
 
 **Goals:**
 - Each agent's skill text and boot block carry its own CLI's notes and no other vendor's.
-- No forked copies of the 720-line coordination skill.
+- No forked copies of the ~800-line coordination skill.
 - Unknown and custom CLIs degrade to a correct, vendor-neutral `generic`.
 
 **Non-Goals:**
@@ -28,9 +34,12 @@ paste behavior — those are **to verify** before any fragment states them.
   makes `build_boot_block` read that decision from the same profile it reads the family from.
 - Per-CLI variants of the orchestrator skill (the orchestrator is the operator's own session; its
   CLI is not known to git-paw).
-- Per-CLI prompt-shape profiles for the drive loop (v0.19.0).
-- The Claude-shaped `/clear to save <N>k tokens` wording in the context-bloat section: it describes
-  what `sweep.sh`'s detector matches and moves with v0.19.0's per-CLI prompt profiles.
+- Per-CLI prompt-shape profiles for the drive loop (shipped in v0.19.0 `cli-prompt-profiles`).
+- The Claude-shaped `/clear to save <N>k tokens` wording in the coordination skill's context-bloat
+  section: it describes what the detector's `context_bloat_pattern` (a per-CLI prompt-profile
+  field since v0.19.0) matches for the default profile, so it stays with that detector and out of
+  the fragments.
+- A new family type. `CliFamily` is the closed set; this change reads it.
 
 ## Decisions
 
@@ -43,16 +52,26 @@ family per slot (`skill`, `boot`) carries only what differs, rendered into `{{CL
 *Alternative:* full per-CLI templates as MILESTONE literally states — rejected on drift; listed as
 a decision for the user.
 
-### D2 — Selection key: the profile's skill family, Null Object fallback
+### D2 — Selection key: the profile's `CliFamily`, Null Object fallback
 
-`select_fragment(family, slot, package) -> &'static str` is pure: return the family's fragment for
-that slot if the package registers one, else the `generic` fragment. The family comes from the
-agent's resolved v0.19.0 CLI profile; a custom `[clis.<name>]` variant resolves to the family its
-profile declares (the GP-29 shape), so no CLI name is ever matched in rendering code. A render with
-no agent (repository root, MCP `get_skill`) passes `generic`. The family is a string key that
-matches the asset directory name, so adding a family is an asset plus a profile value — no code
-branch. (`architecture-direction.md`: an enum is for a small fixed set where callers handle each
-case; here no caller does.)
+`select_fragment(family: CliFamily, slot, package) -> &'static str` is pure: return the fragment
+registered at `assets/cli/<family.as_str()>/<slot>.md` if the package has one, else the `generic`
+fragment. The family is `CliProfile::family()` of the agent's resolved v0.19.0 profile; a custom
+`[clis.<name>]` CLI resolves the family it declares with `family`, else `generic` — never inferred
+from `command` — so no CLI name is matched in rendering code. A render with no agent (repository
+root, MCP `get_skill`) passes `CliFamily::Generic`.
+
+No parallel `SkillFamily` type: v0.19.0 made `CliFamily` the one closed set of families, with
+`CliFamily::provider` its only exhaustive match. Selection does not match on it either — it uses
+`as_str()` as a directory name and falls back on a missing entry — so a family without a fragment
+needs no code, and adding a fragment for an existing family is an asset only. This also keeps
+`src/skills.rs` clear of the `cli-provider` source audit (*Per-CLI names are compared only inside
+the agent CLI module*), which forbids comparing values against `"claude"`, `"codex"` etc. outside
+`src/agent_cli/`.
+
+`build_boot_block(branch_id, broker_url, cli: &CliProfile)` reads both `cli.mcp_capable()` (form)
+and `cli.family()` (fragment). Callers already hold or resolve the profile; tests build one with
+`CliProfile::for_family(..)`.
 
 ### D3 — Only verified facts ship
 
@@ -71,7 +90,18 @@ are registry assets) — an override that wants different per-CLI prose writes i
 
 The no-leak audit renders each template once per registered family plus `generic`, and allows a
 vendor token only where the rendered text came from that family's own fragment. The base
-templates and the `generic` fragment must be vendor-free.
+templates and the `generic` fragment must be vendor-free. `skill-package-layout`'s per-file audit
+of every package file reads a file under `assets/cli/<family>/` as that family's fragment.
+
+### D6 — The mechanism table requirement is replaced, not modified
+
+*Per-CLI compact mechanism table* pins a table with a `claude` row and an `other` row. Once each
+agent sees only its own CLI's mechanism there is no table and no `other` row, so the requirement is
+REMOVED and an ADDED requirement states the per-agent mechanism. The surviving assertions carry
+over: a Claude-family agent sees `/compact` / `/clear`, the fallback points at
+`/compact` / `/save` / `/reset`, and no custom variant name such as `claude-oss` appears.
+*Paste handling instructions* survives as MODIFIED: its *Paste instruction format* scenario keeps
+its name, scoped to a Claude-family agent.
 
 ## Risks / Trade-offs
 
@@ -86,7 +116,7 @@ templates and the `generic` fragment must be vendor-free.
 ## Migration Plan
 
 1. Placeholders + `generic` fragments that reproduce today's vendor-neutral text; Claude fragment
-   reproduces today's Claude lines; `claude-oss` row dropped.
+   reproduces today's Claude lines (the table's `other` row becomes the `generic` text).
 2. Thread the profile family through `render`/`build_boot_block` callers.
 3. Audit per family; docs.
 Rollback: revert; rendering returns to the single text.

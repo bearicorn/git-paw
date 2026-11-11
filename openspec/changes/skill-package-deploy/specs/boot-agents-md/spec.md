@@ -2,7 +2,7 @@
 
 ### Requirement: Managed block indexes the provisioned skill packages
 
-The system SHALL include in an agent worktree's managed git-paw block a `## Skills` index with one entry per bundled package provisioned into that worktree, each giving the package's name, its frontmatter description, the worktree-relative path of its installed `SKILL.md`, and the package path of its helper. The index SHALL be generated from the package registry and the worktree's package selection, not from hand-written prose, and SHALL appear inside the markers before the inlined skill content. The rendered skill bodies SHALL continue to be inlined after the index. When no package is provisioned, no `## Skills` index SHALL appear.
+The system SHALL include in an agent worktree's managed git-paw block a `## Skills` index, generated from the registry and the worktree's package selection, with one entry per provisioned package giving its name, frontmatter description, installed `SKILL.md` path and helper package path. The index SHALL sit inside the markers before the inlined skill bodies, which stay inlined. With no package provisioned, no index SHALL appear.
 
 #### Scenario: Index lists the coordination package
 

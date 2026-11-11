@@ -6,7 +6,7 @@ Defines agent profiles: named configuration entries that state what an agent is 
 
 ### Requirement: Agent profiles are declared in `[profiles.<name>]`
 
-The system SHALL accept an optional top-level `[profiles.<name>]` table whose entries carry: `kind` (required; `"worker"` or `"delegate"`), `description` (required; non-empty, one line), `cli` (required; a detected CLI id or a `[clis.<name>]` key), `args` (optional string), `skill` (optional for a worker, required for a delegate; a skill name resolvable by the skill resolver), `approval` (optional; `"manual"`, `"auto"` or `"full-auto"`), and `timeout_seconds` (optional positive integer, delegate profiles only). A profile name SHALL match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not one of the two values; `description` is missing, empty or contains a line break; `cli` is missing; a delegate profile omits `skill`; a delegate profile sets `approval = "full-auto"`; `timeout_seconds` is `0` or is set on a worker profile; `skill` names `orchestrator` or its alias `supervisor`; or the name is invalid. Whether `cli` and `skill` resolve SHALL be checked when the profile is used, not at load. The global and repository files SHALL merge `[profiles]` by name, a repository entry replacing a global entry of the same name whole. Absent `[profiles]` and `default_profile`, pane commands, picker items, managed `AGENTS.md` blocks, session files and the human-readable status SHALL be identical to those produced before this requirement; `git paw status --json` SHALL differ only by the additive `profile` and `usage_by_profile` fields.
+The system SHALL accept an optional top-level `[profiles.<name>]` table. Each entry SHALL carry `kind` (`worker` or `delegate`), a one-line `description` and `cli` (a detected CLI id or `[clis.<name>]` key), and MAY carry `args`, `skill`, `approval` (`manual`, `auto` or `full-auto`) and, on a delegate, `timeout_seconds` (default 600). A delegate's approval SHALL default to `manual`. Whether `cli` and `skill` resolve SHALL be checked on use, not at load.
 
 #### Scenario: A worker and a delegate profile load
 
@@ -15,6 +15,10 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table whose en
 - **WHEN** the config is loaded
 - **THEN** both profiles SHALL be present with those values
 - **AND** `explorer`'s effective approval SHALL be `manual` and its effective timeout 600 seconds
+
+### Requirement: An invalid profile entry fails the configuration load
+
+Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill` or sets `approval = "full-auto"`; `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 
 #### Scenario: Missing or unknown kind is rejected
 
@@ -58,11 +62,19 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table whose en
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error naming the profile name
 
+### Requirement: Profiles merge by name across configuration files
+
+The global and repository configuration files SHALL merge `[profiles]` by name, a repository entry replacing a global entry of the same name whole, and SHALL merge `default_profile` the way they merge `default_cli`.
+
 #### Scenario: The repository entry replaces the global entry
 
 - **GIVEN** a global `[profiles.routine]` with `args = "--model a"` and a repository `[profiles.routine]` with no `args`
 - **WHEN** the merged config is loaded
 - **THEN** `routine` SHALL have no `args`
+
+### Requirement: A configuration without profiles behaves as before
+
+With no `[profiles]` table and no `default_profile`, pane commands, picker items, managed `AGENTS.md` blocks, session files and the human-readable status SHALL be identical to those produced before profiles existed, and `git paw status --json` SHALL differ only by the additive `profile` and `usage_by_profile` fields.
 
 #### Scenario: No profiles leaves behavior unchanged
 
@@ -71,9 +83,9 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table whose en
 - **THEN** the pane commands, picker items, managed `AGENTS.md` blocks, session file and human-readable status SHALL be byte-identical to those produced before this requirement
 - **AND** the status JSON SHALL differ only by `"profile": null` on each worktree and an empty `usage_by_profile`
 
-### Requirement: A worker profile shapes its worker's launch
+### Requirement: A worker profile shapes its worker's launch command
 
-When a worker is launched with a worker profile, the system SHALL resolve the profile's `cli` to its CLI record and SHALL build the pane command with the one launch-command builder, appending the profile's `args` immediately after the CLI's own `args`. The worker's approval level SHALL be the profile's `approval` when set, otherwise the configured worker default; the profile's level SHALL apply to that worker only. When the profile's `skill` is set and is not `coordination`, the skill SHALL be resolved through the skill resolver against the repository root, rendered with the same inputs as the coordination skill, and written into the worker's managed `AGENTS.md` block after the coordination skill under a heading naming the role skill; the coordination skill SHALL be injected exactly as it would be without a profile. The worktree entry SHALL record the profile name. A profile whose `cli` is not available SHALL fail the launch with an error naming the profile and the CLI; a role skill that does not resolve SHALL fail the launch with an error naming the profile and the skill. Naming a delegate profile where a worker profile is expected SHALL fail with an error stating the profile is a delegate.
+When a worker is launched with a worker profile, the system SHALL resolve the profile's `cli` to its CLI record and SHALL build the pane command with the one launch-command builder, appending the profile's `args` immediately after the CLI's own `args`, ahead of the CLI's operator-isolation arguments, native sandbox arguments, approval flags and session arguments. A worker profile SHALL therefore receive its CLI's operator isolation exactly as a worker launched with that CLI alone does.
 
 #### Scenario: Profile arguments follow the CLI's arguments
 
@@ -81,11 +93,31 @@ When a worker is launched with a worker profile, the system SHALL resolve the pr
 - **WHEN** a worker is launched with `routine` at `manual`
 - **THEN** its pane command SHALL begin `/opt/agent --quiet --model small`
 
+#### Scenario: A worker profile keeps its CLI's operator isolation
+
+- **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, a worker approval of `manual`, and `[profiles.deep]` with `kind = "worker"`, `cli = "opus"`, `args = "--effort high"`
+- **WHEN** the pane command of a worker launched with `deep` is built for a fresh launch assigned the session id `abc`
+- **THEN** it SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude --model opus --effort high --setting-sources project,local --session-id abc`
+
+### Requirement: A worker profile's approval level applies to its worker only
+
+A worker launched with a profile SHALL run at the profile's `approval` when set, otherwise at the configured worker default, and that level SHALL apply to that worker only. The native-sandbox refusal and the unsandboxed full-auto launch warning SHALL be evaluated at that worker's own level.
+
 #### Scenario: Profile approval applies only to its worker
 
 - **GIVEN** a default worker approval of `auto`, `[profiles.trusted]` with `approval = "full-auto"` on a CLI whose full-auto flags are `--yes`, and two workers — one launched with `trusted`, one with the plain CLI
 - **WHEN** both pane commands are built
 - **THEN** only the `trusted` worker's command SHALL contain `--yes`
+
+#### Scenario: A full-auto profile on an unsandboxed CLI warns
+
+- **GIVEN** a default worker approval of `manual` and `[profiles.trusted]` with `kind = "worker"`, `cli = "claude"`, `approval = "full-auto"`, and no `[clis.claude].sandbox`
+- **WHEN** `git paw start --profile trusted --branches feat/a` runs
+- **THEN** stderr SHALL name `claude` and say it runs at full-auto with no declared sandbox, once
+
+### Requirement: A worker profile's role skill follows the coordination skill
+
+When a worker profile's `skill` is set and is not `coordination`, the skill SHALL be resolved through the skill resolver against the repository root, rendered with the coordination skill's inputs, and written into the worker's managed `AGENTS.md` block after the coordination skill under a heading naming the role skill. The coordination skill SHALL be injected exactly as it would be without a profile.
 
 #### Scenario: The role skill is injected after the coordination skill
 
@@ -98,6 +130,10 @@ When a worker is launched with a worker profile, the system SHALL resolve the pr
 - **GIVEN** a worker profile with no `skill`
 - **WHEN** its managed `AGENTS.md` block is generated
 - **THEN** it SHALL equal the block generated for the same CLI without a profile
+
+### Requirement: A worker profile that cannot launch fails before any worktree exists
+
+A worker profile whose `cli` is not available SHALL fail the launch with an error naming the profile and the CLI, and a role skill that does not resolve SHALL fail it with an error naming the profile and the skill, before any worktree is created. Naming a delegate profile where a worker profile is expected SHALL fail with an error stating the profile is a delegate.
 
 #### Scenario: An unavailable profile CLI fails clearly
 
@@ -114,7 +150,7 @@ When a worker is launched with a worker profile, the system SHALL resolve the pr
 
 ### Requirement: Worker profile selection on launches without specs
 
-The system SHALL accept a top-level `default_profile` naming a worker profile. On a launch that is not spec-driven, the worker for each branch SHALL be chosen as: `--profile` (every branch) or `--cli` (every branch), which are mutually exclusive; otherwise a `--preset`'s CLI; otherwise the interactive selection, whose CLI picker SHALL start on `default_profile` when set, else on `default_cli`. Where a launch path uses a session-wide fallback without a picker, the fallback SHALL be `default_profile` before `default_cli`. For `git paw add` the order SHALL be: `--profile` or `--cli`; the spec's `paw_profile` or `paw_cli` with `--from-spec`; the session default — the first worktree's recorded profile, else its CLI; `default_profile`; `default_cli`. A `default_profile` that names no profile, or names a delegate profile, SHALL fail the launch that consults it with an error naming `default_profile`.
+The system SHALL accept a top-level `default_profile` naming a worker profile. On a launch that is not spec-driven, each branch's worker SHALL be chosen as: `--profile` or `--cli` (mutually exclusive) for every branch; otherwise a `--preset`'s CLI; otherwise the interactive selection, whose picker SHALL start on `default_profile` when set, else on `default_cli`. A session-wide fallback without a picker SHALL use `default_profile` before `default_cli`.
 
 #### Scenario: --profile maps every branch
 
@@ -133,6 +169,10 @@ The system SHALL accept a top-level `default_profile` naming a worker profile. O
 - **WHEN** the user chooses uniform mode in the interactive selection
 - **THEN** the CLI picker SHALL start on the `routine` entry
 
+### Requirement: Worker selection for an added worker
+
+For `git paw add` the worker SHALL be chosen as: `--profile` or `--cli`; with `--from-spec`, the spec's `paw_profile` or `paw_cli`; the session default — the first worktree's recorded profile, else its CLI; `default_profile`; `default_cli`. A `default_profile` that names no profile, or names a delegate profile, SHALL fail any launch that consults it with an error naming `default_profile`.
+
 #### Scenario: add inherits the session's profile
 
 - **GIVEN** a running session whose first worktree was launched with profile `routine`
@@ -145,23 +185,9 @@ The system SHALL accept a top-level `default_profile` naming a worker profile. O
 - **WHEN** `git paw add feat/c` runs in a session whose entries carry no profile, with no flags
 - **THEN** it SHALL fail with an error naming `default_profile`
 
-### Requirement: Delegate invocation contract
+### Requirement: A delegate runs only where and when it is allowed
 
-`git paw delegate <name>` SHALL run the named delegate profile once, non-interactively, and SHALL refuse — with an error, spawning nothing — when: run from a linked worktree; the environment carries `GIT_PAW_DELEGATE` (no nested delegates); `<name>` is not a delegate profile; the profile's CLI is unavailable; or that CLI resolves no headless form, in which case the error SHALL name `[clis.<cli>].headless_args`. The process SHALL be spawned with: working directory = the repository's main working tree root; argv = the prefix the one launch-command builder produces for the CLI record — the executable, its own `args` followed by the profile's `args`, any sandbox arguments the record declares, and the approval flags for the profile's effective level — then the session-id arguments when the CLI resolves a `session_id_args` template (with a freshly generated id), then the headless arguments; the delegate document (see *Delegate document*) on stdin; the inherited environment plus `GIT_PAW_DELEGATE=<name>` and without `GIT_PAW_BROKER_URL`; and no controlling terminal. No authority credential SHALL appear in its argv or environment. The task text SHALL NOT appear in argv. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
-
-#### Scenario: A delegate runs at the root with its arguments in order
-
-- **GIVEN** `[clis.agent] command = "/opt/agent"` with `headless_args = "--batch"` and `[profiles.explorer]` with `kind = "delegate"`, `cli = "agent"`, `args = "--model small"`, `skill = "explorer"`
-- **WHEN** `git paw delegate explorer --task "map the config loader"` runs from a subdirectory of the main working tree
-- **THEN** exactly one process SHALL be spawned with argv `/opt/agent --model small --batch`
-- **AND** its working directory SHALL be the main working tree root
-- **AND** its stdin SHALL contain `map the config loader` and its argv SHALL NOT
-
-#### Scenario: Environment marks the run and carries no broker URL or credential
-
-- **WHEN** a delegate is spawned in a repository with an active broker-enabled session
-- **THEN** its environment SHALL contain `GIT_PAW_DELEGATE=explorer`
-- **AND** SHALL NOT contain `GIT_PAW_BROKER_URL` or the session authority credential
+`git paw delegate <name>` SHALL run the named delegate profile once, non-interactively, and SHALL refuse, with an error and spawning nothing, when: run from a linked worktree; the environment carries `GIT_PAW_DELEGATE` (no nesting); `<name>` is not a delegate profile; the profile's CLI is unavailable; that CLI resolves no headless form, the error then naming `[clis.<cli>].headless_args`; or the native-sandbox rule would refuse a launch of that CLI at the profile's level.
 
 #### Scenario: Refused from a linked worktree
 
@@ -188,15 +214,63 @@ The system SHALL accept a top-level `default_profile` naming a worker profile. O
 - **WHEN** `git paw delegate routine --task x` runs
 - **THEN** it SHALL exit non-zero stating `routine` is a worker profile
 
+### Requirement: A delegate's argv is built from its CLI record without a shell
+
+A delegate's argv SHALL be built from its CLI record with no shell, each part split on whitespace, in this order: the CLI's `command`; the CLI's `args`; the profile's `args`; the CLI's operator-isolation arguments unless the CLI sets `inherit_operator_config = true`; the native sandbox arguments the record declares; the approval flags for the profile's level; the session-id arguments with a fresh id when the CLI has a template; then the headless arguments. The task SHALL NOT appear in argv.
+
+#### Scenario: A delegate runs at the root with its arguments in order
+
+- **GIVEN** `[clis.agent] command = "/opt/agent"` with `headless_args = "--batch"` and `[profiles.explorer]` with `kind = "delegate"`, `cli = "agent"`, `args = "--model small"`, `skill = "explorer"`
+- **WHEN** `git paw delegate explorer --task "map the config loader"` runs from a subdirectory of the main working tree
+- **THEN** exactly one process SHALL be spawned with argv `/opt/agent --model small --batch`
+- **AND** its working directory SHALL be the main working tree root
+- **AND** its stdin SHALL contain `map the config loader` and its argv SHALL NOT
+
+#### Scenario: A delegate gets its CLI's operator isolation
+
+- **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"` and `[profiles.explorer]` with `kind = "delegate"`, `cli = "opus"`, `args = "--model small"`, `skill = "explorer"`
+- **WHEN** `git paw delegate explorer --task x` runs
+- **THEN** its argv SHALL be `claude --model small --setting-sources project,local --session-id <id> -p`
+- **AND** its environment SHALL contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`
+
+#### Scenario: An opted-out CLI's delegate keeps the operator configuration
+
+- **GIVEN** the same profile and `[clis.opus] inherit_operator_config = true`
+- **WHEN** `git paw delegate explorer --task x` runs
+- **THEN** its argv SHALL NOT contain `--setting-sources` and its environment SHALL NOT contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+
+### Requirement: A delegate runs at the root with a marked, credential-free environment
+
+A delegate SHALL be spawned with: working directory = the repository's main working tree root; the delegate document on stdin; no controlling terminal; and the inherited environment plus `GIT_PAW_DELEGATE=<name>` and its CLI's operator-isolation environment, without `GIT_PAW_BROKER_URL` and without any authority credential. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
+
+#### Scenario: Environment marks the run and carries no broker URL or credential
+
+- **WHEN** a delegate is spawned in a repository with an active broker-enabled session
+- **THEN** its environment SHALL contain `GIT_PAW_DELEGATE=explorer`
+- **AND** SHALL NOT contain `GIT_PAW_BROKER_URL` or the session authority credential
+
 ### Requirement: Delegate document
 
-The stdin document SHALL consist of, in order: framing prose authored in the bundled asset `assets/delegate-framing.md`, rendered with the profile name, the repository root and the effective approval level; the profile's role skill resolved through the skill resolver against the repository root and rendered with the same gate-command and spec-backend inputs as the orchestrator skill; and the task. The framing SHALL state that the agent is a one-shot delegate, SHALL instruct it to return a compact result on stdout as its role skill specifies, and SHALL instruct it not to publish broker messages, start or stop sessions, run other delegates, or modify files unless its approval level permits edits. The task SHALL come from `--task <text>` or, when `--task` is absent, from standard input read to end of file; an empty or whitespace-only task SHALL be refused. The framing asset SHALL be covered by the no-language-leak audit and SHALL name no vendor product, model or project toolchain.
+The stdin document SHALL consist of, in order: framing prose from the bundled asset `assets/delegate-framing.md`, rendered with the profile name, the repository root and the effective approval level; the profile's role skill, resolved through the skill resolver against the repository root and rendered with the orchestrator skill's gate-command and spec-backend inputs; and the task.
 
 #### Scenario: The document carries framing, role skill and task in order
 
 - **GIVEN** the delegate profile `spec-audit` with `skill = "spec-auditor"`
 - **WHEN** it is invoked with `--task "audit feat/x at abc123, change add-x"`
 - **THEN** the stdin document SHALL contain the framing, then the rendered `spec-auditor` skill, then the task text, in that order
+
+### Requirement: Delegate framing is an audited, vendor-neutral asset
+
+The framing SHALL state that the agent is a one-shot delegate, SHALL instruct it to return a compact result on stdout as its role skill specifies, and SHALL instruct it not to publish broker messages, start or stop sessions, run other delegates, or modify files unless its approval level permits edits. The framing asset SHALL be covered by the no-language-leak audit and SHALL name no vendor product, model or project toolchain.
+
+#### Scenario: The framing is an audited asset
+
+- **WHEN** the delegate document renderer's source is inspected and the no-language-leak audit runs
+- **THEN** the framing sentences SHALL come from `assets/delegate-framing.md` and the audit SHALL cover it
+
+### Requirement: Delegate task input
+
+The task SHALL come from `--task <text>` or, when `--task` is absent, from standard input read to end of file. An empty or whitespace-only task SHALL be refused with a non-zero exit and nothing spawned.
 
 #### Scenario: The task may arrive on stdin
 
@@ -208,14 +282,9 @@ The stdin document SHALL consist of, in order: framing prose authored in the bun
 - **WHEN** `git paw delegate explorer --task "  "` runs
 - **THEN** it SHALL exit non-zero and spawn nothing
 
-#### Scenario: The framing is an audited asset
+### Requirement: Delegate runs time out
 
-- **WHEN** the delegate document renderer's source is inspected and the no-language-leak audit runs
-- **THEN** the framing sentences SHALL come from `assets/delegate-framing.md` and the audit SHALL cover it
-
-### Requirement: Delegate runs are bounded
-
-A delegate run SHALL be terminated, together with its process group, when the profile's `timeout_seconds` (default 600) elapses, and SHALL then be reported with outcome `timeout`. Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while it is active. A run that cannot be admitted SHALL be refused immediately — never queued — with an error naming the active runs' profiles; a run whose process no longer exists SHALL NOT count as active. Admission SHALL be decided by a pure function of the active runs and the requested level.
+A delegate run SHALL be terminated, together with its process group, when the profile's `timeout_seconds` (default 600) elapses, and SHALL then be reported with outcome `timeout`.
 
 #### Scenario: Timeout kills the process group
 
@@ -223,6 +292,10 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 - **WHEN** it is invoked
 - **THEN** the process and its child SHALL be terminated after about 2 seconds
 - **AND** the command SHALL exit non-zero reporting `timeout`
+
+### Requirement: Delegate runs are admitted four readers or one writer at a time
+
+Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. A run whose process no longer exists SHALL NOT count as active. Admission SHALL be a pure function of the active runs and the requested level.
 
 #### Scenario: A fifth read-only delegate is refused
 
@@ -243,9 +316,9 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 - **WHEN** admission is decided for a new run
 - **THEN** the dead run SHALL NOT count toward the limit
 
-### Requirement: Delegate result and run record
+### Requirement: Delegate result
 
-The delegate's standard output SHALL be the result: `git paw delegate` SHALL print it on its own standard output, truncated to at most 65,536 bytes with a final line stating that the output was truncated and naming the run log. The delegate's standard error SHALL NOT be returned to the caller. Every run SHALL append its standard output and standard error to a per-run log under `.git-paw/logs/delegates/` and one JSON line to `.git-paw/logs/delegates/runs.jsonl` carrying the profile name, the CLI id, the assigned CLI session id or `null`, the start time, the duration in seconds, and the outcome (`ok`, `failed` with the exit code, or `timeout`). The task text and the result SHALL NOT be written to the JSON line. `git paw delegate` SHALL exit `0` only when the delegate's process exited `0` within its timeout.
+The delegate's standard output SHALL be the result: `git paw delegate` SHALL print it on its own standard output, truncated to at most 65,536 bytes with a final line stating that the output was truncated and naming the run log, and SHALL NOT return the delegate's standard error. `git paw delegate` SHALL exit `0` only when the delegate's process exited `0` within its timeout.
 
 #### Scenario: A successful run prints its result
 
@@ -267,6 +340,17 @@ The delegate's standard output SHALL be the result: `git paw delegate` SHALL pri
 - **WHEN** it is invoked
 - **THEN** `git paw delegate` SHALL exit non-zero
 - **AND** the ledger line SHALL record outcome `failed` with exit code 3
+
+### Requirement: Delegate run record
+
+Every run SHALL append its standard output and standard error to a per-run log under `.git-paw/logs/delegates/`, and one JSON line to `.git-paw/logs/delegates/runs.jsonl` carrying the profile name, the CLI id, the assigned CLI session id or `null`, the start time, the duration in seconds, and the outcome (`ok`, `failed` with the exit code, or `timeout`). The JSON line SHALL NOT contain the task text or the result.
+
+#### Scenario: The ledger holds metadata only
+
+- **GIVEN** a delegate invoked with `--task "TASK-MARKER"` whose CLI prints `RESULT-MARKER` and exits 0
+- **WHEN** the run ends
+- **THEN** the new `runs.jsonl` line SHALL carry the profile name, the CLI id and outcome `ok`, and SHALL contain neither `TASK-MARKER` nor `RESULT-MARKER`
+- **AND** the run's log SHALL contain `RESULT-MARKER`
 
 ### Requirement: Delegate profiles can be listed
 

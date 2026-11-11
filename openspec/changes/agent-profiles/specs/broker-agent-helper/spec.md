@@ -19,7 +19,7 @@
 
 ### Requirement: The agent helpers refuse inside a delegate run
 
-The bundled `broker.sh` and `sweep.sh` helpers SHALL each refuse to run any subcommand — exiting non-zero with a message naming the delegate run, contacting no broker, publishing nothing and sending no keystroke to any pane — when their environment carries `GIT_PAW_DELEGATE`, as `git paw __authority` does. A delegate runs at the repository's main working tree, where the helpers would resolve the session's broker address from the repository configuration, and where a `setup-cli` grant lets them run without a prompt: `broker.sh` could publish as any agent id it names, and `sweep.sh` could publish orchestrator status or learnings, or type into a worker's pane. A delegate's result is its standard output, never a broker message or a keystroke.
+The bundled `broker.sh` and `sweep.sh` helpers SHALL each refuse every subcommand when their environment carries `GIT_PAW_DELEGATE`: they SHALL exit non-zero with a message naming the delegate run, contact no broker, publish nothing and send no keystroke to any pane. A delegate runs at the main working tree, where the helpers would otherwise reach the session's broker and panes; a delegate's result is its standard output, never a broker message or a keystroke.
 
 #### Scenario: broker.sh publishes nothing inside a delegate run
 
@@ -40,3 +40,14 @@ The bundled `broker.sh` and `sweep.sh` helpers SHALL each refuse to run any subc
 - **GIVEN** the same session and no `GIT_PAW_DELEGATE` in the environment
 - **WHEN** the bundled `broker.sh` runs `--agent feat-x status working`
 - **THEN** it SHALL publish the status as before
+
+### Requirement: The send helper refuses inside a delegate run
+
+`git paw __send` SHALL refuse with its refused exit status, sending no keystroke to any pane, when its environment carries `GIT_PAW_DELEGATE`, in addition to its existing refusals, so a delegate at the main working tree cannot type into a worker by calling it directly instead of through `sweep.sh tell`.
+
+#### Scenario: A direct send from a delegate run is refused
+
+- **GIVEN** an active session with an idle coding agent `feat-x` and `GIT_PAW_DELEGATE=explorer` in the environment at the main working tree
+- **WHEN** `git paw __send --agent=feat-x` runs with a message on stdin
+- **THEN** it SHALL exit `3` with a `refused:` line naming the delegate run
+- **AND** no keystroke SHALL reach any pane

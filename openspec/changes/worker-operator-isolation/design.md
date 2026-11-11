@@ -2,13 +2,18 @@
 
 Every worker pane command is built by `CliProfile::launch_command` (`src/agent_cli/profile.rs`).
 It concatenates the executable, `[clis.<name>].args`, native sandbox arguments, approval flags, then
-session-id or resume arguments. All worker launch paths call it: `commands/start.rs` (bare,
-spec-driven, supervised, readiness relaunch), `commands/launch.rs` (`add` / attach, dry-run line)
-and `commands/recover.rs`. Per-family facts live behind the `CliProvider` trait
+session-id or resume arguments. All worker launch paths call it: `commands/start.rs` (bare and
+spec-driven start, the held-boot-prompt readiness gate), `commands/launch.rs` (`attach_agent`,
+which serves supervised start in `commands/supervisor.rs` and `add`, and the dry-run line) and
+`commands/recover.rs`. Per-family facts live behind the `CliProvider` trait
 (`src/agent_cli/mod.rs`) with Null-Object defaults. The drive loop's headless orchestrator one-shot
-does **not** use this builder: `src/supervisor/escalation.rs` assembles its own argv from
-`headless_args`. The pane command reaches the pane as a shell line typed into it, so a leading
-`NAME=value` assignment is scoped to that one process.
+does **not** use this builder: `escalation::resolve_handoff` (`src/supervisor/escalation.rs`)
+assembles its own `HeadlessInvocation` argv from the record's `command()`, `args()`, sandbox,
+approval, session-id and headless facets, and spawns it without a shell through
+`CommandRunner::spawn`, adding only `GIT_PAW_BROKER_URL` to its environment. The orchestrator
+runs outside tmux, so no orchestrator pane goes through the builder either. The pane command
+reaches the pane as a shell line typed into it (`tmux send-keys`), so a leading `NAME=value`
+assignment is scoped to that one process.
 
 Claude Code facts, from the official docs (code.claude.com, read 2026-11-11):
 - `--setting-sources` takes `user`, `project` and `local`, and works in interactive mode. Managed
@@ -33,6 +38,9 @@ Claude Code facts, from the official docs (code.claude.com, read 2026-11-11):
 
 **Non-Goals:**
 - Isolating the operator's driving session or the headless orchestrator one-shot.
+- Delegate runs: `agent-profiles` (later in v0.20.0) applies the same facet when it extracts the
+  headless runner. The facet is therefore a plain value (`env` pairs plus `args`), usable both as a
+  shell prefix in a pane command and as `SpawnSpec` environment plus argv for a shell-less spawn.
 - Per-worker or per-profile config directories (re-login cost; see D1).
 - Families other than `claude` until their facts are verified (v0.23.0 audit).
 - Reading or writing any agent-CLI settings file. git-paw still touches none.
@@ -67,7 +75,9 @@ CLI's `args`, ahead of sandbox and approval flags. Putting it before the approva
 approval and session parts last, where the readiness and recovery code already expects them. Values
 are compile-time constants, so there is no quoting or injection surface. The ordering requirement
 is ADDED next to *Native sandbox arguments precede the approval flags once*, the same way the
-sandbox change slotted in without rewriting the builder requirement.
+sandbox change slotted in without rewriting the builder requirement. `agent-profiles` later appends
+a worker profile's `args` to the CLI's `args` slot, so the isolation arguments follow the profile's
+`args` too.
 
 ### D4 — Opt-out key `inherit_operator_config` on `[clis.<name>]`
 

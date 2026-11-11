@@ -2,7 +2,7 @@
 
 ### Requirement: Doctor reports where each bundled skill resolves from
 
-`git paw doctor` SHALL report one check named `skill sources`, in the group that reports the bundled packages, that resolves every package in the bundled package registry through the production skill resolver for the repository under diagnosis and names, for each package, the level that supplied it: `embedded`, `repo` followed by the winning `SKILL.md` path, or `user` followed by the winning `SKILL.md` path. The check SHALL be ✓ when every package resolves, whatever its source. When an override directory exists, at either level, for a skill that is not overridable (`cli-setup`), the check SHALL report ⚠ naming that directory and stating that it is ignored, with a remedy to remove it, and SHALL still name that package as `embedded`. When any package fails to resolve, the check SHALL be ✗, naming the package and the failing override path, with a remedy to fix or remove that override. The check SHALL only read files and SHALL appear in `--json` output like every other check.
+`git paw doctor` SHALL report a read-only `skill sources` check in the Bundled-scripts group that resolves every registered package through the production resolver and names each one's source: `embedded`, `repo <SKILL.md path>` or `user <SKILL.md path>`. It SHALL be ✓ when all resolve, ⚠ naming an ignored `cli-setup` override directory (remedy: remove it), and ✗ naming the package and override path when one fails to resolve (remedy: fix or remove it).
 
 #### Scenario: All bundled skills embedded
 

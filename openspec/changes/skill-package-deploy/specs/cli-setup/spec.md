@@ -107,6 +107,8 @@ Test: `cli_setup::facts::tests::no_allow_entry_names_a_keystroke_or_verdict_subc
 - **THEN** its `permissions.ask` entries SHALL include `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)` and `Bash(.git-paw/scripts/sweep.sh tell *)`
 - **AND** the grant table SHALL list `sweep.sh tell` as never granted
 
+Test: `cli_setup::facts::tests::the_message_typing_tell_subcommand_always_prompts`
+
 #### Scenario: Every planned allow entry names a bundled helper
 
 - **WHEN** the allowlist item is planned
