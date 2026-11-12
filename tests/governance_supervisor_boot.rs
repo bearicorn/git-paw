@@ -24,6 +24,7 @@ use git_paw::skills::{render, supervisor_boot_context};
 /// developer's own overrides never change what this test sees.
 fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
     git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+        .map(git_paw::skills::with_package_references)
 }
 
 /// Assemble the supervisor pane's full boot-prompt body the way

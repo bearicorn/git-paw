@@ -37,7 +37,7 @@ const STACK_SPECIFIC_TOKENS: &[&str] = &[
 
 fn supervisor_skill() -> String {
     git_paw::skills::bundled_package("orchestrator")
-        .map(|p| p.skill_md.content.to_string())
+        .map(git_paw::skills::package_text)
         .expect("orchestrator.md is at the expected path")
 }
 

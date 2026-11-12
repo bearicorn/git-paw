@@ -161,6 +161,8 @@ impl GitPawMcpServer {
     #[tool(
         description = "Return the rendered content of a named agent skill (post {{...}} \
                        substitution) plus its source (standard | user_override | embedded). \
+                       The content is the skill's SKILL.md followed by each of its references, \
+                       each appended under a '## Reference: <path>' heading. \
                        Read-only — no disk write. Unknown skills return { \"skill\": null } with a \
                        message, not a transport error."
     )]
@@ -198,9 +200,15 @@ impl GitPawMcpServer {
                 // exactly as `git paw init` exports it: the standardized
                 // `SKILL.md`, rendered with the configured gate commands and no
                 // session value.
-                let content = if template.name == skills::ORCHESTRATOR_SKILL {
-                    let supervisor = cfg.supervisor.clone().unwrap_or_default();
-                    skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
+                let supervisor = cfg.supervisor.clone().unwrap_or_default();
+                let orchestrator = template.name == skills::ORCHESTRATOR_SKILL;
+                let gates = if orchestrator {
+                    supervisor.gate_commands()
+                } else {
+                    gates
+                };
+                let content = if orchestrator {
+                    skills::render_standardized(&template, &gates, &backends)
                 } else {
                     // No agent CLI is known here, so the per-CLI fragments
                     // render their `generic` form.
@@ -213,6 +221,34 @@ impl GitPawMcpServer {
                         &backends,
                         crate::agent_cli::CliFamily::Generic,
                     )
+                };
+                // Then each of the package's references, rendered with the
+                // same values, under a heading naming its path — so an MCP
+                // client loses no content the skill moved into a reference.
+                let content = match skills::bundled_package(&template.name) {
+                    Some(package) => {
+                        let inputs = skills::RenderInputs {
+                            branch: &branch,
+                            root: false,
+                            broker_url: &broker_url,
+                            project: &project,
+                            gates,
+                            backends: &backends,
+                            family: crate::agent_cli::CliFamily::Generic,
+                        };
+                        let resolved = skills::ResolvedPackage {
+                            package,
+                            template: template.clone(),
+                        };
+                        let references = skills::render_references(&resolved, &inputs);
+                        skills::join_package_document(
+                            &content,
+                            references
+                                .iter()
+                                .map(|f| (f.path.as_str(), f.content.as_str())),
+                        )
+                    }
+                    None => content,
                 };
                 let source = match template.source {
                     Source::Embedded => "embedded",
@@ -267,18 +303,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let server = server_for(tmp.path().to_path_buf());
         let config = crate::config::PawConfig::default();
-        let exported = crate::skills::render_standardized(
-            &crate::skills::resolve_from(
+        let supervisor = config.supervisor.clone().unwrap_or_default();
+        let resolved = crate::skills::ResolvedPackage {
+            package: crate::skills::bundled_package(crate::skills::ORCHESTRATOR_SKILL).unwrap(),
+            template: crate::skills::resolve_from(
                 crate::skills::ORCHESTRATOR_SKILL,
                 &crate::skills::SkillRoots::default(),
             )
             .unwrap(),
-            &config
-                .supervisor
-                .clone()
-                .unwrap_or_default()
-                .gate_commands(),
-            &[],
+        };
+        // The package as `git paw init` installs it: the standardized
+        // `SKILL.md`, then each reference under its heading.
+        let exported = crate::skills::render_package_document(
+            &resolved,
+            &crate::skills::RenderInputs {
+                branch: "main",
+                root: true,
+                broker_url: "",
+                project: "",
+                gates: supervisor.gate_commands(),
+                backends: &[],
+                family: crate::agent_cli::CliFamily::Generic,
+            },
         );
 
         for name in ["orchestrator", "supervisor"] {
@@ -289,7 +335,7 @@ mod tests {
             assert_eq!(skill.name, "orchestrator");
             assert_eq!(
                 skill.content, exported,
-                "{name} serves the exported SKILL.md"
+                "{name} serves the exported package"
             );
             assert!(!skill.content.contains("http://"));
         }
@@ -322,6 +368,77 @@ mod tests {
             skill.content
         );
         assert!(!skill.content.contains("{{CLI_NOTES}}"));
+    }
+
+    // mcp-server / Scenario: get_skill includes the orchestrator's gate references
+    #[test]
+    fn get_skill_includes_the_orchestrators_gate_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_for(tmp.path().to_path_buf());
+        let skill = server
+            .get_skill(Parameters(GetSkillParams {
+                name: "orchestrator".to_string(),
+            }))
+            .0
+            .skill
+            .expect("the orchestrator skill is served");
+
+        let skill_md = crate::skills::render_standardized(
+            &crate::skills::resolve_from(
+                crate::skills::ORCHESTRATOR_SKILL,
+                &crate::skills::SkillRoots::default(),
+            )
+            .unwrap(),
+            &crate::config::SupervisorConfig::default().gate_commands(),
+            &[],
+        );
+        assert!(
+            skill.content.starts_with(&skill_md),
+            "the content opens with the rendered orchestrator SKILL.md"
+        );
+        let heading = "## Reference: references/gates/spec-audit.md";
+        let at = skill
+            .content
+            .find(heading)
+            .expect("a heading names references/gates/spec-audit.md");
+        assert!(
+            skill.content[at..].contains("### Spec Audit Procedure"),
+            "the spec-audit reference's rendered content follows its heading"
+        );
+        assert!(
+            !skill.content[at..].contains("{{SPEC_VALIDATE_COMMAND}}"),
+            "the reference is rendered"
+        );
+    }
+
+    // mcp-server / Scenario: A skill without references is unchanged
+    #[test]
+    fn get_skill_serves_a_skill_without_references_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_for(tmp.path().to_path_buf());
+        let before: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let skill = server
+            .get_skill(Parameters(GetSkillParams {
+                name: "docs-fetch".to_string(),
+            }))
+            .0
+            .skill
+            .expect("docs-fetch is served");
+
+        let rendered = crate::skills::render(
+            &crate::skills::resolve_from("docs-fetch", &crate::skills::SkillRoots::default())
+                .unwrap(),
+            &crate::git::current_branch(tmp.path()).unwrap_or_else(|_| "main".to_string()),
+            "http://127.0.0.1:9119",
+            &crate::git::project_name(tmp.path()),
+            &crate::skills::GateCommands::default(),
+            &[],
+            crate::agent_cli::CliFamily::Generic,
+        );
+        assert_eq!(skill.content, rendered, "the rendered docs-fetch SKILL.md");
+        assert!(!skill.content.contains("## Reference: "));
+        let after: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(before.len(), after.len(), "no file is written to disk");
     }
 
     #[test]

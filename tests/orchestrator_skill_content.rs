@@ -16,6 +16,7 @@ use git_paw::specs::SpecBackendKind;
 /// developer's own overrides never change what this test sees.
 fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
     git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+        .map(git_paw::skills::with_package_references)
 }
 
 /// The raw orchestrator template, frontmatter included, with the helper
@@ -25,7 +26,7 @@ fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills
 /// helper path are satisfied by the package path*).
 fn template() -> String {
     git_paw::skills::bundled_package("orchestrator")
-        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
+        .map(|p| git_paw::skills::substitute_helper_paths(&git_paw::skills::package_text(p)))
         .expect("orchestrator.md is at the expected path")
 }
 
@@ -497,5 +498,504 @@ fn must_succeed_steps_are_never_piped() {
     assert!(
         commands >= 5,
         "expected the merge loop's commands, found {commands}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: the audit gates as package references.
+// ---------------------------------------------------------------------------
+
+/// The three audit-gate references, by package-relative path, with the
+/// bracketed prefix each gate's findings carry.
+const AUDIT_REFERENCES: [(&str, &str); 3] = [
+    ("references/gates/spec-audit.md", "[spec audit]"),
+    ("references/gates/doc-audit.md", "[doc audit]"),
+    ("references/gates/security-audit.md", "[security audit]"),
+];
+
+/// A spec-validate command that carries the per-invocation `{{CHANGE_ID}}`.
+const SPEC_VALIDATE: &str = "spec-check validate {{CHANGE_ID}} --strict";
+
+/// The orchestrator package rendered for the repository root, as
+/// `git paw init` installs it, with a configured spec-validate command.
+fn rendered_package() -> Vec<git_paw::skills::RenderedFile> {
+    let package = git_paw::skills::bundled_package("orchestrator").expect("orchestrator package");
+    let resolved = git_paw::skills::ResolvedPackage {
+        package,
+        template: bare_template(),
+    };
+    let inputs = git_paw::skills::RenderInputs {
+        branch: "main",
+        root: true,
+        broker_url: "",
+        project: "my-project",
+        gates: GateCommands {
+            spec_validate_command: Some(SPEC_VALIDATE),
+            ..GateCommands::default()
+        },
+        backends: &[SpecBackendKind::OpenSpec],
+        family: git_paw::agent_cli::CliFamily::Generic,
+    };
+    git_paw::skills::render_package(&resolved, &inputs)
+}
+
+/// The resolved orchestrator template on its own — `SKILL.md` without the
+/// references [`resolve`] appends — as a renderer receives it.
+fn bare_template() -> git_paw::skills::SkillTemplate {
+    git_paw::skills::resolve_from("orchestrator", &git_paw::skills::SkillRoots::default())
+        .expect("orchestrator resolves")
+}
+
+/// The rendered file at `path` of [`rendered_package`].
+fn rendered_file(path: &str) -> String {
+    rendered_package()
+        .into_iter()
+        .find(|f| f.path == path)
+        .map_or_else(
+            || panic!("the orchestrator package renders `{path}`"),
+            |f| f.content,
+        )
+}
+
+/// The raw orchestrator `SKILL.md` template (helper paths rendered), without
+/// its references.
+fn skill_md_only() -> String {
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
+        .expect("orchestrator package")
+}
+
+/// The Workflow step that opens with `start`, up to `end`, collapsed.
+fn workflow_step(skill: &str, start: &str, end: &str) -> String {
+    let from = skill
+        .find(start)
+        .unwrap_or_else(|| panic!("SKILL.md has the `{start}` step"));
+    let to = from
+        + skill[from..]
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` follows `{start}`"));
+    collapse(&skill[from..to])
+}
+
+// skill-agent / Scenario: The three audit references exist and are rendered
+#[test]
+fn the_three_audit_references_exist_and_are_rendered() {
+    let files = rendered_package();
+    for (path, _) in AUDIT_REFERENCES {
+        let file = files
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap_or_else(|| panic!("the package renders `{path}`"));
+        assert!(!file.executable, "`{path}` is a document, not a script");
+        assert!(
+            !file.content.contains("_COMMAND}}") && !file.content.contains("{{SPEC_PATH"),
+            "`{path}` has no unrendered gate placeholder"
+        );
+    }
+    let spec_audit = rendered_file("references/gates/spec-audit.md");
+    assert!(
+        spec_audit.contains(SPEC_VALIDATE),
+        "the spec-audit reference carries the rendered spec-validate command"
+    );
+}
+
+// skill-agent / Scenario: Gate content is moved, not duplicated
+#[test]
+fn gate_content_is_moved_not_duplicated() {
+    let skill = rendered_file("SKILL.md");
+    for moved in [
+        "### Spec Audit Procedure",
+        "**Locate specs**",
+        "#### Governance verification",
+        "**Missing-doc handling.**",
+        "the project's user-guide pages (mdBook",
+        "top-level `README.md`",
+        "- command injection",
+        "- path traversal",
+    ] {
+        assert!(
+            !skill.contains(moved),
+            "`{moved}` moved to a reference and must not remain in SKILL.md"
+        );
+    }
+}
+
+// skill-agent / Scenario: Each reference is self-contained
+#[test]
+fn each_reference_is_self_contained() {
+    for (path, prefix) in AUDIT_REFERENCES {
+        let text = collapse(&rendered_file(path));
+        assert!(
+            text.contains("re-resolve") && text.contains("git rev-parse <branch>"),
+            "`{path}` states the gate runs against the re-resolved tip"
+        );
+        assert!(
+            text.contains("merge-base") && text.contains("git merge-base <integration-target>"),
+            "`{path}` states change contribution is diffed against the merge-base"
+        );
+        assert!(
+            text.contains("change id"),
+            "`{path}` names the change id among its inputs"
+        );
+        assert!(
+            text.contains(&format!("{prefix} <")),
+            "`{path}` states the `{prefix}` finding format"
+        );
+        assert!(
+            text.contains("publish nothing") && text.contains("return the verdict"),
+            "`{path}` states a delegated reader publishes nothing and returns only its verdict"
+        );
+    }
+}
+
+// skill-agent / Scenario: Each reference restates the bare-command rule
+#[test]
+fn each_reference_restates_the_bare_command_rule() {
+    for (path, _) in AUDIT_REFERENCES {
+        let text = collapse(&rendered_file(path));
+        assert!(
+            text.contains("run the gate command bare"),
+            "`{path}` instructs running the gate command bare"
+        );
+        assert!(
+            text.contains("read its exit status directly"),
+            "`{path}` instructs reading the exit status directly"
+        );
+        assert!(
+            text.contains("never pipe it into another command"),
+            "`{path}` forbids piping the gate command"
+        );
+    }
+}
+
+// skill-agent / Scenario: Testing and regression stay inline
+#[test]
+fn testing_and_regression_stay_inline() {
+    let skill = skill_md_only();
+    let testing = workflow_step(&skill, "4. **Testing**", "5. **Regression analysis**");
+    assert!(testing.contains("{{test_command}}"));
+    assert!(testing.contains("run the whole suite — never fail-fast"));
+    let regression = workflow_step(&skill, "5. **Regression analysis**", "6. **Spec audit**");
+    assert!(regression.contains("any test that previously passed and now fails is a regression"));
+    assert!(regression.contains("[regression] <test name>"));
+}
+
+// skill-agent / Scenario: Each audit gate step names its installed reference
+#[test]
+fn each_audit_gate_step_names_its_installed_reference() {
+    let skill = skill_md_only();
+    for (start, end, gate) in [
+        ("6. **Spec audit**", "6a. **Doc audit**", "spec-audit"),
+        ("6a. **Doc audit**", "6b. **Security audit**", "doc-audit"),
+        (
+            "6b. **Security audit**",
+            "7. **Verify or feedback**",
+            "security-audit",
+        ),
+    ] {
+        let step = workflow_step(&skill, start, end);
+        assert!(
+            step.contains(&format!(
+                ".git-paw/skills/orchestrator/references/gates/{gate}.md"
+            )),
+            "the `{start}` step names its installed reference"
+        );
+        assert!(
+            step.contains("before running this gate"),
+            "the `{start}` step says to read the reference before running the gate"
+        );
+    }
+}
+
+// skill-agent / Scenario: A moved section still satisfies its requirement
+#[test]
+fn a_moved_section_still_satisfies_its_requirement() {
+    let package = git_paw::skills::bundled_package("orchestrator").expect("orchestrator package");
+    let resolved = git_paw::skills::ResolvedPackage {
+        package,
+        template: bare_template(),
+    };
+    let inputs = git_paw::skills::RenderInputs {
+        branch: "main",
+        root: true,
+        broker_url: "",
+        project: "my-project",
+        gates: GateCommands::default(),
+        backends: &[],
+        family: git_paw::agent_cli::CliFamily::Generic,
+    };
+    let document = git_paw::skills::render_package_document(&resolved, &inputs);
+    let reference = document
+        .find("## Reference: references/gates/spec-audit.md")
+        .expect("the package document carries the spec-audit reference");
+    let procedure = document
+        .find("### Spec Audit Procedure")
+        .expect("the package satisfies the Spec Audit Procedure requirement");
+    assert!(
+        procedure > reference,
+        "the procedure is found in references/gates/spec-audit.md"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: the delegation contract.
+// ---------------------------------------------------------------------------
+
+/// Vendor product and model names, and vendor persona paths, that the
+/// delegation section must not carry.
+const VENDOR_TOKENS: &[&str] = &[
+    "claude",
+    "anthropic",
+    "codex",
+    "openai",
+    "gemini",
+    "google",
+    "copilot",
+    "cursor",
+    "aider",
+    "antigravity",
+    "opus",
+    "sonnet",
+    "haiku",
+    "gpt",
+    "/agents/",
+    ".claude",
+    ".codex",
+    ".gemini",
+];
+
+/// Build tools, package managers and recipe runners an exported instruction
+/// must not name.
+const BUILD_TOKENS: &[&str] = &[
+    "cargo", "just", "make", "npm", "pip", "yarn", "pnpm", "gradle", "maven",
+];
+
+/// The whole words of `text`, lower-cased.
+fn words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The bold-led paragraph of `SKILL.md` opened by `lead`, collapsed.
+fn paragraph(lead: &str) -> String {
+    let skill = skill_md_only();
+    let start = skill
+        .find(lead)
+        .unwrap_or_else(|| panic!("SKILL.md has the `{lead}` paragraph"));
+    let rest = &skill[start..];
+    collapse(&rest[..rest.find("\n\n").unwrap_or(rest.len())])
+}
+
+// skill-agent / Scenario: The delegation section defines the verdict shape
+#[test]
+fn the_delegation_section_defines_the_verdict_shape() {
+    let s = section("### Delegating gates");
+    assert!(s.contains("compressed verdict"));
+    assert!(s.contains("the gate name; `pass` or `fail`"));
+    assert!(s.contains("one line per finding, `[<gate prefix>] <location>: <issue>`"));
+    assert!(s.contains("returns no raw tool output"));
+}
+
+// skill-agent / Scenario: Delegation follows testing and regression
+#[test]
+fn delegation_follows_testing_and_regression() {
+    let s = section("### Delegating gates");
+    assert!(s.contains("delegate the audit gates only after both have passed"));
+    assert!(s.contains("run the testing and regression-analysis gates (steps 4 and 5) yourself"));
+}
+
+// skill-agent / Scenario: Only the orchestrator publishes
+#[test]
+fn only_the_orchestrator_publishes() {
+    let s = section("### Delegating gates");
+    assert!(s.contains("a delegated gate never publishes `agent.verified` or `agent.feedback`"));
+    assert!(s.contains(
+        "you publish `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`"
+    ));
+    assert!(s.contains("one `feedback-gate` call per finding"));
+    assert!(s.contains(
+        "a delegated gate never answers a permission prompt, sends input to an agent pane, or runs a broker or sweep helper verb"
+    ));
+}
+
+// skill-agent / Scenario: Inline fallback without subagents
+#[test]
+fn inline_fallback_without_subagents() {
+    let s = section("### Delegating gates");
+    assert!(s.contains(
+        "without subagent support**, read each reference yourself and run the gate inline"
+    ));
+    assert!(s.contains("isolated read-only context that returns a map"));
+}
+
+// skill-agent / Scenario: The delegation section is vendor-neutral
+#[test]
+fn the_delegation_section_is_vendor_neutral() {
+    let s = section("### Delegating gates");
+    for token in VENDOR_TOKENS {
+        assert!(
+            !s.contains(token),
+            "the delegation section names `{token}`:\n{s}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: a self-hosted session runs the branch's build.
+// ---------------------------------------------------------------------------
+
+// skill-agent / Scenario: A self-hosted session checks the binary it runs
+#[test]
+fn a_self_hosted_session_checks_the_binary_it_runs() {
+    let bootstrap = section("### Bootstrap — your first action");
+    assert!(bootstrap.contains("self-hosted session: run the branch's own build"));
+    let p = paragraph("**Self-hosted session:");
+    assert!(p.contains("git-paw's own source"));
+    assert!(p.contains("confirm at bootstrap that the `git paw` this session runs is the build from the branch under test, not a previously installed copy"));
+    assert!(p.contains("a stale binary silently re-introduces bugs the branch has already fixed"));
+}
+
+// skill-agent / Scenario: A stale binary is raised before work is driven
+#[test]
+fn a_stale_binary_is_raised_before_work_is_driven() {
+    let p = paragraph("**Self-hosted session:");
+    assert!(p.contains(
+        "tell the human to rebuild it with the project's own build and run the session on that build, before you drive any agent"
+    ));
+}
+
+// skill-agent / Scenario: The instruction names no build command
+#[test]
+fn the_self_hosted_instruction_names_no_build_command() {
+    let p = words(&paragraph("**Self-hosted session:"));
+    for token in BUILD_TOKENS {
+        assert!(
+            !p.iter().any(|w| w == token),
+            "the self-hosted-session instruction names `{token}`"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: the Baseline step prepares dependencies.
+// ---------------------------------------------------------------------------
+
+/// Workflow step 1 (Baseline), collapsed.
+fn baseline_step() -> String {
+    workflow_step(
+        &skill_md_only(),
+        "1. **Baseline**",
+        "1.5 **Launch-time pane sweep**",
+    )
+}
+
+// skill-agent / Scenario: The Baseline step prepares the checkout first
+#[test]
+fn the_baseline_step_prepares_the_checkout_first() {
+    let s = baseline_step();
+    assert!(s.contains(
+        "before recording, ensure the checkout you run the gate commands in — the root checkout or the verify worktree — has the project's dependencies installed"
+    ));
+    assert!(s.contains(
+        "the way the project's own setup or its `[worktree.hooks] on_create` hook installs them"
+    ));
+}
+
+// skill-agent / Scenario: A baseline that fails for missing dependencies is
+// not recorded
+#[test]
+fn a_baseline_that_fails_for_missing_dependencies_is_not_recorded() {
+    let s = baseline_step();
+    assert!(s.contains(
+        "if the baseline fails because dependencies are missing, install them and re-run it"
+    ));
+    assert!(s.contains("never record that failing run as the baseline"));
+}
+
+// skill-agent / Scenario: The Baseline instruction names no package manager
+#[test]
+fn the_baseline_instruction_names_no_package_manager() {
+    let s = words(&baseline_step());
+    for token in BUILD_TOKENS {
+        assert!(
+            !s.iter().any(|w| w == token),
+            "the Baseline step names `{token}`"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: no gate sentence lost in the move.
+// ---------------------------------------------------------------------------
+
+/// The gate text as it stood in `SKILL.md` before the move.
+const PRE_MOVE_GATES: &str = include_str!("fixtures/orchestrator_gates_pre_move.md");
+
+/// Pre-move sentences deliberately reworded by the move, each with the text
+/// that replaced it. In a separate reference, "below" no longer points at the
+/// Spec Audit Procedure, so doc-audit names its reference path instead.
+const REWORDED: [(&str, &str); 1] = [(
+    "(see \"Spec Audit Procedure\" below —",
+    "(see \"Spec Audit Procedure\" in `.git-paw/skills/orchestrator/references/gates/spec-audit.md` —",
+)];
+
+// skill-agent / Scenario: Gate content is moved, not duplicated — and no
+// sentence of it is lost: the union of SKILL.md and its references carries
+// every pre-move gate sentence byte-for-byte (whitespace collapsed).
+#[test]
+fn every_pre_move_gate_sentence_survives_in_the_package() {
+    let package = git_paw::skills::bundled_package("orchestrator").expect("orchestrator package");
+    let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let union = squash(&git_paw::skills::package_text(package));
+
+    let body = PRE_MOVE_GATES
+        .split_once("-->")
+        .map_or(PRE_MOVE_GATES, |(_, rest)| rest);
+    // Drop the step numbers ("6. ", "6a. ", "6b. ") that only the Workflow
+    // pointers keep; the moved bodies are unnumbered paragraphs.
+    let body: String = body
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            ["6. ", "6a. ", "6b. "]
+                .iter()
+                .find_map(|n| trimmed.strip_prefix(n))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut body = squash(&body);
+    for (before, after) in REWORDED {
+        assert!(
+            body.contains(before),
+            "reworded sentence `{before}` is in the fixture"
+        );
+        assert!(union.contains(after), "its replacement `{after}` ships");
+        body = body.replace(before, after);
+    }
+
+    let mut sentences = 0;
+    let mut rest = body.as_str();
+    while !rest.is_empty() {
+        let end = rest
+            .char_indices()
+            .find(|&(i, c)| matches!(c, '.' | ':' | ';') && rest[i + 1..].starts_with(' '))
+            .map_or(rest.len(), |(i, _)| i + 1);
+        let sentence = rest[..end].trim();
+        if !sentence.is_empty() {
+            sentences += 1;
+            assert!(
+                union.contains(sentence),
+                "pre-move gate sentence lost from the orchestrator package: {sentence}"
+            );
+        }
+        rest = rest[end..].trim_start();
+    }
+    assert!(
+        sentences >= 70,
+        "expected the whole gate text, checked {sentences} sentences"
     );
 }

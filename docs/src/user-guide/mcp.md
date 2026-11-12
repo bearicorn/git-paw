@@ -323,6 +323,14 @@ error. The orchestrator skill is served under the name `orchestrator`
 (`supervisor` is an alias returning the same content) — the same procedure
 `git paw init` exports to `.git-paw/skills/orchestrator/SKILL.md`.
 
+`content` is the whole package: the rendered `SKILL.md`, then each of the
+skill's references rendered with the same values, each introduced by a
+`## Reference: <path>` heading naming its path inside the package (for the
+orchestrator, `references/gates/spec-audit.md`, `doc-audit.md` and
+`security-audit.md`), so an MCP client loses none of the gate procedures
+the skill keeps in references. A skill with no references returns its
+rendered `SKILL.md` unchanged. The tool writes nothing to disk.
+
 Each spec format decides where its spec lives. `path` is relative to the
 repository root and always names an existing file or directory (a spec whose
 files vanished after the scan is not served); `title` is the first `# `
