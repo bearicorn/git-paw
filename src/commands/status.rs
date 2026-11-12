@@ -56,6 +56,7 @@ fn status_json(
             serde_json::json!({
                 "branch": e.branch,
                 "cli": e.cli,
+                "profile": e.profile,
                 "worktree_path": e.worktree_path,
                 "cli_session_id": e.cli_session_id,
                 "usage": usage.known().map_or(serde_json::Value::Null, usage_json),
@@ -352,6 +353,62 @@ pub fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worktree(branch: &str, cli: &str, profile: Option<&str>) -> session::WorktreeEntry {
+        session::WorktreeEntry {
+            branch: branch.to_string(),
+            worktree_path: std::path::PathBuf::from(format!("/nonexistent/{branch}")),
+            cli: cli.to_string(),
+            profile: profile.map(str::to_string),
+            branch_created: false,
+            base_branch: None,
+            pending_boot_prompt: None,
+            pending_entry_point: None,
+            runtime_slot: None,
+            cli_session_id: None,
+            spec_id: None,
+        }
+    }
+
+    fn session_with(worktrees: Vec<session::WorktreeEntry>) -> session::Session {
+        session::Session {
+            session_name: "paw-test".to_string(),
+            repo_path: std::path::PathBuf::from("/nonexistent/repo"),
+            project_name: "test".to_string(),
+            created_at: std::time::SystemTime::now(),
+            status: session::SessionStatus::Active,
+            worktrees,
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
+            mode: session::SessionMode::Bare,
+            dashboard_pane: None,
+            layout: None,
+            broker_authority: None,
+        }
+    }
+
+    /// Spec scenario "Status JSON carries the profile".
+    #[test]
+    fn status_json_carries_the_profile() {
+        let ctx = CommandContext::with_config(
+            std::path::PathBuf::from("/nonexistent/repo"),
+            crate::config::PawConfig::default(),
+        );
+        let existing = session_with(vec![
+            worktree("feat/a", "beta", Some("routine")),
+            worktree("feat/b", "alpha", None),
+        ]);
+        let json = status_json(&ctx, &existing, session::DisplayStatus::Active, false, None);
+        assert_eq!(json["worktrees"][0]["profile"], "routine");
+        assert_eq!(json["worktrees"][1]["profile"], serde_json::Value::Null);
+        assert!(
+            json["worktrees"][1]
+                .as_object()
+                .unwrap()
+                .contains_key("profile")
+        );
+    }
 
     const URL: &str = "http://127.0.0.1:9119";
 

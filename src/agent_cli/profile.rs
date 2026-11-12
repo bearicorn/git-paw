@@ -33,6 +33,9 @@ pub struct CliProfile {
     base_command: String,
     entry: Option<CustomCli>,
     family: CliFamily,
+    /// A worker or delegate profile's `args`, placed right after the CLI's
+    /// own `args`.
+    profile_args: Option<String>,
 }
 
 impl CliProfile {
@@ -60,6 +63,7 @@ impl CliProfile {
             id,
             entry,
             family,
+            profile_args: None,
         }
     }
 
@@ -73,7 +77,22 @@ impl CliProfile {
             id,
             entry: None,
             family,
+            profile_args: None,
         }
+    }
+
+    /// This record with an agent profile's `args`, which every launch places
+    /// immediately after the CLI's own `args`. Blank arguments add nothing.
+    #[must_use]
+    pub fn with_profile_args(mut self, args: Option<&str>) -> Self {
+        self.profile_args = args.filter(|a| !a.trim().is_empty()).map(str::to_string);
+        self
+    }
+
+    /// The agent profile's `args` this record launches with, if any.
+    #[must_use]
+    pub fn profile_args(&self) -> Option<&str> {
+        self.profile_args.as_deref()
     }
 
     /// The CLI id: the `[clis.<name>]` key or known binary name.
@@ -390,7 +409,8 @@ impl CliProfile {
     }
 
     /// The pane command for one launch: `env` with the operator-isolation
-    /// assignments (when the family has any), the executable, the CLI's `args`, the isolation
+    /// assignments (when the family has any), the executable, the CLI's `args`,
+    /// the agent profile's `args` ([`Self::with_profile_args`]), the isolation
     /// arguments, [`Self::launch_sandbox_args`], the approval flags for
     /// `level`, then
     /// the session-id arguments (fresh launch) or resume arguments
@@ -423,6 +443,7 @@ impl CliProfile {
         command.push_str(&self.base_command);
         for part in [
             self.args().unwrap_or_default(),
+            self.profile_args().unwrap_or_default(),
             isolation.args,
             sandbox.as_deref().unwrap_or_default(),
             &approval,
@@ -519,6 +540,13 @@ impl Resolved {
     #[must_use]
     pub fn warning(&self) -> Option<&str> {
         self.warning.as_deref()
+    }
+
+    /// This resolution with an agent profile's `args` on its record
+    /// ([`CliProfile::with_profile_args`]).
+    pub fn with_profile_args(mut self, args: Option<&str>) -> Self {
+        self.profile = self.profile.with_profile_args(args);
+        self
     }
 
     /// The resolved profile, after passing any warning to `warn`.

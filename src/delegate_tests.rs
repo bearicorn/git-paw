@@ -1,0 +1,139 @@
+//! Tests for the pure delegate-run decisions.
+
+use std::path::Path;
+
+use super::*;
+
+fn run(profile: &str, level: ApprovalLevel, pid: u32) -> ActiveRun {
+    ActiveRun {
+        profile: profile.to_string(),
+        level,
+        pid,
+    }
+}
+
+/// Scenario "The document carries framing, role skill and task in order".
+#[test]
+fn the_document_carries_framing_role_skill_and_task_in_order() {
+    let framing = framing("spec-audit", Path::new("/repo"), ApprovalLevel::Manual);
+    let doc = document(
+        &framing,
+        "SPEC-AUDITOR-ROLE",
+        "audit feat/x at abc123, change add-x",
+    );
+    let f = doc.find("one-shot delegate").expect("framing");
+    let r = doc.find("SPEC-AUDITOR-ROLE").expect("role skill");
+    let t = doc
+        .find("audit feat/x at abc123, change add-x")
+        .expect("task");
+    assert!(f < r && r < t, "{doc}");
+    assert!(doc.contains("`spec-audit`"), "framing names the profile");
+    assert!(doc.contains("`/repo`"), "framing names the root");
+    assert!(doc.contains("`manual`"), "framing names the level");
+    assert!(
+        doc.trim_end()
+            .ends_with("audit feat/x at abc123, change add-x")
+    );
+}
+
+/// Scenario "Oversized output is truncated" (the truncation half).
+#[test]
+fn oversized_output_is_truncated() {
+    let big = "x".repeat(200_000);
+    let out = truncate_result(&big, Path::new("/repo/.git-paw/logs/delegates/r.log"));
+    let (body, last) = out.trim_end().rsplit_once('\n').expect("two parts");
+    assert!(body.len() <= RESULT_CAP_BYTES);
+    assert!(last.contains("truncated"), "{last}");
+    assert!(
+        last.contains("/repo/.git-paw/logs/delegates/r.log"),
+        "{last}"
+    );
+    let small = "MAP: src/config\n";
+    assert_eq!(truncate_result(small, Path::new("/l")), small);
+}
+
+/// The cut never splits a multi-byte character.
+#[test]
+fn truncation_keeps_utf8_intact() {
+    let big = "é".repeat(RESULT_CAP_BYTES);
+    let out = truncate_result(&big, Path::new("/l"));
+    assert!(out.is_char_boundary(out.len()));
+    assert!(out.contains("truncated"));
+}
+
+/// Scenario "A fifth read-only delegate is refused".
+#[test]
+fn a_fifth_read_only_delegate_is_refused() {
+    let active: Vec<ActiveRun> = ["a", "b", "c", "d"]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| run(p, ApprovalLevel::Manual, u32::try_from(i).unwrap()))
+        .collect();
+    let err = admit(&active, ApprovalLevel::Manual).expect_err("fifth");
+    for p in ["a", "b", "c", "d"] {
+        assert!(err.contains(p), "{err}");
+    }
+    assert!(admit(&active[..3], ApprovalLevel::Manual).is_ok());
+}
+
+/// Scenario "A writing delegate runs alone".
+#[test]
+fn a_writing_delegate_runs_alone() {
+    let reader = [run("explorer", ApprovalLevel::Manual, 1)];
+    assert!(admit(&reader, ApprovalLevel::Auto).is_err());
+    assert!(admit(&[], ApprovalLevel::Auto).is_ok());
+    let writer = [run("fixer", ApprovalLevel::Auto, 2)];
+    assert!(admit(&writer, ApprovalLevel::Manual).is_err());
+    assert!(admit(&writer, ApprovalLevel::Auto).is_err());
+}
+
+/// Scenario "A dead run does not block admission".
+#[test]
+fn a_dead_run_does_not_block_admission() {
+    let records = vec![
+        run("a", ApprovalLevel::Auto, 10),
+        run("b", ApprovalLevel::Manual, 11),
+    ];
+    let live = live_runs(records, |pid| pid == 11);
+    assert_eq!(live.len(), 1);
+    assert!(admit(&live, ApprovalLevel::Manual).is_ok());
+}
+
+/// The ledger line carries metadata only, with the exit code of a failed
+/// run.
+#[test]
+fn the_ledger_line_holds_metadata() {
+    let line = LedgerLine::new(
+        "spec-audit",
+        "agent",
+        Some("sid"),
+        1_700_000_000,
+        1.5,
+        Outcome::Failed(Some(3)),
+    );
+    let json: serde_json::Value = serde_json::from_str(&line.to_json_line()).unwrap();
+    assert_eq!(json["profile"], "spec-audit");
+    assert_eq!(json["cli"], "agent");
+    assert_eq!(json["session_id"], "sid");
+    assert_eq!(json["outcome"], "failed");
+    assert_eq!(json["exit_code"], 3);
+    let ok = LedgerLine::new("e", "agent", None, 1, 0.1, Outcome::Ok).to_json_line();
+    assert!(ok.contains("\"session_id\":null"), "{ok}");
+    assert!(!ok.contains("exit_code"), "{ok}");
+}
+
+/// Scenario "The framing is an audited asset": the framing sentences come
+/// from the bundled asset, which names no vendor product, model or
+/// toolchain.
+#[test]
+fn the_framing_is_an_audited_asset() {
+    let source = include_str!("delegate.rs");
+    assert!(source.contains("include_str!(\"../assets/delegate-framing.md\")"));
+    let asset = include_str!("../assets/delegate-framing.md");
+    let rendered = framing("x", Path::new("/r"), ApprovalLevel::Auto);
+    assert!(rendered.starts_with(asset.lines().next().unwrap()));
+    assert!(
+        !source.contains("one-shot delegate: an agent"),
+        "prose lives in the asset"
+    );
+}

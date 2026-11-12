@@ -50,6 +50,7 @@ fn entry(branch: &str, cli: &str, worktree: &Path, sid: Option<&str>) -> Worktre
         branch: branch.to_string(),
         worktree_path: worktree.to_path_buf(),
         cli: cli.to_string(),
+        profile: None,
         branch_created: false,
         base_branch: None,
         pending_boot_prompt: None,

@@ -30,7 +30,7 @@ use crate::commands::stop::{StopOptions, StopOutcome};
 use crate::commands::supervisor::{SupervisorOptions, SupervisorPrompt, resolve_supervisor_mode};
 use crate::commands::{CaptureOutput, CommandContext};
 use crate::error::PawError;
-use crate::interactive::{CliInfo, CliMode, Prompter};
+use crate::interactive::{CliMode, Prompter};
 use crate::mcp::query;
 use crate::mcp::server::GitPawMcpServer;
 use crate::specs::SpecEntry;
@@ -251,16 +251,18 @@ impl Prompter for NoPicker {
         Err(Self::refuse("branches", "branches"))
     }
 
-    fn select_cli(&self, _clis: &[CliInfo], _default: Option<&str>) -> Result<String, PawError> {
+    fn select_cli(
+        &self,
+        _options: &crate::interactive::WorkerOptions<'_>,
+    ) -> Result<crate::interactive::WorkerChoice, PawError> {
         Err(Self::refuse("CLI", "cli"))
     }
 
     fn select_cli_for_branch(
         &self,
         _branch: &str,
-        _clis: &[CliInfo],
-        _default: Option<&str>,
-    ) -> Result<String, PawError> {
+        _options: &crate::interactive::WorkerOptions<'_>,
+    ) -> Result<crate::interactive::WorkerChoice, PawError> {
         Err(Self::refuse("CLI", "cli"))
     }
 
@@ -379,6 +381,7 @@ fn launch_for_mcp(root: &Path, p: &StartSessionParams) -> Result<StartSessionRes
             &ctx,
             SupervisorOptions {
                 cli: p.cli.clone(),
+                profile: None,
                 branches: p.branches.clone(),
                 spec_mode,
                 specs_format: None,
@@ -395,6 +398,7 @@ fn launch_for_mcp(root: &Path, p: &StartSessionParams) -> Result<StartSessionRes
             &ctx,
             crate::commands::start::StartOptions {
                 cli: p.cli.clone(),
+                profile: None,
                 branches: p.branches.clone(),
                 dry_run: p.dry_run,
                 preset: None,
@@ -409,6 +413,7 @@ fn launch_for_mcp(root: &Path, p: &StartSessionParams) -> Result<StartSessionRes
             &ctx,
             crate::commands::start::StartWithSpecsOptions {
                 cli: p.cli.clone(),
+                profile: None,
                 spec_mode,
                 specs_format: None,
                 dry_run: p.dry_run,

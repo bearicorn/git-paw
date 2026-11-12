@@ -97,7 +97,7 @@ When a worker is launched with a worker profile, the system SHALL resolve the pr
 
 - **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, a worker approval of `manual`, and `[profiles.deep]` with `kind = "worker"`, `cli = "opus"`, `args = "--effort high"`
 - **WHEN** the pane command of a worker launched with `deep` is built for a fresh launch assigned the session id `abc`
-- **THEN** it SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude --model opus --effort high --setting-sources project,local --session-id abc`
+- **THEN** it SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus --effort high --setting-sources project,local --session-id abc`
 
 ### Requirement: A worker profile's approval level applies to its worker only
 

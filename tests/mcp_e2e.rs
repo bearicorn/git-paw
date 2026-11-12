@@ -1150,3 +1150,52 @@ fn get_skill_with_a_path_shaped_name_reads_nothing_outside_the_override_dirs() {
     }
     client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
 }
+
+/// `mcp-server` scenarios "A delegate's MCP server has no root tools" and "A
+/// by-name call is refused": a server started with `GIT_PAW_DELEGATE` at the
+/// main working tree of a repository that consents to repository writes
+/// advertises none of the root-only or write tools, and refuses one by name.
+#[test]
+fn a_delegates_mcp_server_has_no_root_tools() {
+    let (_tmp, repo) = repo_fixture();
+    std::fs::create_dir_all(repo.join(".git-paw")).unwrap();
+    std::fs::write(
+        repo.join(".git-paw/config.toml"),
+        "[mcp]\nallow_repo_writes = true\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut client = McpClient::spawn_with(&repo, home.path(), |cmd| {
+        cmd.env("GIT_PAW_DELEGATE", "explorer");
+    });
+    client.initialize();
+    let list = client.request("tools/list", json!({}));
+    let names: Vec<String> = list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+    for root_only in [
+        "publish_verified",
+        "publish_feedback",
+        "start_session",
+        "pause_session",
+        "stop_session",
+        "purge_session",
+        "create_spec",
+        "write_spec_artifact",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == root_only),
+            "{root_only} advertised inside a delegate run: {names:?}"
+        );
+    }
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "publish_verified", "arguments": { "agent_id": "feat-x", "message": "ok" } }),
+    );
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("delegate run"), "{resp}");
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}

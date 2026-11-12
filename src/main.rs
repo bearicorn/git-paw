@@ -37,6 +37,7 @@ fn main() {
 
     let command = args.command.unwrap_or(Command::Start {
         cli: None,
+        profile: None,
         branches: None,
         from_all_specs: false,
         specs: None,
@@ -63,6 +64,7 @@ fn run(command: Command) -> Result<(), PawError> {
     match command {
         Command::Start {
             cli: cli_flag,
+            profile,
             branches: branches_flag,
             from_all_specs,
             specs,
@@ -103,6 +105,7 @@ fn run(command: Command) -> Result<(), PawError> {
                         &CommandContext::with_config(repo_root, config),
                         commands::supervisor::SupervisorOptions {
                             cli: cli_flag,
+                            profile,
                             branches: branches_flag,
                             spec_mode,
                             specs_format,
@@ -119,6 +122,7 @@ fn run(command: Command) -> Result<(), PawError> {
                     &repo_context()?,
                     commands::start::StartWithSpecsOptions {
                         cli: cli_flag,
+                        profile,
                         spec_mode,
                         specs_format,
                         dry_run,
@@ -133,6 +137,7 @@ fn run(command: Command) -> Result<(), PawError> {
                     &repo_context()?,
                     commands::start::StartOptions {
                         cli: cli_flag,
+                        profile,
                         branches: branches_flag,
                         dry_run,
                         preset,
@@ -148,12 +153,14 @@ fn run(command: Command) -> Result<(), PawError> {
         Command::Add {
             branch,
             cli,
+            profile,
             from_spec,
             no_rebase,
         } => {
             let opts = commands::add::AddOptions {
                 branch,
                 cli,
+                profile,
                 from_spec,
                 no_rebase,
             };
@@ -263,6 +270,36 @@ fn run(command: Command) -> Result<(), PawError> {
             let mut message = String::new();
             std::io::stdin().read_to_string(&mut message)?;
             let code = commands::send::send(&cwd, &agent, &message, &mut CliOutput)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Command::Delegate { name, task, list } => {
+            use std::io::Read as _;
+            let cwd = std::env::current_dir().map_err(|e| {
+                PawError::SessionError(format!("cannot read current directory: {e}"))
+            })?;
+            let runner = git_paw::command_runner::RealCommandRunner;
+            let mut read_stdin = || {
+                let mut task = String::new();
+                std::io::stdin().read_to_string(&mut task).map(|_| task)
+            };
+            let mut host = commands::delegate::DelegateHost {
+                cwd: &cwd,
+                delegate_marker: git_paw::delegate::current_delegate_run(),
+                runner: &runner,
+                spawner: &runner,
+                read_stdin: &mut read_stdin,
+                pid: std::process::id(),
+                poll_interval: std::time::Duration::from_millis(100),
+            };
+            let code = commands::delegate::delegate(
+                &mut host,
+                |root| config::load_config(root, None),
+                commands::delegate::DelegateOptions { name, task, list },
+                &mut CliOutput,
+            )?;
             if code != 0 {
                 std::process::exit(code);
             }

@@ -206,6 +206,11 @@ pub struct WorkerSandboxProbe {
     /// For a `wrapper` declaration whose `command` is itself a known agent
     /// CLI binary, that binary's name.
     pub wrapper_agent_binary: Option<String>,
+    /// The worker profile this row evaluates, `None` for a plain CLI.
+    pub profile: Option<String>,
+    /// Whether this worker runs at `full-auto`, when its level is its own (a
+    /// worker profile's); `None` evaluates it at the session-wide level.
+    pub full_auto: Option<bool>,
 }
 
 /// Read from config only. No CLI or sandbox is run.
@@ -699,7 +704,10 @@ pub fn check_sandbox_mode(probe: &SandboxModeProbe) -> Vec<CheckResult> {
         .iter()
         .map(|worker| {
             let cli = &worker.cli;
-            let name = format!("sandbox mode: {cli}");
+            let name = match &worker.profile {
+                Some(profile) => format!("sandbox mode: {cli} (profile {profile})"),
+                None => format!("sandbox mode: {cli}"),
+            };
             if let Some(refusal) = &worker.refusal {
                 return CheckResult::fail(
                     GROUP_CLIS,
@@ -708,7 +716,12 @@ pub fn check_sandbox_mode(probe: &SandboxModeProbe) -> Vec<CheckResult> {
                     format!("set [clis.{cli}].approval_args to flags that keep the sandbox on — {GUIDE}"),
                 );
             }
-            match (&worker.declared, &worker.wrapper_agent_binary, probe.full_auto) {
+            let full_auto = worker.full_auto.unwrap_or(probe.full_auto);
+            let runs_at = match &worker.profile {
+                Some(profile) => format!("worker profile `{profile}` runs at approval = \"full-auto\""),
+                None => "workers run at agent_approval = \"full-auto\"".to_string(),
+            };
+            match (&worker.declared, &worker.wrapper_agent_binary, full_auto) {
                 (Some(mode), Some(binary), _) => CheckResult::warn(
                     GROUP_CLIS,
                     name,
@@ -722,8 +735,8 @@ pub fn check_sandbox_mode(probe: &SandboxModeProbe) -> Vec<CheckResult> {
                     GROUP_CLIS,
                     name,
                     format!(
-                        "{cli}: {mode} (declared, not verified) — workers run at \
-                         agent_approval = \"full-auto\", so nothing but that sandbox confines them"
+                        "{cli}: {mode} (declared, not verified) — {runs_at}, so nothing but \
+                         that sandbox confines them"
                     ),
                     format!("confirm the sandbox actually confines `{cli}`; git-paw does not check it — {GUIDE}"),
                 ),
@@ -734,10 +747,7 @@ pub fn check_sandbox_mode(probe: &SandboxModeProbe) -> Vec<CheckResult> {
                 (None, _, true) => CheckResult::warn(
                     GROUP_CLIS,
                     name,
-                    format!(
-                        "{cli}: none — workers run at agent_approval = \"full-auto\" with no \
-                         declared sandbox"
-                    ),
+                    format!("{cli}: none — {runs_at} with no declared sandbox"),
                     format!(
                         "confine `{cli}` and declare it with [clis.{cli}] sandbox = \"wrapper\" \
                          or \"native\" — {GUIDE}"
@@ -1853,7 +1863,8 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
 
 /// Collects every CLI a worker can resolve to — `default_cli`,
 /// `default_spec_cli`, each discovered spec's CLI, then each preset's CLI
-/// (presets sorted by name) — with the sandbox mode its entry declares, the
+/// (presets sorted by name), then each worker profile's CLI at that
+/// profile's own approval level — with the sandbox mode its entry declares, the
 /// refusal a launch at the effective level would hit, and whether a
 /// `wrapper` is really the agent CLI itself. Reads config and `PATH` only.
 fn probe_sandbox_mode(config: &PawConfig, spec_cli: &SpecCliProbe) -> SandboxModeProbe {
@@ -1893,6 +1904,31 @@ fn probe_sandbox_mode(config: &PawConfig, spec_cli: &SpecCliProbe) -> SandboxMod
                 .err()
                 .map(|e| e.to_string()),
             wrapper_agent_binary,
+            profile: None,
+            full_auto: None,
+        });
+    }
+    // Every worker profile's CLI, evaluated at that profile's own level.
+    for (name, entry) in config.worker_profiles() {
+        let id = entry.cli.split_whitespace().next().unwrap_or(&entry.cli);
+        let profile_level = entry.effective_approval(level);
+        let profile = crate::agent_cli::CliProfile::resolve(id, &config.clis);
+        let declared = config.clis.get(id).and_then(|e| e.sandbox.clone());
+        let wrapper_agent_binary = if declared.as_deref() == Some("wrapper") {
+            agent_binary_behind(&profile)
+        } else {
+            None
+        };
+        workers.push(WorkerSandboxProbe {
+            cli: id.to_string(),
+            declared,
+            refusal: profile
+                .ensure_sandbox_kept(&profile_level)
+                .err()
+                .map(|e| e.to_string()),
+            wrapper_agent_binary,
+            profile: Some(name.to_string()),
+            full_auto: Some(profile_level == crate::config::ApprovalLevel::FullAuto),
         });
     }
     SandboxModeProbe {
@@ -1992,8 +2028,9 @@ fn probe_spec_system(config: &PawConfig, repo_root: &Path) -> SpecSystemProbe {
     }
 }
 
-/// Resolves the CLI each discovered spec would launch with — its own
-/// `paw_cli` when set, else `default_spec_cli` (falling back to
+/// Resolves the CLI each discovered spec would launch with — its
+/// `paw_profile`'s CLI or its own `paw_cli` when set, else
+/// `default_spec_cli` (falling back to
 /// `default_cli`) — mirroring the non-interactive tiers of the spec-driven
 /// resolution chain (`--cli` and the interactive picker do not apply to a
 /// passive `doctor` run). A scan failure or an unconfigured spec system
@@ -2016,7 +2053,16 @@ fn probe_spec_cli(config: &PawConfig, repo_root: &Path) -> SpecCliProbe {
         .or_else(|| config.default_cli.clone());
     let mut resolved_clis: Vec<String> = Vec::new();
     for entry in &entries {
-        let Some(cli) = entry.cli.clone().or_else(|| fallback.clone()) else {
+        // A spec's `paw_profile` resolves to that profile's CLI.
+        let profile_cli = entry
+            .profile
+            .as_deref()
+            .and_then(|name| config.profile(name))
+            .map(|p| p.cli.clone());
+        let Some(cli) = profile_cli
+            .or_else(|| entry.cli.clone())
+            .or_else(|| fallback.clone())
+        else {
             continue;
         };
         if !resolved_clis.contains(&cli) {

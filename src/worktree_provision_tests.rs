@@ -8,6 +8,7 @@ fn entry(branch: &str, slot: Option<u16>) -> WorktreeEntry {
         branch: branch.to_string(),
         worktree_path: PathBuf::from(format!("/tmp/wt-{branch}")),
         cli: "claude".to_string(),
+        profile: None,
         branch_created: false,
         base_branch: None,
         pending_boot_prompt: None,

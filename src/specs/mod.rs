@@ -40,6 +40,9 @@ pub struct SpecEntry {
     pub branch: String,
     /// Per-spec CLI override (from `paw_cli` frontmatter).
     pub cli: Option<String>,
+    /// Per-spec worker profile override (from `paw_profile` frontmatter).
+    /// A spec setting both this and `cli` fails the launch.
+    pub profile: Option<String>,
     /// Content to inject into the worktree `AGENTS.md`.
     pub prompt: String,
     /// File ownership if declared by the spec.
@@ -588,6 +591,7 @@ mod tests {
             backend: SpecBackendKind::OpenSpec,
             branch: "spec/add-auth".to_string(),
             cli: Some("claude".to_string()),
+            profile: None,
             prompt: "implement auth".to_string(),
             owned_files: Some(vec!["src/auth.rs".to_string()]),
         };
@@ -606,6 +610,7 @@ mod tests {
             backend: SpecBackendKind::Markdown,
             branch: "spec/fix-bug".to_string(),
             cli: None,
+            profile: None,
             prompt: "fix the bug".to_string(),
             owned_files: None,
         };
@@ -647,6 +652,7 @@ mod tests {
             backend: SpecBackendKind::Markdown,
             branch: String::new(),
             cli: None,
+            profile: None,
             prompt: "# Fix the bug\n".to_string(),
             owned_files: None,
         };
@@ -812,6 +818,7 @@ mod tests {
                 backend: kind,
                 branch: String::new(),
                 cli: None,
+                profile: None,
                 prompt: String::new(),
                 owned_files: None,
             };

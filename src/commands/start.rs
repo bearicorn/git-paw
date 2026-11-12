@@ -31,8 +31,8 @@ use super::helpers::{
 };
 use super::launch::{
     LaunchOutcome, LaunchWarnings, build_task_prompt, compose_launch_prompt, dry_run_launch_line,
-    gate_pane_or_fail_on_dialog, submit_prompt_to_pane, write_repo_discovery_file,
-    write_repo_discovery_file_with_agents,
+    gate_pane_or_fail_on_dialog, render_role_skill, submit_prompt_to_pane, worker_label,
+    write_repo_discovery_file, write_repo_discovery_file_with_agents,
 };
 use super::purge::{created_branch_base, invalidate_if_stale};
 use super::recover::recover_session_detached;
@@ -45,6 +45,8 @@ use crate::agent_cli::{LaunchSession, resolve_for_launch};
 pub struct StartOptions<'a> {
     /// `--cli`.
     pub cli: Option<String>,
+    /// `--profile`.
+    pub profile: Option<String>,
     /// `--branches`.
     pub branches: Option<Vec<String>>,
     /// `--dry-run`: print the plan, create nothing.
@@ -76,6 +78,7 @@ pub fn start(
 ) -> Result<LaunchOutcome, PawError> {
     let StartOptions {
         cli: cli_flag,
+        profile: profile_flag,
         branches: branches_flag,
         dry_run,
         preset,
@@ -132,6 +135,7 @@ pub fn start(
             ctx,
             SupervisorOptions {
                 cli: cli_flag,
+                profile: profile_flag,
                 branches: branches_flag,
                 spec_mode: SpecMode::None,
                 specs_format: None,
@@ -163,20 +167,45 @@ pub fn start(
         return Err(PawError::NoCLIsFound);
     }
 
+    // The worker: --profile / --cli for every branch, else the preset's CLI,
+    // else the picker starting on default_profile, else default_cli.
+    let start_worker = crate::worker::resolve_start_worker(
+        &config,
+        profile_flag.as_deref(),
+        resolved_cli.as_deref(),
+        None,
+    )?;
+
     // List branches
     let all_branches = git::list_branches(&repo_root)?;
 
     // Interactive selection (or skip via flags)
     let interactive_clis: Vec<interactive::CliInfo> =
         detected.iter().map(to_interactive_cli).collect();
+    let worker_profiles = interactive::ProfileInfo::workers(&config);
+    let (worker_flag, worker_default) = match &start_worker {
+        crate::worker::StartWorker::Fixed(choice) => (Some(choice), None),
+        crate::worker::StartWorker::Picker { default } => (None, default.as_ref()),
+    };
     let selection = interactive::run_selection(
         prompter,
         &all_branches,
-        &interactive_clis,
-        resolved_cli.as_deref(),
+        &interactive::WorkerOptions {
+            clis: &interactive_clis,
+            profiles: &worker_profiles,
+            default: worker_default,
+        },
+        worker_flag,
         resolved_branches.as_deref(),
-        config.default_cli.as_deref(),
     )?;
+    let worker_default_level = config.supervisor.clone().unwrap_or_default().agent_approval;
+    let workers = selection
+        .mappings
+        .iter()
+        .map(|(_, choice)| {
+            crate::worker::WorkerLaunch::resolve(choice, &config, worker_default_level)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Refuse before anything is created when two of the session's branches
     // derive the same broker agent id — they would share one inbox. Ahead of
@@ -215,20 +244,21 @@ pub fn start(
         out.line(&format!("  Session:  {session_name}"));
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
-        let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
         let mut warnings = LaunchWarnings::default();
         // Resolve all launch lines first, so a refusal is reported before any
         // worker header is printed.
-        let launch_lines = selection
-            .mappings
+        let launch_lines = workers
             .iter()
-            .map(|(_, cli)| {
-                dry_run_launch_line(cli, approval, &config.clis, &repo_root, &mut warnings, out)
-            })
+            .map(|worker| dry_run_launch_line(worker, &config.clis, &repo_root, &mut warnings, out))
             .collect::<Result<Vec<_>, _>>()?;
-        for ((branch, cli), launch_line) in selection.mappings.iter().zip(&launch_lines) {
+        for (((branch, _), worker), launch_line) in
+            selection.mappings.iter().zip(&workers).zip(&launch_lines)
+        {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
-            out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
+            out.line(&format!(
+                "  {branch} \u{2192} {} ({wt})",
+                worker_label(worker)
+            ));
             out.line(launch_line);
         }
         return Ok(LaunchOutcome::Done);
@@ -276,33 +306,30 @@ pub fn start(
 
     let worktree_runtime = config.worktree_runtime();
 
-    // Resolve approval flags per branch's CLI (supervisor-config: resolved
-    // approval flags apply on every worker-launch path, bare `start` included).
-    // No `[supervisor]` section is required for this to apply — a bare launch
-    // has no supervisor at all, so the level falls back to `SupervisorConfig`'s
-    // default (`agent_approval = "auto"`) exactly as `add` does.
-    let default_sup = SupervisorConfig::default();
-    let approval = &config
-        .supervisor
-        .as_ref()
-        .unwrap_or(&default_sup)
-        .agent_approval;
-
+    // Approval flags resolve per worker (supervisor-config: resolved approval
+    // flags apply on every worker-launch path, bare `start` included): a
+    // worker profile's `approval`, else `agent_approval`. No `[supervisor]`
+    // section is required — a bare launch has no supervisor at all, so the
+    // default falls back to `SupervisorConfig`'s (`agent_approval = "auto"`)
+    // exactly as `add` does.
+    //
     // Resolve every CLI record before any worktree exists, so an ambiguous
-    // PATH shim or a disabled native sandbox refuses the launch with nothing
-    // created. Each warning prints as its CLI resolves, so an earlier CLI's
-    // warning still shows when a later one is refused.
+    // PATH shim, a disabled native sandbox, or a profile whose CLI or role
+    // skill is unavailable refuses the launch with nothing created. Each
+    // warning prints as its CLI resolves, so an earlier CLI's warning still
+    // shows when a later one is refused.
     let mut warnings = LaunchWarnings::default();
-    let profiles = selection
-        .mappings
+    let profiles = workers
         .iter()
-        .map(|(_, cli)| {
-            resolve_for_launch(cli, &config.clis, approval, &repo_root)
+        .map(|worker| {
+            worker
+                .resolve_for_launch(&config.clis, &repo_root)
                 .map(|resolved| warnings.admit(resolved, out))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    for ((branch, cli), profile) in selection.mappings.iter().zip(&profiles) {
+    for (((branch, _), worker), profile) in selection.mappings.iter().zip(&workers).zip(&profiles) {
+        let cli = &worker.cli;
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
         if let Some(reason) = &wt.rebase_skipped {
             out.warn(&super::launch::rebase_skip_notice(branch, reason));
@@ -348,11 +375,13 @@ pub fn start(
         crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
         let rendered_skill =
             crate::skills::render_worktree_skills(&worktree_packages, &render_inputs);
+        let role_skill = render_role_skill(worker, &repo_root, &render_inputs)?;
         let assignment = crate::agents::WorktreeAssignment {
             branch: branch.clone(),
             cli: cli.clone(),
             spec_content: None,
             owned_files: None,
+            role_skill,
             skill_content: rendered_skill,
             skill_packages: worktree_packages.iter().map(|r| r.package).collect(),
             inter_agent_rules: None,
@@ -377,13 +406,14 @@ pub fn start(
         plan.surfaces.push(SurfaceSpec {
             label: branch.clone(),
             owner: wt.path.clone(),
-            launch_command: profile.launch_command(approval, LaunchSession::None),
+            launch_command: profile.launch_command(&worker.approval, LaunchSession::None),
         });
 
         worktree_entries.push(WorktreeEntry {
             branch: branch.clone(),
             worktree_path: wt.path,
             cli: cli.clone(),
+            profile: worker.profile_str().map(str::to_string),
             branch_created: wt.branch_created,
             base_branch: created_branch_base(&repo_root, wt.branch_created),
             pending_boot_prompt: None,
@@ -496,15 +526,20 @@ pub fn start(
     // showing an unanswered first-run trust/bypass dialog MUST NOT receive the
     // boot block on top of it, so the launch fails loudly instead.
     if broker_config.enabled {
-        for (idx, ((branch, cli), profile)) in selection.mappings.iter().zip(&profiles).enumerate()
+        for (idx, (((branch, _), worker), profile)) in selection
+            .mappings
+            .iter()
+            .zip(&workers)
+            .zip(&profiles)
+            .enumerate()
         {
             let pane_idx = layout.agent_index(idx);
-            let cli_command = profile.launch_command(approval, LaunchSession::None);
+            let cli_command = profile.launch_command(&worker.approval, LaunchSession::None);
             gate_pane_or_fail_on_dialog(
                 &backend,
                 &session_name,
                 pane_idx,
-                cli,
+                &worker.cli,
                 &cli_command,
                 &config.clis,
             )?;
@@ -559,6 +594,8 @@ fn bare_plan(
 pub struct StartWithSpecsOptions<'a> {
     /// `--cli`.
     pub cli: Option<String>,
+    /// `--profile`.
+    pub profile: Option<String>,
     /// Which discovered specs to launch.
     pub spec_mode: SpecMode,
     /// `--specs-format`.
@@ -583,6 +620,7 @@ pub struct StartWithSpecsOptions<'a> {
 ///
 /// Returns an error when the config cannot be loaded, the specs cannot be
 /// scanned or resolved, or any launch step fails.
+#[allow(clippy::too_many_lines)]
 pub fn start_with_specs(
     ctx: &CommandContext,
     opts: StartWithSpecsOptions<'_>,
@@ -590,6 +628,7 @@ pub fn start_with_specs(
 ) -> Result<LaunchOutcome, PawError> {
     let StartWithSpecsOptions {
         cli,
+        profile,
         spec_mode,
         specs_format,
         dry_run,
@@ -658,11 +697,28 @@ pub fn start_with_specs(
         return Err(PawError::NoCLIsFound);
     }
 
-    // Resolve CLI assignments for specs
+    // Resolve CLI / worker-profile assignments for specs
     let interactive_clis: Vec<interactive::CliInfo> =
         detected.iter().map(to_interactive_cli).collect();
-    let mappings =
-        interactive::resolve_cli_for_specs(&specs, cli_flag, &config, &interactive_clis, prompter)?;
+    let worker_flag = match profile.as_deref() {
+        Some(name) => Some(crate::worker::profile_flag_choice(&config, name)?),
+        None => cli_flag.map(crate::worker::WorkerChoice::cli),
+    };
+    let choices = interactive::resolve_cli_for_specs(
+        &specs,
+        worker_flag.as_ref(),
+        &config,
+        &interactive_clis,
+        prompter,
+    )?;
+    let worker_default_level = config.supervisor.clone().unwrap_or_default().agent_approval;
+    let mappings = choices
+        .into_iter()
+        .map(|(branch, choice)| {
+            crate::worker::WorkerLaunch::resolve(&choice, &config, worker_default_level)
+                .map(|worker| (branch, worker))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Build a lookup from branch to spec for prompt/owned_files
     let spec_by_branch: std::collections::HashMap<&str, &crate::specs::SpecEntry> =
@@ -684,17 +740,19 @@ pub fn start_with_specs(
         out.line(&format!("  Session:  {session_name}"));
         out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
         out.line("");
-        let approval = config.supervisor.clone().unwrap_or_default().agent_approval;
         let mut warnings = LaunchWarnings::default();
         let launch_lines = mappings
             .iter()
-            .map(|(_, cli)| {
-                dry_run_launch_line(cli, approval, &config.clis, &repo_root, &mut warnings, out)
+            .map(|(_, worker)| {
+                dry_run_launch_line(worker, &config.clis, &repo_root, &mut warnings, out)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        for ((branch, cli), launch_line) in mappings.iter().zip(&launch_lines) {
+        for ((branch, worker), launch_line) in mappings.iter().zip(&launch_lines) {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
-            out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
+            out.line(&format!(
+                "  {branch} \u{2192} {} ({wt})",
+                worker_label(worker)
+            ));
             out.line(launch_line);
         }
         return Ok(LaunchOutcome::Done);
@@ -718,7 +776,7 @@ pub fn start_with_specs(
 fn launch_spec_session(
     repo_root: &std::path::Path,
     config: &PawConfig,
-    mappings: &[(String, String)],
+    mappings: &[(String, crate::worker::WorkerLaunch)],
     spec_by_branch: &std::collections::HashMap<&str, &crate::specs::SpecEntry>,
     project: &str,
     mouse: bool,
@@ -792,29 +850,23 @@ fn launch_spec_session(
 
     let worktree_runtime = config.worktree_runtime();
 
-    // Resolve approval flags per branch's CLI (supervisor-config: resolved
-    // approval flags apply on every worker-launch path, the spec-driven path
-    // included). No `[supervisor]` section is required — a spec-driven
-    // launch without `--supervisor` has none at all, so the level falls back
-    // to `SupervisorConfig`'s default (`agent_approval = "auto"`), exactly
-    // as `add` does.
-    let default_sup = SupervisorConfig::default();
-    let approval = &config
-        .supervisor
-        .as_ref()
-        .unwrap_or(&default_sup)
-        .agent_approval;
-
+    // Approval flags resolve per worker (supervisor-config: resolved approval
+    // flags apply on every worker-launch path, the spec-driven path
+    // included): a worker profile's `approval`, else `agent_approval`, whose
+    // default without a `[supervisor]` section is `"auto"`, exactly as `add`
+    // does. Each `WorkerLaunch` already carries its level.
     let mut warnings = LaunchWarnings::default();
     let profiles = mappings
         .iter()
-        .map(|(_, cli)| {
-            resolve_for_launch(cli, &config.clis, approval, repo_root)
+        .map(|(_, worker)| {
+            worker
+                .resolve_for_launch(&config.clis, repo_root)
                 .map(|resolved| warnings.admit(resolved, out))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    for ((branch, cli), profile) in mappings.iter().zip(&profiles) {
+    for ((branch, worker), profile) in mappings.iter().zip(&profiles) {
+        let cli = &worker.cli;
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
         if let Some(reason) = &wt.rebase_skipped {
             out.warn(&super::launch::rebase_skip_notice(branch, reason));
@@ -857,6 +909,7 @@ fn launch_spec_session(
         crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
         let rendered_skill =
             crate::skills::render_worktree_skills(&worktree_packages, &render_inputs);
+        let role_skill = render_role_skill(worker, repo_root, &render_inputs)?;
 
         let spec_content = spec_by_branch
             .get(branch.as_str())
@@ -870,6 +923,7 @@ fn launch_spec_session(
             cli: cli.clone(),
             spec_content,
             owned_files,
+            role_skill,
             skill_content: rendered_skill,
             skill_packages: worktree_packages.iter().map(|r| r.package).collect(),
             inter_agent_rules: None,
@@ -894,13 +948,14 @@ fn launch_spec_session(
         plan.surfaces.push(SurfaceSpec {
             label: branch.clone(),
             owner: wt.path.clone(),
-            launch_command: profile.launch_command(approval, LaunchSession::None),
+            launch_command: profile.launch_command(&worker.approval, LaunchSession::None),
         });
 
         worktree_entries.push(WorktreeEntry {
             branch: branch.clone(),
             worktree_path: wt.path,
             cli: cli.clone(),
+            profile: worker.profile_str().map(str::to_string),
             branch_created: wt.branch_created,
             base_branch: created_branch_base(repo_root, wt.branch_created),
             pending_boot_prompt: None,
@@ -1014,14 +1069,14 @@ fn launch_spec_session(
     // pre-fill above), so a blind submit into a pane still showing an
     // unanswered first-run trust/bypass dialog could accidentally accept it.
     let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
-    for (idx, ((branch, cli), profile)) in mappings.iter().zip(&profiles).enumerate() {
+    for (idx, ((branch, worker), profile)) in mappings.iter().zip(&profiles).enumerate() {
         let pane_idx = layout.agent_index(idx);
-        let cli_command = profile.launch_command(approval, LaunchSession::None);
+        let cli_command = profile.launch_command(&worker.approval, LaunchSession::None);
         gate_pane_or_fail_on_dialog(
             &backend,
             &session_name,
             pane_idx,
-            cli,
+            &worker.cli,
             &cli_command,
             &config.clis,
         )?;
@@ -1447,9 +1502,21 @@ fn submit_held_boot_prompts(
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
-        let resolved =
-            resolve_for_launch(&wt.cli, &config.clis, &approval, &repo_root).and_then(|resolved| {
-                let profile = warnings.admit(resolved, out);
+        // The worker as recorded: its profile from the current config, else
+        // its CLI (recovery reports a removed profile; this only types).
+        let (worker, _) = crate::worker::WorkerLaunch::recorded(
+            &wt.branch,
+            &wt.cli,
+            wt.profile.as_deref(),
+            &config.profiles,
+            approval,
+        );
+        let resolved = resolve_for_launch(&worker.cli, &config.clis, &worker.approval, &repo_root)
+            .and_then(|resolved| {
+                let profile = warnings.admit(
+                    resolved.with_profile_args(worker.profile_args.as_deref()),
+                    out,
+                );
                 Ok((profile.compiled_prompt_profile()?, profile))
             });
         let (prompt_profile, profile) = match resolved {
@@ -1459,7 +1526,7 @@ fn submit_held_boot_prompts(
                 continue;
             }
         };
-        let cli_command = profile.launch_command(&approval, LaunchSession::None);
+        let cli_command = profile.launch_command(&worker.approval, LaunchSession::None);
 
         match gate_pane_or_fail_on_dialog(
             backend,

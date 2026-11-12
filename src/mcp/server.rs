@@ -99,6 +99,21 @@ impl ServerHandler for GitPawMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Inside a delegate run no root-only or repository-write tool exists;
+        // say why.
+        if let Some(run) = crate::delegate::current_delegate_run()
+            && (ROOT_ONLY_TOOL_NAMES.contains(&request.name.as_ref())
+                || REPO_WRITE_TOOL_NAMES.contains(&request.name.as_ref()))
+        {
+            return Err(ErrorData::invalid_request(
+                format!(
+                    "`{}`: {}",
+                    request.name,
+                    crate::delegate::refusal_inside_delegate(&run, "this tool")
+                ),
+                None,
+            ));
+        }
         // A worktree server has no route for a root-only tool; say why
         // instead of the generic "tool not found".
         if !self.ctx.is_main_worktree && ROOT_ONLY_TOOL_NAMES.contains(&request.name.as_ref()) {

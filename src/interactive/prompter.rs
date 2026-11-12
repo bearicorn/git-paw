@@ -13,21 +13,29 @@ use crate::specs::SpecEntry;
 
 use super::picker::fuzzy_multi_select;
 use super::resolver::{finalize_branch_selection, finalize_spec_selection, group_specs_by_unit};
-use super::{CliInfo, CliMode, Prompter};
+use super::{CliMode, Prompter, WorkerChoice, WorkerOptions};
 
 /// Interactive prompter using `dialoguer` for terminal UI.
 pub struct TerminalPrompter;
 
-/// Index the CLI picker starts on for a configured default.
-///
-/// `default` pre-selects the entry whose `binary_name` it names; an unset
-/// default, or one naming a CLI that is not in `clis`, starts the picker on
-/// the first entry. Shared by both CLI pickers so uniform and per-branch mode
-/// pre-select identically.
-pub(super) fn default_cli_index(clis: &[CliInfo], default: Option<&str>) -> usize {
-    default
-        .and_then(|name| clis.iter().position(|c| c.binary_name == name))
-        .unwrap_or(0)
+/// Shows one CLI picker over `options` and returns the chosen item's
+/// mapping. Shared by both CLI pickers so uniform and per-branch mode list
+/// and pre-select identically.
+fn pick_worker(prompt: &str, options: &WorkerOptions<'_>) -> Result<WorkerChoice, PawError> {
+    let items = options.items();
+    let labels: Vec<&str> = items.iter().map(|(label, _)| label.as_str()).collect();
+
+    let selection = Select::new()
+        .with_prompt(prompt)
+        .items(&labels)
+        .default(options.default_index())
+        .interact_opt()
+        .map_err(|e| map_dialoguer_error(&e))?;
+
+    match selection {
+        Some(idx) => Ok(items[idx].1.clone()),
+        None => Err(PawError::UserCancelled),
+    }
 }
 
 impl Prompter for TerminalPrompter {
@@ -56,41 +64,16 @@ impl Prompter for TerminalPrompter {
         finalize_branch_selection(branches, selection)
     }
 
-    fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
-        let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
-
-        let selection = Select::new()
-            .with_prompt("Select AI CLI for all branches")
-            .items(&labels)
-            .default(default_cli_index(clis, default))
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(idx) => Ok(clis[idx].binary_name.clone()),
-            None => Err(PawError::UserCancelled),
-        }
+    fn select_cli(&self, options: &WorkerOptions<'_>) -> Result<WorkerChoice, PawError> {
+        pick_worker("Select AI CLI for all branches", options)
     }
 
     fn select_cli_for_branch(
         &self,
         branch: &str,
-        clis: &[CliInfo],
-        default: Option<&str>,
-    ) -> Result<String, PawError> {
-        let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
-
-        let selection = Select::new()
-            .with_prompt(format!("Select CLI for {branch}"))
-            .items(&labels)
-            .default(default_cli_index(clis, default))
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(idx) => Ok(clis[idx].binary_name.clone()),
-            None => Err(PawError::UserCancelled),
-        }
+        options: &WorkerOptions<'_>,
+    ) -> Result<WorkerChoice, PawError> {
+        pick_worker(&format!("Select CLI for {branch}"), options)
     }
 
     fn select_specs(&self, specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
@@ -121,7 +104,8 @@ fn map_dialoguer_error(err: &dialoguer::Error) -> PawError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliInfo, default_cli_index};
+    use super::super::CliInfo;
+    use super::{WorkerChoice, WorkerOptions};
 
     fn cli(name: &str) -> CliInfo {
         CliInfo {
@@ -130,15 +114,20 @@ mod tests {
         }
     }
 
+    fn start(clis: &[CliInfo], default: Option<&str>) -> usize {
+        let default = default.map(WorkerChoice::cli);
+        WorkerOptions::clis_only(clis, default.as_ref()).default_index()
+    }
+
     /// Spec scenario "Per-branch picker starts on a configured default" — the
     /// shared pre-selection rule both CLI pickers use.
     #[test]
     fn default_cli_index_picks_the_named_entry_and_otherwise_the_first() {
         let clis = [cli("alpha"), cli("beta")];
-        assert_eq!(default_cli_index(&clis, Some("beta")), 1);
-        assert_eq!(default_cli_index(&clis, Some("alpha")), 0);
-        assert_eq!(default_cli_index(&clis, None), 0);
-        assert_eq!(default_cli_index(&clis, Some("not-installed")), 0);
-        assert_eq!(default_cli_index(&[], Some("beta")), 0);
+        assert_eq!(start(&clis, Some("beta")), 1);
+        assert_eq!(start(&clis, Some("alpha")), 0);
+        assert_eq!(start(&clis, None), 0);
+        assert_eq!(start(&clis, Some("not-installed")), 0);
+        assert_eq!(start(&[], Some("beta")), 0);
     }
 }

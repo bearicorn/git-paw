@@ -10583,6 +10583,7 @@ mod tests {
                 approval_flags: Vec::new(),
                 headless_args: vec!["-p".to_string()],
                 session_id_args: None,
+                isolation_env: Vec::new(),
             },
             repo_root: repo.to_path_buf(),
             broker_url: Some("http://127.0.0.1:9119".to_string()),

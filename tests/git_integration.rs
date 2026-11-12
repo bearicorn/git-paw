@@ -509,6 +509,7 @@ fn agents_md_injection_lands_in_sidecar_and_tracked_file_stays_committable() {
         cli: "claude".to_string(),
         spec_content: Some("Implement the widget.\n".to_string()),
         owned_files: Some(vec!["src/widget.rs".to_string()]),
+        role_skill: None,
         skill_content: None,
         skill_packages: Vec::new(),
         inter_agent_rules: None,

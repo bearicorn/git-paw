@@ -32,6 +32,8 @@ pub struct AddOptions {
     pub branch: Option<String>,
     /// `--cli`.
     pub cli: Option<String>,
+    /// `--profile`: the new pane's worker profile.
+    pub profile: Option<String>,
     /// `--from-spec`: attach the branch of this spec.
     pub from_spec: Option<String>,
     /// `--no-rebase`: do not rebase an existing branch onto the default branch.
@@ -67,13 +69,21 @@ pub fn add(
     let AddOptions {
         branch: branch_arg,
         cli: cli_flag,
+        profile: profile_flag,
         from_spec,
         no_rebase,
     } = opts;
     let branch_arg = branch_arg.as_deref();
     let cli_flag = cli_flag.as_deref();
+    let profile_flag = profile_flag.as_deref();
     let from_spec = from_spec.as_deref();
     let repo_root = ctx.repo_root().to_path_buf();
+
+    // A `--profile` that names no worker profile (or a delegate one) is
+    // refused before anything else is looked at.
+    if let Some(name) = profile_flag {
+        crate::worker::profile_flag_choice(ctx.config()?, name)?;
+    }
 
     // 4.1 Resolve the active session; error cleanly when none.
     let Some(existing) = session::find_session_for_repo(&repo_root)? else {
@@ -116,32 +126,29 @@ pub fn add(
     let broker_config = config.broker.clone();
     let project = git::project_name(&repo_root);
 
-    // 4.2 Resolve branch + CLI from the positional arg or --from-spec.
-    let (branch, resolved_cli, spec_entry): (
-        String,
-        Option<String>,
-        Option<crate::specs::SpecEntry>,
-    ) = if let Some(spec_name) = from_spec {
-        let discovered = crate::specs::scan_specs(&config, &repo_root)?;
-        // resolve_specs errors with the discovered candidate list on an
-        // unknown name — exactly the UX `--specs NAME` gives.
-        let mut resolved =
-            crate::specs::resolve::resolve_specs(&discovered, &[spec_name.to_string()])?;
-        let spec = resolved.drain(..).next().ok_or_else(|| {
-            PawError::SpecError(format!("spec '{spec_name}' resolved to no entries"))
-        })?;
-        let cli = cli_flag.map(str::to_string).or_else(|| spec.cli.clone());
-        (spec.branch.clone(), cli, Some(spec))
-    } else {
-        // clap's `required_unless_present = "from_spec"` rejects this first;
-        // the error is defence in depth should that attribute ever drift.
-        let branch = branch_arg
-            .ok_or_else(|| {
-                PawError::BranchError("a branch is required unless --from-spec is given".into())
-            })?
-            .to_string();
-        (branch, cli_flag.map(str::to_string), None)
-    };
+    // 4.2 Resolve the branch (and spec) from the positional arg or
+    // --from-spec.
+    let (branch, spec_entry): (String, Option<crate::specs::SpecEntry>) =
+        if let Some(spec_name) = from_spec {
+            let discovered = crate::specs::scan_specs(&config, &repo_root)?;
+            // resolve_specs errors with the discovered candidate list on an
+            // unknown name — exactly the UX `--specs NAME` gives.
+            let mut resolved =
+                crate::specs::resolve::resolve_specs(&discovered, &[spec_name.to_string()])?;
+            let spec = resolved.drain(..).next().ok_or_else(|| {
+                PawError::SpecError(format!("spec '{spec_name}' resolved to no entries"))
+            })?;
+            (spec.branch.clone(), Some(spec))
+        } else {
+            // clap's `required_unless_present = "from_spec"` rejects this first;
+            // the error is defence in depth should that attribute ever drift.
+            let branch = branch_arg
+                .ok_or_else(|| {
+                    PawError::BranchError("a branch is required unless --from-spec is given".into())
+                })?
+                .to_string();
+            (branch, None)
+        };
 
     if existing.worktrees.iter().any(|w| w.branch == branch) {
         return Err(PawError::SessionError(format!(
@@ -150,17 +157,31 @@ pub fn add(
         )));
     }
 
-    // Effective CLI: --cli > spec paw_cli > session's CLI > config default_cli.
-    let session_default_cli = existing.worktrees.first().map(|w| w.cli.clone());
-    let agent_cli = resolved_cli
-        .or(session_default_cli)
-        .or_else(|| config.default_cli.clone())
-        .ok_or_else(|| {
-            PawError::ConfigError(
-                "no CLI specified and the session has no default to fall back to; pass --cli <id>."
-                    .to_string(),
-            )
-        })?;
+    // Effective worker: --profile / --cli > spec paw_profile / paw_cli >
+    // the session's first worker (its recorded profile, else its CLI) >
+    // default_profile > default_cli.
+    let session_first = existing
+        .worktrees
+        .first()
+        .map(|w| (w.cli.as_str(), w.profile.as_deref()));
+    let choice = crate::worker::resolve_add_worker(
+        &config,
+        profile_flag,
+        cli_flag,
+        spec_entry.as_ref(),
+        session_first,
+    )?
+    .ok_or_else(|| {
+        PawError::ConfigError(
+            "no CLI specified and the session has no default to fall back to; pass --cli <id>."
+                .to_string(),
+        )
+    })?;
+    let default_sup = SupervisorConfig::default();
+    let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
+    let worker =
+        crate::worker::WorkerLaunch::resolve(&choice, &config, supervisor_cfg.agent_approval)?;
+    let agent_cli = worker.cli.clone();
 
     // 4.3 Validate the CLI against detected CLIs — before mutating anything.
     // A CLI already in use by a session agent is trusted (it was accepted at
@@ -176,7 +197,12 @@ pub fn add(
         .worktrees
         .iter()
         .any(|w| CliProfile::resolve(&w.cli, &config.clis).id() == agent_cli_base);
-    if !cli_in_session && !detected.iter().any(|c| c.binary_name == agent_cli_base) {
+    // A worker profile's CLI is checked by the launch itself, with an error
+    // naming the profile.
+    if worker.profile.is_none()
+        && !cli_in_session
+        && !detected.iter().any(|c| c.binary_name == agent_cli_base)
+    {
         let ids: Vec<&str> = detected.iter().map(|c| c.binary_name.as_str()).collect();
         return Err(PawError::ConfigError(format!(
             "unknown CLI '{agent_cli_base}'. Detected CLIs: {}.",
@@ -235,9 +261,7 @@ pub fn add(
     };
 
     // Build the shared attach context (mirrors supervisor's loop setup).
-    let default_sup = SupervisorConfig::default();
-    let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
-    let approval = &supervisor_cfg.agent_approval;
+    let approval = &worker.approval;
     let strict_guard = config
         .supervisor
         .as_ref()
@@ -273,6 +297,9 @@ pub fn add(
         broker_config: &broker_config,
         agent_cli: &agent_cli,
         approval,
+        profile: worker.profile_str(),
+        profile_args: worker.profile_args.as_deref(),
+        role_skill: worker.role_skill.as_deref(),
         packages: &worktree_packages,
         gate_commands: &gate_commands,
         session_backends: &session_backends,

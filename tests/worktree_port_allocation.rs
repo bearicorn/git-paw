@@ -94,6 +94,7 @@ fn entry(branch: &str, path: &Path, slot: Option<u16>) -> WorktreeEntry {
         branch: branch.to_string(),
         worktree_path: path.to_path_buf(),
         cli: "claude".to_string(),
+        profile: None,
         branch_created: true,
         base_branch: None,
         pending_boot_prompt: None,

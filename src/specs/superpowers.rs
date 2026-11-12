@@ -169,6 +169,7 @@ impl Plan {
             backend: SpecBackendKind::Superpowers,
             branch,
             cli: None,
+            profile: None,
             prompt,
             owned_files: None,
         }

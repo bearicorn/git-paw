@@ -156,8 +156,15 @@ pub(crate) struct AttachContext<'a> {
     pub(crate) broker_config: &'a crate::config::BrokerConfig,
     /// Coding-agent CLI id (no flags).
     pub(crate) agent_cli: &'a str,
-    /// Effective approval level the pane command's flags are resolved for.
+    /// Effective approval level the pane command's flags are resolved for:
+    /// the worker profile's `approval`, else the worker default.
     pub(crate) approval: &'a config::ApprovalLevel,
+    /// The worker profile this agent launches with, recorded on its entry.
+    pub(crate) profile: Option<&'a str>,
+    /// The worker profile's `args`, placed after the CLI's own `args`.
+    pub(crate) profile_args: Option<&'a str>,
+    /// The worker profile's role skill, written after the coordination skill.
+    pub(crate) role_skill: Option<&'a str>,
     /// The worktree package selection with resolved templates
     /// ([`crate::skills::resolve_worktree_packages`]): provisioned into the
     /// worktree and injected into its managed block alike.
@@ -185,6 +192,21 @@ pub(crate) struct AttachContext<'a> {
     pub(crate) clis: &'a std::collections::HashMap<String, config::CustomCli>,
     /// The launch's emitted warnings, shared with its pre-flight resolution.
     pub(crate) warnings: &'a std::cell::RefCell<LaunchWarnings>,
+}
+
+impl AttachContext<'_> {
+    /// The worker this context launches, as a [`crate::worker::WorkerLaunch`].
+    pub(crate) fn worker(&self) -> crate::worker::WorkerLaunch {
+        crate::worker::WorkerLaunch {
+            cli: self.agent_cli.to_string(),
+            profile: self
+                .profile
+                .and_then(|p| crate::config::ProfileName::new(p).ok()),
+            profile_args: self.profile_args.map(str::to_string),
+            approval: *self.approval,
+            role_skill: self.role_skill.map(str::to_string),
+        }
+    }
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -236,8 +258,7 @@ pub(crate) fn attach_agent(
     runtime_slot: u16,
     out: &mut dyn Output,
 ) -> Result<AttachedAgent, PawError> {
-    let resolved =
-        crate::agent_cli::resolve_for_launch(ctx.agent_cli, ctx.clis, ctx.approval, ctx.repo_root)?;
+    let resolved = ctx.worker().resolve_for_launch(ctx.clis, ctx.repo_root)?;
     let profile = ctx.warnings.borrow_mut().admit(resolved, &mut *out);
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
 
@@ -279,6 +300,7 @@ pub(crate) fn attach_agent(
     };
     crate::init::provision_worktree_helpers(&wt.path, ctx.packages, &render_inputs)?;
     let rendered_skill = crate::skills::render_worktree_skills(ctx.packages, &render_inputs);
+    let role_skill = render_role_skill(&ctx.worker(), ctx.repo_root, &render_inputs)?;
 
     let spec_content = spec_entry.map(|s| s.prompt.clone());
     let owned_files = spec_entry.and_then(|s| s.owned_files.clone());
@@ -288,6 +310,7 @@ pub(crate) fn attach_agent(
         cli: ctx.agent_cli.to_string(),
         spec_content,
         owned_files,
+        role_skill,
         skill_content: rendered_skill,
         skill_packages: ctx.packages.iter().map(|r| r.package).collect(),
         inter_agent_rules: ctx
@@ -335,6 +358,7 @@ pub(crate) fn attach_agent(
             branch: branch.to_string(),
             worktree_path: wt.path,
             cli: ctx.agent_cli.to_string(),
+            profile: ctx.profile.map(str::to_string),
             branch_created: wt.branch_created,
             base_branch: created_branch_base(ctx.repo_root, wt.branch_created),
             pending_boot_prompt: None,
@@ -352,17 +376,61 @@ pub(crate) fn attach_agent(
 ///
 /// Refuses an ambiguous PATH shim, exactly as the real launch would.
 pub(crate) fn dry_run_launch_line(
-    cli: &str,
-    approval: config::ApprovalLevel,
+    worker: &crate::worker::WorkerLaunch,
     clis: &std::collections::HashMap<String, config::CustomCli>,
     cwd: &Path,
     warnings: &mut LaunchWarnings,
     out: &mut dyn Output,
 ) -> Result<String, PawError> {
-    let resolved = crate::agent_cli::resolve_for_launch(cli, clis, &approval, cwd)?;
+    let resolved = worker.resolve_for_launch(clis, cwd)?;
     let profile = warnings.admit(resolved, out);
-    let command = profile.launch_command(&approval, LaunchSession::None);
+    let command = profile.launch_command(&worker.approval, LaunchSession::None);
     Ok(format!("      runs: {command}"))
+}
+
+/// What a dry-run plan line shows a worker as: the CLI, or
+/// `<profile> [<cli>]` for a worker launched with a profile.
+pub(crate) fn worker_label(worker: &crate::worker::WorkerLaunch) -> String {
+    match worker.profile_str() {
+        Some(profile) => format!("{profile} [{}]", worker.cli),
+        None => worker.cli.clone(),
+    }
+}
+
+/// The worker profile's role skill, resolved through the skill resolver
+/// against `repo_root` and rendered with the coordination skill's `inputs`;
+/// `None` when the worker has no role skill.
+///
+/// # Errors
+///
+/// When the role skill does not resolve, naming the profile and the skill.
+pub(crate) fn render_role_skill(
+    worker: &crate::worker::WorkerLaunch,
+    repo_root: &Path,
+    inputs: &crate::skills::RenderInputs<'_>,
+) -> Result<Option<crate::agents::RoleSkill>, PawError> {
+    let Some(name) = worker.role_skill.as_deref() else {
+        return Ok(None);
+    };
+    let template = crate::skills::resolve(name, repo_root).map_err(|e| {
+        PawError::ConfigError(format!(
+            "profile '{}' role skill '{name}' does not resolve: {e}",
+            worker.profile_str().unwrap_or_default()
+        ))
+    })?;
+    let content = crate::skills::render(
+        &template,
+        inputs.branch,
+        inputs.broker_url,
+        inputs.project,
+        &inputs.gates,
+        inputs.backends,
+        inputs.family,
+    );
+    Ok(Some(crate::agents::RoleSkill {
+        name: name.to_string(),
+        content,
+    }))
 }
 
 /// Builds one agent's first message and, when its spec format declares one,
@@ -380,7 +448,7 @@ pub(crate) fn compose_agent_launch(
     let boot_block = crate::skills::build_boot_block(
         branch,
         &ctx.broker_config.url(),
-        &CliProfile::resolve(ctx.agent_cli, ctx.clis),
+        &CliProfile::resolve(ctx.agent_cli, ctx.clis).with_profile_args(ctx.profile_args),
     );
     let task_prompt = build_task_prompt(spec_entry);
     (
@@ -536,8 +604,7 @@ mod tests {
         let clis = std::collections::HashMap::new();
         for _ in 0..2 {
             dry_run_launch_line(
-                "claude",
-                config::ApprovalLevel::FullAuto,
+                &crate::worker::WorkerLaunch::plain("claude", config::ApprovalLevel::FullAuto),
                 &clis,
                 Path::new("/"),
                 &mut warnings,
@@ -577,8 +644,7 @@ mod tests {
             .iter()
             .map(|cli| {
                 dry_run_launch_line(
-                    cli,
-                    config::ApprovalLevel::FullAuto,
+                    &crate::worker::WorkerLaunch::plain(cli, config::ApprovalLevel::FullAuto),
                     &clis,
                     Path::new("/"),
                     &mut warnings,
@@ -651,6 +717,7 @@ mod tests {
             backend,
             branch: "feat/my-change".to_string(),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         };
@@ -698,6 +765,7 @@ mod tests {
             backend,
             branch: "feat/my-change".to_string(),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         };
@@ -842,6 +910,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::Markdown,
             branch: format!("feat/{id}"),
             cli: None,
+            profile: None,
             prompt: prompt_body.to_string(),
             owned_files: None,
         }
@@ -884,6 +953,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::OpenSpec,
             branch: "feat/my-change".to_string(),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         };
@@ -917,6 +987,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::Markdown,
             branch: "feat/my-feature".to_string(),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         };
@@ -994,6 +1065,7 @@ mod tests {
                 backend,
                 branch: "feat/x".to_string(),
                 cli: None,
+                profile: None,
                 prompt: String::new(),
                 owned_files: None,
             };
@@ -1040,6 +1112,7 @@ mod tests {
                 backend,
                 branch: "feat/some-spec".to_string(),
                 cli: None,
+                profile: None,
                 prompt: String::new(),
                 owned_files: None,
             };
@@ -1061,6 +1134,7 @@ mod tests {
             backend: SpecBackendKind::SpecKit,
             branch: "task/x".to_string(),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         };
@@ -1333,6 +1407,9 @@ mod permission_seeding_removed_tests {
             broker_config,
             agent_cli: "claude",
             approval: &ApprovalLevel::Manual,
+            profile: None,
+            profile_args: None,
+            role_skill: None,
             packages: &[],
             gate_commands,
             session_backends: &[],
@@ -1574,6 +1651,9 @@ mod permission_seeding_removed_tests {
             broker_config: &broker_config,
             agent_cli: "codex",
             approval: &ApprovalLevel::Manual,
+            profile: None,
+            profile_args: None,
+            role_skill: None,
             packages: &[],
             gate_commands: &gate_commands,
             session_backends: &[],
@@ -1616,6 +1696,9 @@ mod permission_seeding_removed_tests {
             broker_config: &broker_config,
             agent_cli: "claude",
             approval: &ApprovalLevel::FullAuto,
+            profile: None,
+            profile_args: None,
+            role_skill: None,
             packages: &[],
             gate_commands: &gate_commands,
             session_backends: &[],
@@ -1706,6 +1789,82 @@ mod permission_seeding_removed_tests {
             attached.pane.launch_command,
             format!("{start_command} --session-id {id}")
         );
+    }
+
+    /// Spec scenario "The role skill is injected after the coordination
+    /// skill": a worker launched with a profile whose role skill is a
+    /// repository skill gets the coordination skill, then the role skill, in
+    /// its managed block, and its entry records the profile.
+    #[test]
+    fn the_role_skill_is_injected_after_the_coordination_skill() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+        let skill_dir = repo.join(".agents/skills/reviewer");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: Reviews changes\n---\nREVIEWER-ROLE\n",
+        )
+        .unwrap();
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig {
+            enabled: true,
+            ..BrokerConfig::default()
+        };
+        let worktree_runtime = WorktreeConfig::default();
+        // `claude` launched through `echo`, so the profile's CLI is available
+        // on any machine.
+        let clis = std::collections::HashMap::from([(
+            "claude".to_string(),
+            CustomCli {
+                command: "echo".to_string(),
+                ..CustomCli::default()
+            },
+        )]);
+        let packages = crate::skills::resolve_worktree_packages(
+            crate::skills::WorktreeInputs {
+                broker_enabled: true,
+                docs_base_url_configured: false,
+            },
+            &repo,
+        )
+        .unwrap();
+        let mut ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
+        ctx.packages = &packages;
+        ctx.profile = Some("review");
+        ctx.role_skill = Some("reviewer");
+
+        let attached = attach_agent(
+            &ctx,
+            "feat-review",
+            None,
+            0,
+            &mut crate::commands::CaptureOutput::default(),
+        )
+        .expect("attach_agent succeeds");
+
+        let block = std::fs::read_to_string(
+            attached
+                .entry
+                .worktree_path
+                .join(crate::agents::SIDECAR_REL_PATH),
+        )
+        .unwrap();
+        let coordination = block
+            .find("## Coordination Skills")
+            .expect("coordination skill present");
+        let role = block.find("REVIEWER-ROLE").expect("role skill present");
+        assert!(coordination < role, "{block}");
+        assert!(block.contains("## Role skill: reviewer"), "{block}");
+        assert_eq!(attached.entry.profile.as_deref(), Some("review"));
     }
 
     /// Spec scenario "An ambiguous shim is refused" (`cli-provider`). `git`

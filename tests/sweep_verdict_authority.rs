@@ -311,3 +311,158 @@ fn sweep_verified_without_a_credential_publishes_nothing() {
             .any(|m| m["type"] == "agent.verified")
     );
 }
+
+/// Runs the helper `script` (`sweep.sh` / `broker.sh`) like [`sweep`], with
+/// `GIT_PAW_DELEGATE` set to `delegate` when given.
+fn helper_in_delegate(
+    repo: &Path,
+    home: &Path,
+    script: &str,
+    args: &[&str],
+    delegate: Option<&str>,
+) -> Output {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-paw"))
+        .parent()
+        .expect("binary dir")
+        .to_path_buf();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = script_cmd::bash();
+    cmd.arg(format!(".git-paw/scripts/{script}"))
+        .args(args)
+        .current_dir(repo)
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("GIT_PAW_DELEGATE")
+        .env("PATH", path);
+    if let Some(run) = delegate {
+        cmd.env("GIT_PAW_DELEGATE", run);
+    }
+    cmd.output().expect("run helper")
+}
+
+/// The broker's whole log, as text.
+fn broker_log(url: &str) -> String {
+    let out = Command::new("curl")
+        .args(["-sS", &format!("{url}/log?since=0")])
+        .output()
+        .expect("curl");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Scenario "A delegate cannot publish a verdict through the helper": inside
+/// a delegate run `sweep.sh verified` fails and the broker records no
+/// `agent.verified`, even with a session credential available.
+#[test]
+fn a_delegate_cannot_publish_a_verdict_through_the_helper() {
+    if !shell_tools_available() {
+        eprintln!("skipping: bash/curl/git/python3 not all on PATH");
+        return;
+    }
+    let (_handle, url, port) = spawn_broker();
+    let tmp = TempDir::new().expect("repo");
+    let home = TempDir::new().expect("home");
+    let repo = fixture_repo(tmp.path(), port);
+    save_session(home.path(), &repo, port, Some(CREDENTIAL));
+    register(&url, "feat-x");
+
+    let out = helper_in_delegate(
+        &repo,
+        home.path(),
+        "sweep.sh",
+        &["verified", "feat-x", "all gates green"],
+        Some("spec-audit"),
+    );
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert!(!combined(&out).contains(CREDENTIAL), "credential leaked");
+    assert!(
+        !inbox(&url, "feat-x")
+            .iter()
+            .any(|m| m["type"] == "agent.verified"),
+        "no verdict may reach the broker"
+    );
+}
+
+/// Scenario "sweep.sh publishes nothing inside a delegate run".
+#[test]
+fn sweep_sh_publishes_nothing_inside_a_delegate_run() {
+    if !shell_tools_available() {
+        eprintln!("skipping: bash/curl/git/python3 not all on PATH");
+        return;
+    }
+    let (_handle, url, port) = spawn_broker();
+    let tmp = TempDir::new().expect("repo");
+    let home = TempDir::new().expect("home");
+    let repo = fixture_repo(tmp.path(), port);
+    save_session(home.path(), &repo, port, Some(CREDENTIAL));
+
+    let out = helper_in_delegate(
+        &repo,
+        home.path(),
+        "sweep.sh",
+        &["learn", "DELEGATE-LEARNING-BODY"],
+        Some("spec-auditor"),
+    );
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("delegate run"),
+        "{}",
+        combined(&out)
+    );
+    assert!(
+        !broker_log(&url).contains("DELEGATE-LEARNING-BODY"),
+        "no learning may reach the broker"
+    );
+}
+
+/// Scenarios "broker.sh publishes nothing inside a delegate run" and "The
+/// helpers are unaffected outside a delegate run".
+#[test]
+fn broker_sh_refuses_inside_a_delegate_run_and_publishes_outside_one() {
+    if !shell_tools_available() {
+        eprintln!("skipping: bash/curl/git/python3 not all on PATH");
+        return;
+    }
+    let (_handle, url, port) = spawn_broker();
+    let tmp = TempDir::new().expect("repo");
+    let home = TempDir::new().expect("home");
+    let repo = fixture_repo(tmp.path(), port);
+    save_session(home.path(), &repo, port, Some(CREDENTIAL));
+
+    let refused = helper_in_delegate(
+        &repo,
+        home.path(),
+        "broker.sh",
+        &["--agent", "feat-x", "status", "working"],
+        Some("explorer"),
+    );
+    assert!(!refused.status.success(), "{}", combined(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("delegate run"),
+        "{}",
+        combined(&refused)
+    );
+    assert!(
+        !broker_log(&url).contains("feat-x"),
+        "nothing may be recorded for feat-x"
+    );
+
+    let published = helper_in_delegate(
+        &repo,
+        home.path(),
+        "broker.sh",
+        &["--agent", "feat-x", "status", "working"],
+        None,
+    );
+    assert!(published.status.success(), "{}", combined(&published));
+    assert!(
+        broker_log(&url).contains("feat-x"),
+        "outside a delegate run the status is published as before"
+    );
+}
