@@ -161,6 +161,8 @@ impl GitPawMcpServer {
     #[tool(
         description = "Return the rendered content of a named agent skill (post {{...}} \
                        substitution) plus its source (standard | user_override | embedded). \
+                       The content is the skill's SKILL.md followed by each of its references, \
+                       each appended under a '## Reference: <path>' heading. \
                        Read-only — no disk write. Unknown skills return { \"skill\": null } with a \
                        message, not a transport error."
     )]

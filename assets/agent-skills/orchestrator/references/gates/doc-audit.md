@@ -55,8 +55,9 @@ apply per audit — adapt to the project's actual doc layout):
 - the relevant `--help` (or `--man`) text accessed via the binary
 - per-language API-doc generator output for changed public items —
   run `{{DOC_TOOL_COMMAND}}` for projects that configure it
-  (`[supervisor].doc_tool_command`). The governance-verification sub-step (see "Spec Audit
-Procedure" in `.git-paw/skills/orchestrator/references/gates/spec-audit.md` — DoD, ADRs, security.md, test-strategy.md, constitution.md)
-is an **input source** for this gate; its findings are doc-audit findings
-tagged `[doc audit]`. Doc-audit gaps are reported as
-`[doc audit] <surface>: <gap description>`.
+  (`[supervisor].doc_tool_command`). The governance-verification sub-step
+  (see "Spec Audit Procedure" in
+  `.git-paw/skills/orchestrator/references/gates/spec-audit.md` — DoD, ADRs,
+  security.md, test-strategy.md, constitution.md) is an **input source** for
+  this gate; its findings are doc-audit findings tagged `[doc audit]`.
+  Doc-audit gaps are reported as `[doc audit] <surface>: <gap description>`.

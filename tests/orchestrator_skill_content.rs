@@ -641,6 +641,10 @@ fn each_reference_is_self_contained() {
             text.contains(&format!("{prefix} <")),
             "`{path}` states the `{prefix}` finding format"
         );
+        assert!(
+            text.contains("publish nothing") && text.contains("return the verdict"),
+            "`{path}` states a delegated reader publishes nothing and returns only its verdict"
+        );
     }
 }
 
@@ -812,6 +816,9 @@ fn only_the_orchestrator_publishes() {
         "you publish `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`"
     ));
     assert!(s.contains("one `feedback-gate` call per finding"));
+    assert!(s.contains(
+        "a delegated gate never answers a permission prompt, sends input to an agent pane, or runs a broker or sweep helper verb"
+    ));
 }
 
 // skill-agent / Scenario: Inline fallback without subagents

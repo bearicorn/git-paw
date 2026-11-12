@@ -706,8 +706,9 @@ pub fn render_package_document(resolved: &ResolvedPackage, inputs: &RenderInputs
         .iter()
         .filter(|f| f.path.starts_with("references/"))
         .collect();
+    let skill_md = files.first().map_or("", |f| f.content.as_str());
     join_package_document(
-        &files[0].content,
+        skill_md,
         references
             .iter()
             .map(|f| (f.path.as_str(), f.content.as_str())),
@@ -4166,25 +4167,22 @@ mod tests {
     #[test]
     fn supervisor_skill_governance_is_substep_of_spec_audit() {
         let tmpl = resolve_embedded("supervisor").unwrap();
-        let audit_pos = tmpl
-            .content
+        // The procedure and its sub-step live in the spec-audit reference;
+        // bounding the search by that section keeps the sub-step inside it.
+        let spec_audit = reference_section(&tmpl.content, "references/gates/spec-audit.md");
+        let audit_pos = spec_audit
             .find("### Spec Audit Procedure")
-            .expect("Spec Audit Procedure heading must exist");
-        let gov_pos = tmpl
-            .content
-            .find("Governance verification")
-            .expect("Governance verification must exist");
-        let conflict_pos = tmpl
-            .content
-            .find("### Conflict detection")
-            .unwrap_or(tmpl.content.len());
+            .expect("Spec Audit Procedure heading must exist in the spec-audit reference");
+        let gov_pos = spec_audit
+            .find("#### Governance verification")
+            .expect("Governance verification must exist in the spec-audit reference");
         assert!(
             gov_pos > audit_pos,
             "Governance verification should appear inside Spec Audit Procedure (after its heading)"
         );
         assert!(
-            gov_pos < conflict_pos,
-            "Governance verification should appear before the next top-level subsection (Conflict detection), keeping it inside Spec Audit Procedure"
+            !spec_audit[audit_pos + 1..gov_pos].contains("\n### "),
+            "no other subsection may open between the procedure and its governance sub-step"
         );
         assert!(
             !tmpl.content.contains("step 7.5"),

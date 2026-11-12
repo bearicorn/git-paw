@@ -20,9 +20,21 @@ Test: `tests/orchestrator_skill_content.rs::the_three_audit_references_exist_and
 Test: `tests/orchestrator_skill_content.rs::gate_content_is_moved_not_duplicated`
 Test: `tests/orchestrator_skill_content.rs::every_pre_move_gate_sentence_survives_in_the_package`
 
+### Requirement: A moved cross-reference names its reference path
+
+Gate text SHALL move verbatim, except a cross-reference that no longer resolves once moved, which SHALL name the installed reference path instead.
+
+#### Scenario: A moved cross-reference names the reference path
+
+- **WHEN** the doc-audit reference's pointer to the Spec Audit Procedure is inspected
+- **THEN** it SHALL name `.git-paw/skills/orchestrator/references/gates/spec-audit.md` rather than "below"
+- **AND** every other pre-move gate sentence SHALL ship unchanged
+
+Test: `tests/orchestrator_skill_content.rs::every_pre_move_gate_sentence_survives_in_the_package`
+
 ### Requirement: Each audit-gate reference is self-contained
 
-Each audit-gate reference SHALL read correctly with no other context: it SHALL state the inputs the gate needs (the re-resolved branch tip, the merge-base diff, the change id, and the gate's rendered tooling command or `(not configured)`), the rule to run that command bare and read its exit status without piping it, the procedure, and the finding format with the gate's bracketed prefix.
+Each audit-gate reference SHALL read correctly with no other context: it SHALL state the inputs the gate needs (the re-resolved branch tip, the merge-base diff, the change id, and the gate's rendered tooling command or `(not configured)`), the rule to run that command bare and read its exit status without piping it, the procedure, and the finding format with the gate's bracketed prefix. It SHALL state that a delegated reader publishes nothing and returns only its verdict.
 
 #### Scenario: Each reference is self-contained
 
@@ -134,12 +146,12 @@ Test: `tests/orchestrator_skill_content.rs::a_moved_section_still_satisfies_its_
 
 ### Requirement: The orchestrator Baseline step installs dependencies before recording
 
-The orchestrator `SKILL.md` Baseline step SHALL instruct the orchestrator, before recording the baseline, to make sure the checkout it runs the gate commands in (the root checkout or the verify worktree) has the project's dependencies installed the way the project's own setup or its `on_create` hook installs them, and, when the baseline fails for missing dependencies, to install them and re-run rather than record a red baseline. It SHALL name no package manager.
+The orchestrator `SKILL.md` Baseline step SHALL instruct the orchestrator, before recording the baseline, to ensure the checkout it runs the gate commands in (the root checkout or the verify worktree) has the project's dependencies installed the way the project's own setup or its `on_create` hook installs them, and, when the baseline fails for missing dependencies, to install them and re-run rather than record a red baseline. It SHALL name no package manager.
 
 #### Scenario: The Baseline step prepares the checkout first
 
 - **WHEN** the rendered orchestrator `SKILL.md` Baseline step is inspected
-- **THEN** it SHALL instruct making sure the root checkout or verify worktree has the project's dependencies installed, as the project's own setup or `on_create` hook does, before recording the baseline
+- **THEN** it SHALL instruct ensuring the root checkout or verify worktree has the project's dependencies installed, as the project's own setup or `on_create` hook does, before recording the baseline
 
 Test: `tests/orchestrator_skill_content.rs::the_baseline_step_prepares_the_checkout_first`
 

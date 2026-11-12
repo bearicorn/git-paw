@@ -1110,8 +1110,10 @@ isolated context, so the context-heavy audit work need not flood yours.
   feedback, not an audit.
 - **When your CLI can run isolated subagents**, you MAY run the three audit
   gates concurrently, each in its own isolated context given only its
-  reference plus the branch, the re-resolved tip and the change id. They only
-  read the verify worktree; testing has already built in it.
+  reference plus the branch, the re-resolved tip and the change id. Each
+  audit's gate command is the only thing that writes in the shared verify
+  worktree, so run those tooling commands one after another and parallelise
+  only the review.
 - **The verdict.** Each delegated gate returns a compressed verdict and
   nothing else: the gate name; `pass` or `fail`; and one line per finding,
   `[<gate prefix>] <location>: <issue>` — the error `feedback-gate` sends.
@@ -1124,7 +1126,8 @@ isolated context, so the context-heavy audit work need not flood yours.
   [security audit] <file>:42: user input reaches a subprocess unvalidated
   ```
 - **Only you publish.** A delegated gate never publishes `agent.verified` or
-  `agent.feedback`. You publish `agent.verified` only when testing and
+  `agent.feedback`. A delegated gate never answers a permission prompt, sends
+  input to an agent pane, or runs a broker or sweep helper verb. You publish `agent.verified` only when testing and
   regression passed and all three audit verdicts are `pass`; otherwise you send
   one `feedback-gate` call per finding. The gate order and the all-five-pass
   rule do not change.
