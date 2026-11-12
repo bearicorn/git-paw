@@ -381,3 +381,58 @@ fn a_content_requirement_on_a_pre_package_path_is_checked_against_the_package_fi
     // against the package file.
     assert!(sweep.content.contains("cmd_approve()"));
 }
+
+// skill-packages / Scenario: Init writes the same files — the helper names,
+// content and modes, and the skill export paths, that `git paw init` wrote
+// before packaging.
+#[test]
+#[serial]
+fn init_writes_the_same_files() {
+    let repo = TempDir::new().expect("repo");
+    let st = StdCommand::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(repo.path())
+        .status()
+        .expect("git init");
+    assert!(st.success());
+    let home = TempDir::new().expect("home");
+    Command::cargo_bin("git-paw")
+        .expect("binary")
+        .arg("init")
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .success();
+
+    let scripts_dir = repo.path().join(".git-paw/scripts");
+    let mut names: Vec<String> = fs::read_dir(&scripts_dir)
+        .expect("scripts dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    // The pre-package install set, unchanged.
+    assert_eq!(
+        names,
+        ["_paw_common.sh", "broker.sh", "docs-fetch.sh", "sweep.sh"]
+    );
+    for (name, content) in git_paw::init::bundled_scripts() {
+        let path = scripts_dir.join(name);
+        assert_eq!(fs::read_to_string(&path).expect("read"), content, "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "{name} mode");
+        }
+    }
+
+    for rel in [
+        ".git-paw/skills/orchestrator/SKILL.md",
+        ".git-paw/skills/cli-setup/SKILL.md",
+    ] {
+        assert!(repo.path().join(rel).is_file(), "{rel} exported");
+    }
+}
