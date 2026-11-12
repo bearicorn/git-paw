@@ -1132,3 +1132,122 @@ fn every_registered_helper_is_installed_by_init_and_reported_by_doctor() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// preflight-diagnostics: "Doctor reports where each bundled skill resolves
+// from".
+// ---------------------------------------------------------------------------
+
+impl Sandbox {
+    /// The user skill-override directory for this sandbox's `HOME`.
+    fn user_skills_dir(&self) -> PathBuf {
+        let config = if cfg!(target_os = "macos") {
+            self.home.join("Library").join("Application Support")
+        } else {
+            self.home.join(".config")
+        };
+        config.join("git-paw").join("agent-skills")
+    }
+
+    /// The `skill sources` check from `doctor --json`.
+    fn skill_sources(&self) -> serde_json::Value {
+        let (_, document) = self.doctor_json();
+        checks(&document)
+            .iter()
+            .find(|c| c["name"] == "skill sources")
+            .cloned()
+            .unwrap_or_else(|| panic!("no `skill sources` check in {document}"))
+    }
+}
+
+/// Writes `<level_dir>/<name>/SKILL.md` with `frontmatter` and a body,
+/// returning the `SKILL.md` path.
+fn write_skill(level_dir: &Path, name: &str, frontmatter: &str) -> PathBuf {
+    let dir = level_dir.join(name);
+    std::fs::create_dir_all(&dir).expect("create skill dir");
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, format!("---\n{frontmatter}\n---\n\nbody\n")).expect("write SKILL.md");
+    path
+}
+
+#[test]
+fn skill_sources_appears_in_json_naming_every_package_embedded() {
+    let sandbox = Sandbox::new();
+    let check = sandbox.skill_sources();
+    assert_eq!(check["status"], "ok", "{check}");
+    assert_eq!(check["group"], "Bundled scripts", "{check}");
+    let detail = check["detail"].as_str().unwrap_or("");
+    for package in git_paw::skills::bundled_packages() {
+        assert!(
+            detail.contains(&format!("{}: embedded", package.name)),
+            "{detail}"
+        );
+    }
+}
+
+#[test]
+fn skill_sources_names_a_user_override_with_its_path() {
+    let sandbox = Sandbox::new();
+    let path = write_skill(
+        &sandbox.user_skills_dir(),
+        "coordination",
+        "name: coordination\ndescription: mine",
+    );
+    let check = sandbox.skill_sources();
+    assert_eq!(check["status"], "ok", "{check}");
+    let detail = check["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains(&format!("coordination: user {}", path.display())),
+        "{detail}"
+    );
+}
+
+#[test]
+fn skill_sources_warns_on_an_ignored_cli_setup_override() {
+    let sandbox = Sandbox::new();
+    let repo_skills = sandbox.repo.join(".agents").join("skills");
+    write_skill(&repo_skills, "cli-setup", "name: cli-setup\ndescription: x");
+    let check = sandbox.skill_sources();
+    assert_eq!(check["status"], "warn", "{check}");
+    let detail = check["detail"].as_str().unwrap_or("");
+    assert!(detail.contains("cli-setup: embedded"), "{detail}");
+    assert!(
+        detail.contains("cli-setup") && detail.contains("ignored"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn skill_sources_fails_on_a_broken_override_naming_it() {
+    let sandbox = Sandbox::new();
+    let repo_skills = sandbox.repo.join(".agents").join("skills");
+    write_skill(&repo_skills, "coordination", "name: coordination");
+    let check = sandbox.skill_sources();
+    assert_eq!(check["status"], "fail", "{check}");
+    let detail = check["detail"].as_str().unwrap_or("");
+    assert!(detail.contains("coordination"), "{detail}");
+    assert!(
+        detail.contains(".agents/skills/coordination/SKILL.md"),
+        "{detail}"
+    );
+    let remedy = check["remedy"].as_str().unwrap_or("");
+    assert!(remedy.contains("fix or remove"), "{remedy}");
+}
+
+#[test]
+fn the_skill_sources_probe_writes_nothing() {
+    let sandbox = Sandbox::new();
+    write_skill(
+        &sandbox.user_skills_dir(),
+        "coordination",
+        "name: coordination\ndescription: mine",
+    );
+    write_skill(
+        &sandbox.repo.join(".agents").join("skills"),
+        "cli-setup",
+        "name: cli-setup\ndescription: x",
+    );
+    let before = (snapshot(&sandbox.repo), snapshot(&sandbox.home));
+    sandbox.doctor(&["--json"]);
+    assert_eq!(before, (snapshot(&sandbox.repo), snapshot(&sandbox.home)));
+}

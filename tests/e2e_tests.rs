@@ -36,7 +36,9 @@ fn cmd() -> Command {
 /// subprocess.
 fn cmd_iso(fake_home: &Path, tmux_env: &helpers::TmuxTestEnv) -> Command {
     let mut c = cmd();
-    c.env("HOME", fake_home).env_remove("XDG_DATA_HOME");
+    c.env("HOME", fake_home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut c);
     c
 }
@@ -142,6 +144,7 @@ fn preset_not_found_returns_error() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .failure()
@@ -159,6 +162,9 @@ fn stop_with_no_session() {
     cmd()
         .current_dir(tr.path())
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("No active session"));
@@ -278,6 +284,7 @@ fn purge_with_no_session() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .assert()
         .success()
@@ -295,6 +302,9 @@ fn status_with_no_session() {
     cmd()
         .current_dir(tr.path())
         .arg("status")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("No session"));
@@ -311,6 +321,9 @@ fn stop_from_non_git_dir_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -323,6 +336,9 @@ fn status_from_non_git_dir_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("status")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -339,6 +355,9 @@ fn init_creates_git_paw_dir() {
     cmd()
         .current_dir(tr.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(
@@ -363,6 +382,9 @@ fn init_outside_git_repo_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -372,11 +394,21 @@ fn init_outside_git_repo_fails() {
 fn init_is_idempotent() {
     let tr = setup_test_repo();
 
-    cmd().current_dir(tr.path()).arg("init").assert().success();
+    cmd()
+        .current_dir(tr.path())
+        .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .success();
 
     cmd()
         .current_dir(tr.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("Already initialized"));
@@ -400,6 +432,7 @@ fn from_specs_no_specs_config_returns_error() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .failure()
@@ -437,6 +470,7 @@ fn from_specs_dry_run_with_valid_specs_shows_plan() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -468,6 +502,7 @@ fn from_specs_empty_specs_dir_prints_no_pending() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()
@@ -851,6 +886,9 @@ fn error_exit_code_is_1_for_not_a_git_repo() {
     cmd()
         .current_dir(tmp.path())
         .arg("start")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .code(1)
         .stderr(predicate::str::contains("Not a git repository"));
@@ -865,6 +903,7 @@ fn error_exit_code_is_1_for_preset_not_found() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .code(1)
@@ -970,6 +1009,7 @@ fn from_specs_markdown_format_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -1011,6 +1051,7 @@ fn from_specs_skips_done_markdown_specs() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()
@@ -1523,6 +1564,7 @@ fn a_bare_start_past_the_agent_cap_is_refused_before_any_worktree_exists() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "cat", "--branches", &branches.join(",")])
         .output()
         .expect("run start");

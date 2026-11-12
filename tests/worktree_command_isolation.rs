@@ -133,6 +133,7 @@ fn launch(
         .current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--branches",
@@ -175,6 +176,7 @@ fn stop_inside_an_agent_worktree_does_not_stop_the_parent_session() {
         .current_dir(&worktrees[0])
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["stop"])
         .timeout(Duration::from_secs(30))
         .output()
@@ -221,6 +223,7 @@ fn purge_force_inside_an_agent_worktree_does_not_purge_the_parent_session() {
         .current_dir(&worktrees[0])
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .timeout(Duration::from_secs(30))
         .output()
@@ -284,6 +287,7 @@ fn status_inside_an_agent_worktree_does_not_show_the_parent_session() {
         .current_dir(&worktrees[0])
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["status"])
         .timeout(Duration::from_secs(30))
         .output()

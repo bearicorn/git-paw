@@ -104,6 +104,7 @@ impl Sandbox {
         cmd.current_dir(self.repo.path())
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .args(args)
             .timeout(Duration::from_secs(40))
             .output()

@@ -11,6 +11,15 @@ git-paw uses TOML configuration files at two levels, with repo-level settings ov
 
 Both files are optional. git-paw works with sensible defaults when no config exists.
 
+### User skill overrides
+
+Beside the global config file, git-paw reads personal skill overrides from
+`<config_dir>/git-paw/agent-skills/<name>/SKILL.md` — `~/.config/git-paw/agent-skills/`
+on Linux (`$XDG_CONFIG_HOME/git-paw/agent-skills/` when that is set) or
+`~/Library/Application Support/git-paw/agent-skills/` on macOS. A repository's
+`.agents/skills/` wins over them, and they win over the embedded defaults. See
+[Skill Templates → Skill Resolution](../user-guide/skill-templates.md#skill-resolution).
+
 ## Full Config Example
 
 ```toml

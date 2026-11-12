@@ -149,6 +149,7 @@ fn launch(tr: &TestRepo, env: &TmuxTestEnv, config: &str) -> (Option<String>, St
         .env("HOME", home.path())
         .env("PATH", &path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -385,7 +386,8 @@ fn recovery_of_a_pre_relocation_session_rebuilds_the_new_layout() {
     start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut start_cmd);
     let start_out = start_cmd
         .args(["start", "--no-supervisor"])

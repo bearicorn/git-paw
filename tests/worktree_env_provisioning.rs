@@ -323,6 +323,7 @@ fn provisioned_files_are_present_before_the_agent_cli_starts() {
         .env("PATH", &path_var)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--branches", "probe-a", "--cli", "envprobe"])
         .timeout(Duration::from_secs(30))
         .output()

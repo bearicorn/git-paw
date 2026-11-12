@@ -120,6 +120,7 @@ fn cli_flag_overrides_paw_cli_and_default_spec_cli_for_all_branches() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--cli", "alpha", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --cli alpha --dry-run");
@@ -158,6 +159,7 @@ fn paw_cli_wins_over_default_spec_cli_and_fills_rest() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -194,6 +196,7 @@ fn default_spec_cli_fills_all_branches_without_prompt() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");

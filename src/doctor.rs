@@ -347,6 +347,34 @@ pub struct BundledScriptsProbe {
     pub python3: Option<String>,
 }
 
+/// Where one registered bundled skill package resolves from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    /// The embedded default.
+    Embedded,
+    /// The repository override at this `SKILL.md`.
+    Repo(PathBuf),
+    /// The user override at this `SKILL.md`.
+    User(PathBuf),
+    /// An override exists but fails to load.
+    Broken {
+        /// The override `SKILL.md`, when it could be located.
+        path: Option<PathBuf>,
+        /// The resolver's error.
+        error: String,
+    },
+}
+
+/// Where every registered bundled skill resolves from, through the production
+/// resolver, plus the ignored override directories of non-overridable skills.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillSourcesProbe {
+    /// One `(package name, source)` per registered package, in registry order.
+    pub skills: Vec<(String, SkillSource)>,
+    /// Override directories for `cli-setup` that resolution ignores.
+    pub ignored_overrides: Vec<PathBuf>,
+}
+
 /// What is listening on the broker's configured address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortState {
@@ -456,6 +484,8 @@ pub struct Probes {
     pub spec_workflow: SpecWorkflowProbe,
     /// Bundled-script facts.
     pub bundled_scripts: BundledScriptsProbe,
+    /// Where each bundled skill resolves from.
+    pub skill_sources: SkillSourcesProbe,
     /// Broker facts.
     pub broker: BrokerProbe,
     /// Supervisor facts.
@@ -1145,6 +1175,67 @@ pub fn check_bundled_scripts(probe: &BundledScriptsProbe) -> Vec<CheckResult> {
     checks
 }
 
+/// `skill sources` check: names where each bundled skill resolves from. ✗ when
+/// an override fails to load (a launch would fail the same way), ⚠ when a
+/// `cli-setup` override directory is present and ignored, ✓ otherwise.
+#[must_use]
+pub fn check_skill_sources(probe: &SkillSourcesProbe) -> CheckResult {
+    const NAME: &str = "skill sources";
+    let describe = |source: &SkillSource| match source {
+        SkillSource::Embedded => "embedded".to_string(),
+        SkillSource::Repo(path) => format!("repo {}", path.display()),
+        SkillSource::User(path) => format!("user {}", path.display()),
+        SkillSource::Broken { path, error } => match path {
+            Some(path) => format!("broken override {} ({error})", path.display()),
+            None => format!("broken override ({error})"),
+        },
+    };
+    let listing = probe
+        .skills
+        .iter()
+        .map(|(name, source)| format!("{name}: {}", describe(source)))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let broken: Vec<String> = probe
+        .skills
+        .iter()
+        .filter_map(|(name, source)| match source {
+            SkillSource::Broken { path, .. } => Some(match path {
+                Some(path) => format!("{name} at {}", path.display()),
+                None => name.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    if !broken.is_empty() {
+        return CheckResult::fail(
+            GROUP_BUNDLED_SCRIPTS,
+            NAME,
+            listing,
+            format!(
+                "fix or remove the skill override ({}) — `git paw start` fails on it too",
+                broken.join(", ")
+            ),
+        );
+    }
+    if !probe.ignored_overrides.is_empty() {
+        let dirs = probe
+            .ignored_overrides
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return CheckResult::warn(
+            GROUP_BUNDLED_SCRIPTS,
+            NAME,
+            format!("{listing}; ignored cli-setup override: {dirs} (cli-setup is not overridable)"),
+            format!("remove {dirs} — it has no effect"),
+        );
+    }
+    CheckResult::ok(GROUP_BUNDLED_SCRIPTS, NAME, listing)
+}
+
 /// Broker check: the configured address is free or already serving a broker,
 /// or the informational pure-manual baseline when the broker is disabled.
 #[must_use]
@@ -1421,6 +1512,7 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     checks.push(check_spec_cli(&probes.spec_cli));
     checks.push(check_spec_workflow(&probes.spec_workflow));
     checks.extend(check_bundled_scripts(&probes.bundled_scripts));
+    checks.push(check_skill_sources(&probes.skill_sources));
     checks.extend(check_broker(&probes.broker));
     checks.extend(check_supervisor(&probes.supervisor));
     checks.extend(check_hygiene(&probes.hygiene));
@@ -1655,6 +1747,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         spec_cli,
         spec_workflow,
         bundled_scripts: probe_bundled_scripts(repo_root),
+        skill_sources: probe_skill_sources(repo_root),
         broker: probe_broker(&config, repo_root),
         supervisor: probe_supervisor(&config, repo_root),
         hygiene: probe_hygiene(repo_root),
@@ -2045,6 +2138,33 @@ fn probe_grant_residue(repo_root: &Path) -> crate::cli_setup::doctor::ResiduePro
         }
     }
     setup_doctor::ResidueProbe { files }
+}
+
+/// Resolves every registered bundled skill through the production resolver.
+/// Read-only.
+fn probe_skill_sources(repo_root: &Path) -> SkillSourcesProbe {
+    use crate::skills::Source;
+    let skills = crate::skills::bundled_packages()
+        .iter()
+        .map(|package| {
+            let source = match crate::skills::resolve(package.name, repo_root) {
+                Ok(t) => match (t.source, t.origin_path) {
+                    (Source::AgentsStandard, Some(path)) => SkillSource::Repo(path),
+                    (Source::User, Some(path)) => SkillSource::User(path),
+                    _ => SkillSource::Embedded,
+                },
+                Err(e) => SkillSource::Broken {
+                    path: crate::skills::override_path(package.name, repo_root),
+                    error: e.to_string(),
+                },
+            };
+            (package.name.to_string(), source)
+        })
+        .collect();
+    SkillSourcesProbe {
+        skills,
+        ignored_overrides: crate::skills::ignored_override_dirs(repo_root),
+    }
 }
 
 /// Inspects `.git-paw/scripts/` against the binary's embedded helper scripts.

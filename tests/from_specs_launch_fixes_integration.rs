@@ -140,6 +140,7 @@ fn from_specs_with_supervisor_routes_to_supervisor_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--from-specs",
@@ -193,6 +194,7 @@ fn from_specs_without_supervisor_routes_to_start_from_specs_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs --dry-run");
@@ -240,6 +242,7 @@ fn from_specs_with_supervisor_config_routes_to_supervisor_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs --dry-run");
@@ -313,6 +316,7 @@ fn from_specs_supervisor_dry_run_succeeds_in_non_tty() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--from-specs",
@@ -353,6 +357,7 @@ fn from_specs_dry_run_succeeds_in_non_tty() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run dry-run in non-TTY context");

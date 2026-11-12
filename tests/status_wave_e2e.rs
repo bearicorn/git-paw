@@ -103,6 +103,7 @@ fn run_status(repo: &std::path::Path, home: &std::path::Path, json: bool) -> Str
         .current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("status");
     if json {
         command.arg("--json");

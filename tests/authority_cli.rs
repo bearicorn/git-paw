@@ -75,7 +75,8 @@ fn authority_cmd(cwd: &Path, home: &Path) -> Command {
     cmd.arg("__authority")
         .current_dir(cwd)
         .env("HOME", home)
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     cmd
 }
 

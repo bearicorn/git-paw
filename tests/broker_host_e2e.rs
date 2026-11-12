@@ -112,6 +112,7 @@ fn spawn_host(fx: &Fixture, session: &str) -> Child {
         .current_dir(&fx.root)
         .env("HOME", fx.home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .args(["__broker", "--session", session, "--log-path"])
@@ -234,6 +235,7 @@ fn pane_running(
     let out = cmd
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["-f", "/dev/null", "new-session", "-d", "-s", session])
         .args(["-x", "160", "-y", "40", "-c"])
         .arg(repo)

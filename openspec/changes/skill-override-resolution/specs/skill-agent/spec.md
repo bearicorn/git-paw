@@ -12,6 +12,10 @@ No other location SHALL be consulted: not the process's current directory or its
 
 An override exists at a level when `<level>/<skill-name>/SKILL.md` exists; a directory without `SKILL.md` SHALL NOT count as an override. An override that exists but cannot be loaded SHALL fail resolution at that level and SHALL NOT fall through to a lower level: an unreadable repository override SHALL return `Err(SkillError::DirectoryReadError { .. })`, and an override at either level whose frontmatter is invalid SHALL return `Err(SkillError::ValidationError { .. })`.
 
+An override's `SKILL.md` SHALL be read only when its canonical path (every symlink resolved) lies under the canonical path of its level directory, and, at the repository level, that level directory's canonical path lies under the repository's main working tree. An override that resolves anywhere else SHALL fail resolution with `Err(SkillError::OverrideOutsideLevel { path, resolved })` naming the override `SKILL.md`, and SHALL NOT fall through to a lower level.
+
+A skill name that could leave an override directory when joined onto it — empty, starting with `.`, or containing `/` or `\` — SHALL NOT be looked up at either override level; it resolves only against the embedded defaults, so it yields `Err(SkillError::UnknownSkill { .. })`.
+
 The name `supervisor` SHALL be an accepted alias of `orchestrator`: `resolve("supervisor", …)` SHALL return the orchestrator template, and an override directory named either `orchestrator` or `supervisor` (at each level above) SHALL apply to both names, an `orchestrator` directory winning over a `supervisor` directory when both exist at the same level; a higher level SHALL win over a lower one whichever of the two names it uses.
 
 The one exception is the bundled `cli-setup` skill, which no level overrides (*The cli-setup skill is not overridable*).
@@ -116,6 +120,21 @@ The returned `SkillTemplate` SHALL include a `source: Source` field — `Source:
 - **GIVEN** a repository override at `<main>/.agents/skills/supervisor/SKILL.md` and a user override at `<config_dir>/git-paw/agent-skills/orchestrator/SKILL.md`
 - **WHEN** `skills::resolve("orchestrator", repo_root)` is called
 - **THEN** the result SHALL have `source = Source::AgentsStandard` and the repository override's content
+
+#### Scenario: A symlinked override that resolves outside its level is refused
+
+- **GIVEN** a repository override `<main>/.agents/skills/coordination/SKILL.md` that is a symlink to a file outside `<main>/.agents/skills/`
+- **AND** a valid user override for `coordination`
+- **WHEN** `skills::resolve("coordination", repo_root)` is called
+- **THEN** the result is `Err(SkillError::OverrideOutsideLevel { .. })` naming the override's `SKILL.md`
+- **AND** the target file's content is not returned
+
+#### Scenario: A path-shaped skill name never reads outside the override directories
+
+- **GIVEN** a file `<main>/.agents/x/SKILL.md` with valid frontmatter
+- **WHEN** `skills::resolve("../x", repo_root)` is called
+- **THEN** the result is `Err(SkillError::UnknownSkill { .. })`
+- **AND** the MCP `get_skill({ "name": "../x" })` call returns `skill: null`
 
 #### Scenario: Unknown skill name returns an error
 

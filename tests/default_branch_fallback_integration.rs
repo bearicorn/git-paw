@@ -116,6 +116,7 @@ fn start_rebases_an_existing_branch_without_origin_head() {
         .current_dir(&sandbox.repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "sh", "--branches", "feat/example"])
         .output()
         .expect("run git paw start");

@@ -41,6 +41,9 @@ fn init_writes_commented_supervisor_block_with_all_gate_keys() {
         .expect("binary exists")
         .current_dir(repo.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success();
 
@@ -68,6 +71,9 @@ fn init_commented_supervisor_block_parses_as_valid_config_when_uncommented() {
         .expect("binary exists")
         .current_dir(repo.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success();
 
@@ -186,12 +192,18 @@ fn init_is_idempotent_does_not_duplicate_commented_supervisor_block() {
         .expect("binary exists")
         .current_dir(path)
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success();
     Command::cargo_bin("git-paw")
         .expect("binary exists")
         .current_dir(path)
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success();
 

@@ -67,6 +67,7 @@ fn start_from_specs_without_force_emits_uncommitted_warning() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs");
@@ -109,6 +110,7 @@ fn start_from_specs_with_force_bypasses_warning() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--from-specs",
