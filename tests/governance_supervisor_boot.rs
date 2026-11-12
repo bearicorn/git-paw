@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use git_paw::agent_cli::CliFamily;
 use git_paw::config::GovernanceConfig;
 use git_paw::skills::{render, supervisor_boot_context};
 
@@ -60,6 +61,7 @@ fn render_supervisor_skill() -> String {
             ..Default::default()
         },
         &[],
+        CliFamily::Generic,
     )
 }
 

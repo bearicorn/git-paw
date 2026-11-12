@@ -1,6 +1,7 @@
 //! The budget step exists only as prose. This guard stops edits that drop a
 //! rule or name a vendor.
 
+use git_paw::agent_cli::CliFamily;
 use git_paw::skills::{GateCommands, render};
 use git_paw::specs::SpecBackendKind;
 
@@ -42,6 +43,7 @@ fn budget_section(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     );
     let start = skill
         .find("### Budget guardrail")

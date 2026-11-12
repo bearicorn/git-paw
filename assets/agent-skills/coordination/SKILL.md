@@ -465,13 +465,7 @@ safe hand-off instead of a lost-work risk.
 
 #### Per-CLI mechanism
 
-The compact/clear commands differ by CLI. Use the form for the CLI you are
-running under:
-
-| CLI | Compact | Clear | Notes |
-|---|---|---|---|
-| `claude` | `/compact` | `/clear` | preferred path; `/compact` preserves recent context |
-| other | varies | varies | look for the CLI's `/compact`, `/save`, or `/reset` equivalent |
+{{CLI_NOTES}}
 
 ### Check for messages from peers (before starting new work)
 

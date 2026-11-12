@@ -11,11 +11,14 @@
 //! stack-specific) assumptions into a bundled asset that ships to
 //! polyglot users.
 
+use git_paw::agent_cli::{CliFamily, CliProfile};
+use git_paw::config::CustomCli;
 use git_paw::skills::{
-    BundledFile, GateCommands, SkillFormat, SkillTemplate, Source, bundled_package,
-    bundled_packages, render,
+    BundledFile, FragmentSlot, GateCommands, SkillFormat, SkillTemplate, Source, build_boot_block,
+    bundled_package, bundled_packages, render, select_fragment,
 };
 use git_paw::specs::SpecBackendKind;
+use std::collections::HashMap;
 
 /// Resolves `name` from the embedded defaults only (no override root), so a
 /// developer's own overrides never change what this test sees.
@@ -55,6 +58,7 @@ fn render_supervisor_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -70,6 +74,7 @@ fn render_cli_setup_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -85,6 +90,7 @@ fn render_coordination_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -909,17 +915,26 @@ fn rendered_for_every_backend(package: &str, file: &BundledFile) -> Vec<(String,
                 "git-paw",
                 &GateCommands::default(),
                 &backends,
+                CliFamily::Generic,
             ),
         ));
     }
     out
 }
 
-/// Runs the no-leak audit over `files` of package `package`.
+/// Runs the no-leak audit over `files` of package `package`. A file under
+/// `assets/cli/<family>/` is read as that family's fragment: it may name its
+/// own vendor and no other.
 fn audit_package_files(package: &str, files: &[BundledFile]) {
     for file in prose_files(files) {
+        let owner = fragment_owner(file.path);
         for (label, text) in rendered_for_every_backend(package, file) {
-            assert_no_forbidden_tokens(&text, &label);
+            if let Some(family) = owner {
+                assert_fragment_names_only_its_vendor(&text, family, &label);
+            } else {
+                assert_no_forbidden_tokens(&text, &label);
+                assert_no_vendor_token(&text, None, &label);
+            }
         }
     }
 }
@@ -987,4 +1002,278 @@ fn a_newly_registered_reference_is_audited_automatically() {
         "names the file: {message}"
     );
     assert!(message.contains("cargo"), "names the token: {message}");
+}
+
+// ---------------------------------------------------------------------------
+// per-cli-skill-templates: vendor naming is confined to the matching CLI
+// fragment (core-lang-agnostic, *Vendor naming is confined to the matching
+// CLI fragment*).
+// ---------------------------------------------------------------------------
+
+/// Vendor product names and vendor-specific paths, per CLI family. A token
+/// may appear only in text from its own family's fragment; `generic` owns
+/// none.
+const VENDOR_TOKENS: &[(CliFamily, &[&str])] = &[
+    (CliFamily::Claude, &["Claude", "Anthropic", ".claude/"]),
+    (CliFamily::Codex, &["Codex", "OpenAI", ".codex/"]),
+    (
+        CliFamily::Antigravity,
+        &["Antigravity", "Gemini", ".gemini/"],
+    ),
+    (CliFamily::Qwen, &["Qwen", ".qwen/"]),
+    (CliFamily::Cursor, &["Cursor", ".cursor/"]),
+    (CliFamily::Generic, &[]),
+];
+
+/// The family whose fragment the package file at `path` is, if it lies
+/// under `assets/cli/<family>/`.
+fn fragment_owner(path: &str) -> Option<CliFamily> {
+    CliFamily::ALL
+        .into_iter()
+        .find(|f| path.starts_with(&format!("assets/cli/{}/", f.as_str())))
+}
+
+/// Asserts `text` (allowlist spans stripped) names no vendor token other
+/// than `owner`'s, naming `label` and the token on failure.
+fn assert_no_vendor_token(text: &str, owner: Option<CliFamily>, label: &str) {
+    let scanned = strip_allowlist_prose(text);
+    for (family, tokens) in VENDOR_TOKENS {
+        if Some(*family) == owner {
+            continue;
+        }
+        for token in *tokens {
+            if let Some(idx) = scanned.find(token) {
+                let start = idx.saturating_sub(80);
+                let end = (idx + 80).min(scanned.len());
+                panic!(
+                    "vendor audit failed for `{label}`: vendor token `{token}` at byte {idx}\n\
+                     context: ...{}...",
+                    &scanned[start..end]
+                );
+            }
+        }
+    }
+}
+
+/// Asserts a fragment of `owner` carries no stack token and names no vendor
+/// but its own.
+fn assert_fragment_names_only_its_vendor(text: &str, owner: CliFamily, label: &str) {
+    let own: &[&str] = VENDOR_TOKENS
+        .iter()
+        .find(|(f, _)| *f == owner)
+        .map_or(&[], |(_, t)| t);
+    let scanned = strip_allowlist_prose(text);
+    for token in FORBIDDEN_TOKENS {
+        if !own.iter().any(|o| token.contains(o)) {
+            assert!(
+                !scanned.contains(token),
+                "vendor audit failed for `{label}`: forbidden token `{token}`"
+            );
+        }
+    }
+    assert_no_vendor_token(text, Some(owner), label);
+}
+
+/// Audits `rendered` — a template rendered for an agent of `family` — so a
+/// vendor token survives only inside the fragment selected for `family`.
+/// Each selected fragment must name only its own vendor; the rest of the
+/// text (the base template) names none.
+fn audit_cli_rendering(rendered: &str, family: CliFamily, label: &str) {
+    let coordination = bundled_package("coordination").expect("registered");
+    let mut base = rendered.to_string();
+    for slot in FragmentSlot::ALL {
+        let fragment = select_fragment(family, slot, coordination).trim_end();
+        // The selected fragment is the family's own, or the generic fallback.
+        let owner = coordination
+            .assets
+            .iter()
+            .find(|f| f.content.trim_end() == fragment)
+            .and_then(|f| fragment_owner(f.path))
+            .expect("a selected fragment is a registered package file");
+        assert_fragment_names_only_its_vendor(
+            fragment,
+            owner,
+            &format!("{label} {}", slot.path(owner)),
+        );
+        base = base.replace(fragment, "");
+    }
+    assert_no_forbidden_tokens(&base, label);
+    assert_no_vendor_token(&base, None, label);
+}
+
+/// The coordination skill rendered for an agent of `family`.
+fn coordination_for_family(family: CliFamily) -> String {
+    let tmpl = resolve("coordination").expect("coordination skill resolves");
+    render(
+        &tmpl,
+        "feat/audit",
+        "http://127.0.0.1:9119",
+        "git-paw",
+        &GateCommands::default(),
+        &[SpecBackendKind::OpenSpec],
+        family,
+    )
+}
+
+/// Both boot-block forms rendered for an agent of `family`.
+fn boot_blocks_for_family(family: CliFamily) -> Vec<(bool, String)> {
+    [false, true]
+        .into_iter()
+        .map(|mcp| {
+            let mut clis = HashMap::new();
+            clis.insert(
+                "probe".to_string(),
+                CustomCli {
+                    command: "probe".to_string(),
+                    family: Some(family.as_str().to_string()),
+                    mcp: Some(mcp),
+                    ..CustomCli::default()
+                },
+            );
+            let profile = CliProfile::resolve("probe", &clis);
+            (
+                mcp,
+                build_boot_block("feat/audit", "http://127.0.0.1:9119", &profile),
+            )
+        })
+        .collect()
+}
+
+/// Task 4.1: the coordination skill and both boot-block forms pass the audit
+/// rendered for every registered family and for `generic`.
+#[test]
+fn cli_placeholder_templates_pass_the_audit_for_every_family() {
+    for family in CliFamily::ALL {
+        audit_cli_rendering(
+            &coordination_for_family(family),
+            family,
+            &format!("coordination/SKILL.md [{family}]"),
+        );
+        for (mcp, block) in boot_blocks_for_family(family) {
+            audit_cli_rendering(&block, family, &format!("boot block mcp={mcp} [{family}]"));
+        }
+    }
+}
+
+/// Scenario "Generic rendering is vendor-free".
+#[test]
+fn generic_rendering_is_vendor_free() {
+    let mut rendered = vec![coordination_for_family(CliFamily::Generic)];
+    rendered.extend(
+        boot_blocks_for_family(CliFamily::Generic)
+            .into_iter()
+            .map(|(_, b)| b),
+    );
+    for text in rendered {
+        assert_no_forbidden_tokens(&text, "generic");
+        assert_no_vendor_token(&text, None, "generic");
+    }
+}
+
+/// The claude fragment does name its vendor, and only through the fragment.
+#[test]
+fn the_claude_fragment_is_the_only_source_of_its_vendor_name() {
+    let block = &boot_blocks_for_family(CliFamily::Claude)[0].1;
+    assert!(block.contains("Claude"), "{block}");
+    audit_cli_rendering(block, CliFamily::Claude, "claude boot block");
+}
+
+/// Scenario "A fragment naming another vendor fails".
+#[test]
+fn a_fragment_naming_another_vendor_fails() {
+    let coordination = bundled_package("coordination").expect("registered");
+    let path = FragmentSlot::Skill.path(CliFamily::Claude);
+    let fragment = coordination
+        .assets
+        .iter()
+        .find(|f| f.path == path)
+        .expect("claude skill fragment registered");
+    let edited = format!(
+        "{}\nOr run Codex and use its own command.\n",
+        fragment.content
+    );
+    let files: Vec<BundledFile> = vec![BundledFile {
+        content: Box::leak(edited.into_boxed_str()),
+        ..*fragment
+    }];
+    let message = std::panic::catch_unwind(|| audit_package_files("coordination", &files))
+        .expect_err("the audit must fail on another vendor in the claude fragment")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    assert!(message.contains(&path), "names the fragment: {message}");
+    assert!(message.contains("Codex"), "names the token: {message}");
+}
+
+/// Scenario "A vendor name in a base template fails".
+#[test]
+fn a_vendor_name_in_a_base_template_fails() {
+    let coordination = bundled_package("coordination").expect("registered");
+    let edited = format!(
+        "{}\nOpen Claude Code before you begin.\n",
+        coordination.skill_md.content
+    );
+    let template = SkillTemplate {
+        name: "coordination".to_string(),
+        content: edited,
+        source: Source::Embedded,
+        format: SkillFormat::Standardized,
+        metadata: None,
+        resource_paths: None,
+        origin_path: None,
+    };
+    for family in [CliFamily::Claude, CliFamily::Generic] {
+        let rendered = render(
+            &template,
+            "feat/audit",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+            family,
+        );
+        let message = std::panic::catch_unwind(|| audit_cli_rendering(&rendered, family, "edited"))
+            .expect_err("the audit must fail on a vendor name in the base template")
+            .downcast::<String>()
+            .map(|s| *s)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Claude"),
+            "{family}: names the token: {message}"
+        );
+    }
+}
+
+/// A package file under `assets/cli/<family>/` is read as that family's
+/// fragment by the per-file audit.
+#[test]
+fn a_package_file_under_assets_cli_is_read_as_its_familys_fragment() {
+    assert_eq!(
+        fragment_owner("assets/cli/claude/boot.md"),
+        Some(CliFamily::Claude)
+    );
+    assert_eq!(
+        fragment_owner("assets/cli/generic/skill.md"),
+        Some(CliFamily::Generic)
+    );
+    assert_eq!(fragment_owner("assets/boot-block.md"), None);
+    // The claude boot fragment names its vendor and still passes the
+    // per-file audit; the same text read as a base asset fails.
+    let coordination = bundled_package("coordination").expect("registered");
+    let claude_boot: Vec<BundledFile> = coordination
+        .assets
+        .iter()
+        .filter(|f| f.path == FragmentSlot::Boot.path(CliFamily::Claude))
+        .copied()
+        .collect();
+    assert_eq!(claude_boot.len(), 1);
+    audit_package_files("coordination", &claude_boot);
+    let as_base = vec![BundledFile {
+        path: "assets/boot-notes.md",
+        ..claude_boot[0]
+    }];
+    assert!(
+        std::panic::catch_unwind(|| audit_package_files("coordination", &as_base)).is_err(),
+        "a vendor name outside a fragment directory fails the per-file audit"
+    );
 }

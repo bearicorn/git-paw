@@ -296,6 +296,7 @@ fn an_overrides_script_is_not_installed() {
         project: "proj",
         gates: git_paw::skills::GateCommands::default(),
         backends: &[],
+        family: git_paw::agent_cli::CliFamily::Generic,
     };
     git_paw::init::provision_worktree_helpers(worktree.path(), &packages, &inputs)
         .expect("provision worktree helpers");
