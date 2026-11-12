@@ -140,6 +140,26 @@ impl Fixture {
             "sleep 3600",
         ]);
         assert!(cmd.status().expect("tmux").success(), "tmux new-session");
+        // The pane starts as a shell; until it runs `sleep`, liveness reports the agents exited.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let mut probe = Command::new("tmux");
+            self.tmux.apply(&mut probe).args([
+                "display-message",
+                "-p",
+                "-t",
+                &self.session,
+                "#{pane_current_command}",
+            ]);
+            let ready = probe
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "sleep");
+            if ready {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the fixture pane never reached `sleep`");
     }
 
     fn tmux_alive(&self) -> bool {
