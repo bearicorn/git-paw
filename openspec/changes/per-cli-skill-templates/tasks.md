@@ -9,7 +9,7 @@
 
 - [x] 2.1 Pass the agent's resolved `CliProfile` / its `family()` at every per-agent render site: `src/commands/start.rs` (both `render` sites and both `build_boot_block` sites, which already hold a profile), `src/commands/launch.rs` (`attach_agent`'s `render`, `compose_agent_launch`'s `build_boot_block`), package provisioning from `skill-package-deploy`; custom variants resolve their declared family, an undeclared or unknown CLI ⇒ `generic`
 - [x] 2.2 Tests: "A Claude-family agent gets the Claude fragment", "An unrecognised CLI gets the generic fragment", "A custom variant inherits its declared family", "A family without a fragment falls back to generic", "Agents on different CLIs in one session get different fragments" (e2e over the sidecar), "A render with no agent uses generic"
-- [x] 2.3 Verify `codex` and `agy` compaction commands and paste display against each CLI's current documentation; author `codex/` / `agy/` fragments only for verified facts, otherwise ship none (they render `generic`) and record the outcome in the changelog
+- [x] 2.3 Verify `codex` and `agy` compaction commands and paste display against each CLI's current documentation; author `codex/` / `agy/` fragments only for verified facts, otherwise ship none (they render `generic`) and record the outcome in `docs/src/user-guide/skill-templates.md` (the changelog is generated from commits at release)
 
 ## 3. Requirement tests
 

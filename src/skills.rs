@@ -8343,6 +8343,30 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     }
 
     /// Spec skill-agent "Compact mechanism for the agent's own CLI" /
+    /// Scenario "Codex-family agent sees its slash commands".
+    #[test]
+    fn codex_family_agent_sees_its_slash_commands() {
+        let section = context_budget_section(CliFamily::Codex);
+        let mechanism = &section[section
+            .find("#### Per-CLI mechanism")
+            .expect("mechanism subsection present")..];
+        for command in [
+            "compacts with `/compact`",
+            "clears with `/clear`",
+            "`/new` starts",
+        ] {
+            assert!(
+                mechanism.contains(command),
+                "a codex-family agent should be told {command}: {mechanism}"
+            );
+        }
+        assert!(
+            !mechanism.contains("/save"),
+            "a codex-family agent should see only its own CLI's mechanism: {mechanism}"
+        );
+    }
+
+    /// Spec skill-agent "Compact mechanism for the agent's own CLI" /
     /// Scenario "Generic fallback points users at their CLI's equivalent".
     #[test]
     fn generic_fallback_points_users_at_their_clis_equivalent() {

@@ -10,6 +10,8 @@ The boot block SHALL include specific instructions for handling paste operations
 - **THEN** it SHALL contain instructions about paste detection
 - **AND** it SHALL mention the need for a second Enter key
 
+Test: `skills::tests::paste_handling_instruction_included_for_every_family`
+
 #### Scenario: Paste instruction format
 
 - **GIVEN** an agent whose resolved CLI profile has family `claude`
@@ -17,12 +19,16 @@ The boot block SHALL include specific instructions for handling paste operations
 - **THEN** it SHALL explain that pasted text is collapsed into `[Pasted text #N]`
 - **AND** it SHALL instruct the agent to send an additional Enter after paste operations
 
+Test: `skills::tests::paste_instruction_format_for_a_claude_family_agent`
+
 #### Scenario: Paste instruction for a generic agent names no vendor
 
 - **GIVEN** an agent whose resolved CLI profile has family `generic`
 - **WHEN** the paste handling section of its boot block is examined
 - **THEN** it SHALL instruct the agent to send an additional Enter after paste operations
 - **AND** it SHALL NOT name a vendor product
+
+Test: `skills::tests::paste_instruction_for_a_generic_agent_names_no_vendor`
 
 ### Requirement: Template variable substitution
 
@@ -34,11 +40,15 @@ The system SHALL support template variable substitution in boot blocks using the
 - **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** all occurrences of `{{BRANCH_ID}}` SHALL be replaced with `"feat-errors"`
 
+Test: `skills::tests::boot_template_branch_id_substitution`
+
 #### Scenario: Broker URL substitution
 
 - **GIVEN** boot block template containing `{{GIT_PAW_BROKER_URL}}`
 - **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** all occurrences of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `"http://localhost:9119"`
+
+Test: `skills::tests::boot_template_broker_url_substitution`
 
 ### Requirement: Helper function signature
 
@@ -53,10 +63,14 @@ where `CliProfile` is the resolved per-CLI record of the `cli-provider` capabili
 - **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called with a resolved profile
 - **THEN** it SHALL accept the parameters without error
 
+Test: `skills::tests::build_boot_block_accepts_required_parameters`
+
 #### Scenario: Function returns boot block string
 
 - **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** it SHALL return a `String` containing the boot instructions
+
+Test: `skills::tests::build_boot_block_returns_boot_block_string`
 
 #### Scenario: The generic profile yields the helper form with the generic fragment
 
@@ -64,3 +78,6 @@ where `CliProfile` is the resolved per-CLI record of the `cli-provider` capabili
 - **WHEN** `build_boot_block` is called with it
 - **THEN** the result SHALL be the helper form
 - **AND** SHALL contain the `generic` boot fragment
+
+Test: `skills::tests::generic_profile_yields_the_helper_form_with_the_generic_fragment`
+
