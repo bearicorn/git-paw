@@ -919,3 +919,76 @@ fn the_baseline_instruction_names_no_package_manager() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// orchestrator-gate-references: no gate sentence lost in the move.
+// ---------------------------------------------------------------------------
+
+/// The gate text as it stood in `SKILL.md` before the move.
+const PRE_MOVE_GATES: &str = include_str!("fixtures/orchestrator_gates_pre_move.md");
+
+/// Pre-move sentences deliberately reworded by the move, each with the text
+/// that replaced it. In a separate reference, "below" no longer points at the
+/// Spec Audit Procedure, so doc-audit names its reference path instead.
+const REWORDED: [(&str, &str); 1] = [(
+    "(see \"Spec Audit Procedure\" below —",
+    "(see \"Spec Audit Procedure\" in `.git-paw/skills/orchestrator/references/gates/spec-audit.md` —",
+)];
+
+// skill-agent / Scenario: Gate content is moved, not duplicated — and no
+// sentence of it is lost: the union of SKILL.md and its references carries
+// every pre-move gate sentence byte-for-byte (whitespace collapsed).
+#[test]
+fn every_pre_move_gate_sentence_survives_in_the_package() {
+    let package = git_paw::skills::bundled_package("orchestrator").expect("orchestrator package");
+    let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let union = squash(&git_paw::skills::package_text(package));
+
+    let body = PRE_MOVE_GATES
+        .split_once("-->")
+        .map_or(PRE_MOVE_GATES, |(_, rest)| rest);
+    // Drop the step numbers ("6. ", "6a. ", "6b. ") that only the Workflow
+    // pointers keep; the moved bodies are unnumbered paragraphs.
+    let body: String = body
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            ["6. ", "6a. ", "6b. "]
+                .iter()
+                .find_map(|n| trimmed.strip_prefix(n))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut body = squash(&body);
+    for (before, after) in REWORDED {
+        assert!(
+            body.contains(before),
+            "reworded sentence `{before}` is in the fixture"
+        );
+        assert!(union.contains(after), "its replacement `{after}` ships");
+        body = body.replace(before, after);
+    }
+
+    let mut sentences = 0;
+    let mut rest = body.as_str();
+    while !rest.is_empty() {
+        let end = rest
+            .char_indices()
+            .find(|&(i, c)| matches!(c, '.' | ':' | ';') && rest[i + 1..].starts_with(' '))
+            .map_or(rest.len(), |(i, _)| i + 1);
+        let sentence = rest[..end].trim();
+        if !sentence.is_empty() {
+            sentences += 1;
+            assert!(
+                union.contains(sentence),
+                "pre-move gate sentence lost from the orchestrator package: {sentence}"
+            );
+        }
+        rest = rest[end..].trim_start();
+    }
+    assert!(
+        sentences >= 70,
+        "expected the whole gate text, checked {sentences} sentences"
+    );
+}
