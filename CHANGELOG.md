@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Notes
-
-- *(skills)* Per-CLI skill fragments ship for `claude` (skill + boot), `codex` (skill only: `/compact`, `/clear` and `/new`, verified against the Codex CLI slash-command reference) and `generic`. The Codex paste display and every `agy` compaction or paste fact could not be verified against current documentation, so the `codex` boot slot and both `agy` slots render the `generic` fragment.
-
 ## [0.19.0] - 2026-11-11
 
 ### Features

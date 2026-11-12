@@ -195,7 +195,12 @@ nothing written for Claude.
 **Fallback.** A family with no fragment for a slot renders the package's
 vendor-neutral `generic` fragment. The coordination package ships `claude`
 (both slots), `codex` (skill slot only) and `generic` (both slots); every
-other family, and every slot a family leaves out, renders `generic`. A render
+other family, and every slot a family leaves out, renders `generic`. A
+fragment states only facts checked against that CLI's own documentation: the
+`codex` skill fragment's `/compact`, `/clear` and `/new` come from the Codex
+CLI slash-command reference, while the Codex paste display and the `agy`
+compaction and paste behavior could not be confirmed there, so those slots
+render `generic`. A render
 with no agent CLI — the repository-root install and the MCP `get_skill` tool —
 also uses `generic`.
 
