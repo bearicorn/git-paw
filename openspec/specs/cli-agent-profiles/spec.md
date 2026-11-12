@@ -1,8 +1,9 @@
-## Purpose
+# cli-agent-profiles Specification
 
+## Purpose
 Defines agent profiles: named configuration entries that state what an agent is for — a CLI pinned to its launch arguments (such as a model), a role skill, an approval level and a one-line purpose. A **worker** profile launches a normal coding agent (pane, branch, worktree) and is chosen by flag, configuration default, the interactive picker or spec frontmatter. A **delegate** profile runs headless and one-shot for the orchestrator at the repository root, under least-privilege bounds (default `manual`, never `full-auto`, root sessions only, no nesting, a time limit, a concurrency cap, no verdict authority), and returns a compact result. Profiles are configuration, never vendor agent-definition files.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Agent profiles are declared in `[profiles.<name>]`
 
