@@ -13,8 +13,8 @@
 
 ## 3. Requirement tests
 
-- [ ] 3.1 Context-budget tests for *Compact mechanism for the agent's own CLI*: "Claude-family agent sees its slash commands", "Generic fallback points users at their CLI's equivalent", "No custom variant is named" — re-point `skills::tests::coordination_skill_per_cli_mechanism_table` and `tests/coordination_helper_only_skill_content.rs::coordination_skill_carries_no_git_paw_history_or_variant_names` (they pinned the removed *Per-CLI compact mechanism table*)
-- [ ] 3.2 Boot-block tests for both forms: "Paste handling instruction included" (every family), "Paste instruction format" (Claude-family agent), "Paste instruction for a generic agent names no vendor"
+- [x] 3.1 Context-budget tests for *Compact mechanism for the agent's own CLI*: "Claude-family agent sees its slash commands", "Generic fallback points users at their CLI's equivalent", "No custom variant is named" — re-point `skills::tests::coordination_skill_per_cli_mechanism_table` and `tests/coordination_helper_only_skill_content.rs::coordination_skill_carries_no_git_paw_history_or_variant_names` (they pinned the removed *Per-CLI compact mechanism table*)
+- [x] 3.2 Boot-block tests for both forms: "Paste handling instruction included" (every family), "Paste instruction format" (Claude-family agent), "Paste instruction for a generic agent names no vendor"
 
 ## 4. Export guard
 

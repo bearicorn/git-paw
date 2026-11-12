@@ -99,16 +99,31 @@ fn coordination_skill_asks_for_bare_helper_calls() {
     }
 }
 
-/// The exported skill carries no git-paw release history and no project's own
-/// CLI variant name.
+/// The exported skill and every per-CLI fragment carry no git-paw release
+/// history and no project's own CLI variant name — `skill-agent` / *Compact
+/// mechanism for the agent's own CLI*, scenario "No custom variant is named".
 #[test]
 fn coordination_skill_carries_no_git_paw_history_or_variant_names() {
-    let skill = coordination_skill();
-    for leak in ["claude-oss", "148 commits", "v0.6.0", "v0.7.0"] {
-        assert!(
-            !skill.contains(leak),
-            "coordination skill should not carry `{leak}`"
-        );
+    let package = git_paw::skills::bundled_package("coordination").expect("registered");
+    let fragments: Vec<_> = package
+        .assets
+        .iter()
+        .filter(|f| f.path.starts_with("assets/cli/"))
+        .collect();
+    assert!(
+        fragments.len() >= 4,
+        "claude and generic fragments are registered"
+    );
+    let mut texts = vec![("SKILL.md".to_string(), coordination_skill())];
+    texts.extend(
+        fragments
+            .iter()
+            .map(|f| (f.path.to_string(), f.content.to_string())),
+    );
+    for (path, text) in &texts {
+        for leak in ["claude-oss", "148 commits", "v0.6.0", "v0.7.0"] {
+            assert!(!text.contains(leak), "{path} should not carry `{leak}`");
+        }
     }
 }
 

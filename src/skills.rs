@@ -6540,25 +6540,111 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
+    /// A profile of `family` with an explicit MCP capability, so each family
+    /// can be rendered in both boot-block forms.
+    fn profile_in_form(family: CliFamily, mcp: bool) -> CliProfile {
+        let mut clis = HashMap::new();
+        clis.insert(
+            "probe".to_string(),
+            CustomCli {
+                command: "probe".to_string(),
+                family: Some(family.as_str().to_string()),
+                mcp: Some(mcp),
+                ..CustomCli::default()
+            },
+        );
+        let profile = CliProfile::resolve("probe", &clis);
+        assert_eq!(profile.family(), family);
+        assert_eq!(profile.mcp_capable(), mcp);
+        profile
+    }
+
+    /// The `### PASTE HANDLING` section of a boot block.
+    fn paste_section(block: &str) -> &str {
+        let start = block
+            .find("### PASTE HANDLING")
+            .expect("paste handling section present");
+        let rest = &block[start..];
+        let end = rest[4..].find("\n### ").map_or(rest.len(), |e| e + 4);
+        &rest[..end]
+    }
+
+    /// Spec boot-block "Paste handling instructions" / Scenario "Paste
+    /// handling instruction included" — every family, both forms.
     #[test]
-    fn boot_block_contains_paste_handling_instructions() {
-        let block = build_boot_block(
-            "feat/x",
-            "http://localhost:9119",
-            &CliProfile::for_family(CliFamily::Claude),
-        );
-        assert!(
-            block.contains("PASTE HANDLING"),
-            "Missing paste handling section"
-        );
-        assert!(
-            block.contains("additional Enter key"),
-            "Missing Enter key instruction"
-        );
-        assert!(
-            block.contains("[Pasted text #N]"),
-            "Missing paste text reference"
-        );
+    fn paste_handling_instruction_included_for_every_family() {
+        for family in CliFamily::ALL {
+            for mcp in [false, true] {
+                let profile = profile_in_form(family, mcp);
+                let block = build_boot_block("feat/x", "http://localhost:9119", &profile);
+                let paste = paste_section(&block);
+                assert!(
+                    paste.to_lowercase().contains("paste"),
+                    "{family} mcp={mcp}: {paste}"
+                );
+                assert!(
+                    paste.contains("additional Enter key"),
+                    "{family} mcp={mcp}: {paste}"
+                );
+                assert!(!block.contains("{{CLI_BOOT_NOTES}}"));
+            }
+        }
+    }
+
+    /// Spec boot-block "Paste handling instructions" / Scenario "Paste
+    /// instruction format" — a Claude-family agent, both forms.
+    #[test]
+    fn paste_instruction_format_for_a_claude_family_agent() {
+        for mcp in [false, true] {
+            let block = build_boot_block(
+                "feat/x",
+                "http://localhost:9119",
+                &profile_in_form(CliFamily::Claude, mcp),
+            );
+            let paste = paste_section(&block);
+            assert!(
+                paste.contains("collapse it into `[Pasted text #N]`"),
+                "mcp={mcp}: {paste}"
+            );
+            assert!(
+                paste.contains("send an additional Enter key"),
+                "mcp={mcp}: {paste}"
+            );
+        }
+    }
+
+    /// Spec boot-block "Paste handling instructions" / Scenario "Paste
+    /// instruction for a generic agent names no vendor" — both forms.
+    #[test]
+    fn paste_instruction_for_a_generic_agent_names_no_vendor() {
+        for mcp in [false, true] {
+            let block = build_boot_block(
+                "feat/x",
+                "http://localhost:9119",
+                &profile_in_form(CliFamily::Generic, mcp),
+            );
+            let paste = paste_section(&block);
+            assert!(
+                paste.contains("send an additional Enter key"),
+                "mcp={mcp}: {paste}"
+            );
+            for vendor in [
+                "Claude",
+                "Codex",
+                "Antigravity",
+                "Gemini",
+                "Qwen",
+                "Cursor",
+                "OpenAI",
+                "Anthropic",
+                "Google",
+            ] {
+                assert!(
+                    !paste.contains(vendor),
+                    "mcp={mcp}: the generic paste section names {vendor}: {paste}"
+                );
+            }
+        }
     }
 
     #[test]
