@@ -267,6 +267,7 @@ pub fn render_root_packages(
         project: &project,
         gates: supervisor.gate_commands(),
         backends: &backends,
+        family: crate::agent_cli::CliFamily::Generic,
     };
     crate::skills::bundled_packages()
         .iter()
@@ -1878,6 +1879,7 @@ test_command = "just check"
             project: "proj",
             gates: crate::skills::GateCommands::default(),
             backends: &[],
+            family: crate::agent_cli::CliFamily::Generic,
         }
     }
 

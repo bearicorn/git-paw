@@ -202,7 +202,17 @@ impl GitPawMcpServer {
                     let supervisor = cfg.supervisor.clone().unwrap_or_default();
                     skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
                 } else {
-                    skills::render(&template, &branch, &broker_url, &project, &gates, &backends)
+                    // No agent CLI is known here, so the per-CLI fragments
+                    // render their `generic` form.
+                    skills::render(
+                        &template,
+                        &branch,
+                        &broker_url,
+                        &project,
+                        &gates,
+                        &backends,
+                        crate::agent_cli::CliFamily::Generic,
+                    )
                 };
                 let source = match template.source {
                     Source::Embedded => "embedded",
@@ -283,6 +293,35 @@ mod tests {
             );
             assert!(!skill.content.contains("http://"));
         }
+    }
+
+    /// `skill-agent` / Scenario "A render with no agent uses generic" — the
+    /// MCP half: `get_skill` serves the coordination skill with the `generic`
+    /// skill fragment, since no agent CLI is known.
+    #[test]
+    fn get_skill_renders_the_generic_cli_fragment() {
+        use crate::agent_cli::CliFamily;
+        use crate::skills::{FragmentSlot, bundled_package, select_fragment};
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_for(tmp.path().to_path_buf());
+        let resp = server.get_skill(Parameters(GetSkillParams {
+            name: "coordination".to_string(),
+        }));
+        let skill = resp.0.skill.expect("coordination is served");
+        let coordination = bundled_package("coordination").unwrap();
+        let generic = select_fragment(CliFamily::Generic, FragmentSlot::Skill, coordination);
+        let claude = select_fragment(CliFamily::Claude, FragmentSlot::Skill, coordination);
+        assert!(
+            skill.content.contains(generic.trim_end()),
+            "{}",
+            skill.content
+        );
+        assert!(
+            !skill.content.contains(claude.trim_end()),
+            "{}",
+            skill.content
+        );
+        assert!(!skill.content.contains("{{CLI_NOTES}}"));
     }
 
     #[test]

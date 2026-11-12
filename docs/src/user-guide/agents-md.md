@@ -170,6 +170,13 @@ Each worktree's `.git-paw/AGENTS.local.md` sidecar includes:
     `.git-paw/skills/coordination/scripts/broker.sh`, one permission rule you write there covers
     every call instead of a broad `curl` rule — see
     [Coordination](./coordination.md#broker-helper).
+  - **Per-CLI rendering.** The skill bodies and the boot block are rendered
+    for the agent's own CLI: its resolved provider family picks the per-CLI
+    fragments (the compact / clear commands, the paste-handling note), so two
+    agents on different CLIs in one session get different sidecars. A family
+    without a fragment, or a custom CLI that declares no `family`, gets the
+    vendor-neutral `generic` text — see
+    [Per-CLI fragments](./skill-templates.md#per-cli-fragments).
 
 The supervisor-mode boot prompt does not duplicate any of this content — it
 points at the sidecar. If a change is updated on disk during a session (e.g.

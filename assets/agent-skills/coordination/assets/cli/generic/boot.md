@@ -1,0 +1,1 @@
+When you paste text, your CLI may collapse or abbreviate it in the input area instead of submitting it. After any paste operation, send an additional Enter key to ensure the full content is processed. This is especially important after pasting the boot instructions themselves.

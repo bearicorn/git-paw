@@ -30,7 +30,8 @@ export.
 
 - **Skills** — the bundled packages `assets/agent-skills/<pkg>/` for
   `{coordination,orchestrator,docs-fetch,cli-setup}`: each `SKILL.md` plus its `references/` and
-  `assets/` (the boot-block templates live in `coordination/assets/`), all registered in
+  `assets/` (the boot-block templates and the per-CLI fragments
+  `assets/cli/<family>/{skill,boot}.md` live in `coordination/assets/`), all registered in
   `skills::bundled_packages()` (`orchestrator` was `supervisor`, still resolvable under that
   alias).
 - **Installed packages** — `git paw init` and every `git paw start` install every registered
@@ -76,7 +77,10 @@ export.
   `{{GIT_PAW_BROKER_URL}}`, …) that pull consumer specifics from config rather than inlining them.
   Bundled prose names a helper only through `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}` or
   `{{DOCS_FETCH_HELPER}}`, rendered to the package path from the registry — never a literal
-  `.git-paw/scripts/…` or `.git-paw/skills/<pkg>/scripts/…` path.
+  `.git-paw/scripts/…` or `.git-paw/skills/<pkg>/scripts/…` path. Per-CLI prose enters only
+  through `{{CLI_NOTES}}` (skill slot) and `{{CLI_BOOT_NOTES}}` (boot slot), rendered from the
+  agent's CLI-family fragment under `assets/cli/<family>/` with a vendor-neutral `generic`
+  fallback — never inlined in a base template.
 
 ## How to stay agnostic (per surface)
 
@@ -93,7 +97,8 @@ export.
   from the consumer's configuration, stack or repository content.
 - **Skills / injected prose** — no stack tokens; region-gate opsx/OpenSpec prose
   (`<!-- opsx-role-gating:begin/end -->`); wrap legitimate preset enumerations in
-  `<!-- allowlist-prose -->` sentinels; defer commit-message format to the consumer.
+  `<!-- allowlist-prose -->` sentinels; put anything true of one agent CLI only in that family's
+  `assets/cli/<family>/` fragment; defer commit-message format to the consumer.
 - **Injected sections / hooks** — marker-delimited and idempotent; carry no baked stack or
   convention.
 - **Consumer specifics** — always via `{{VAR}}` template substitution or injected config, never
@@ -105,8 +110,10 @@ export.
   in the rendered skills (with `<!-- allowlist-prose -->` stripping), extended to cover every
   bundled agent-facing prose asset (not only the supervisor/coordination skills) and to forbid
   vendor product names/paths (e.g. `Claude Code`, `.claude/`) outside an `<!-- allowlist-prose -->`
-  span — the mechanism that keeps a deliberate CLI enumeration legal without making vendor naming
-  an accident. It also audits the exported orchestrator `SKILL.md` (every backend, frontmatter
+  span or that vendor's own `assets/cli/<family>/` fragment — the mechanisms that keep a
+  deliberate CLI enumeration and per-CLI notes legal without making vendor naming an accident.
+  Templates using `{{CLI_NOTES}}` / `{{CLI_BOOT_NOTES}}` are rendered once per CLI family and
+  for `generic`; a vendor token may survive only inside its own family's fragment. It also audits the exported orchestrator `SKILL.md` (every backend, frontmatter
   included), the exported `cli-setup` `SKILL.md`, the orchestrator pointer asset and the session
   context template, and asserts no exported orchestrator rendering carries `curl` or a session value.
 - `skills::validate_skill_dir` — the strict standardized-format check the exported skill

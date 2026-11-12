@@ -309,7 +309,13 @@ names no tool, CLI or project, only the path.
 
 ### Paste Handling
 
-The boot block includes instructions for proper paste handling, particularly the requirement to send an additional Enter key after paste operations to ensure full content processing.
+The boot block includes instructions for proper paste handling, particularly the requirement to send an additional Enter key after paste operations to ensure full content processing. Both boot-block forms carry it.
+
+How the agent's CLI displays pasted text is explained by the boot fragment of
+the agent's own [CLI family](skill-templates.md#per-cli-fragments): a
+Claude-family agent is told its CLI collapses pasted text into
+`[Pasted text #N]`; every other agent gets the vendor-neutral `generic`
+explanation. No agent's boot block describes another vendor's CLI.
 
 ### Benefits
 
@@ -1205,6 +1211,13 @@ guidance has four parts:
 
 The bundled coordination skill (`assets/agent-skills/coordination/SKILL.md`, the
 "Context budget" section) is the **authoritative** source for the exact
-heuristics, the named moments, and the per-CLI compact/clear mechanism table
-(`claude`, `claude-oss`, and a generic fallback). This chapter only
-summarises it.
+heuristics and the named moments. This chapter only summarises it.
+
+**Your own CLI's commands only.** The skill's "Per-CLI mechanism" subsection
+is rendered per agent from its [CLI family's skill
+fragment](skill-templates.md#per-cli-fragments), not as a table of CLIs: a
+Claude-family agent is told `/compact` (preferred; it preserves recent
+context) and `/clear`, a Codex-family agent `/compact`, `/clear` and `/new`,
+and every other agent — including a custom `[clis.<name>]` CLI that declares
+no `family` — the vendor-neutral fallback: look for the CLI's `/compact`,
+`/save`, or `/reset` equivalent.

@@ -275,6 +275,7 @@ pub(crate) fn attach_agent(
         project: ctx.project,
         gates: *ctx.gate_commands,
         backends: ctx.session_backends,
+        family: profile.family(),
     };
     crate::init::provision_worktree_helpers(&wt.path, ctx.packages, &render_inputs)?;
     let rendered_skill = crate::skills::render_worktree_skills(ctx.packages, &render_inputs);
@@ -379,7 +380,7 @@ pub(crate) fn compose_agent_launch(
     let boot_block = crate::skills::build_boot_block(
         branch,
         &ctx.broker_config.url(),
-        CliProfile::resolve(ctx.agent_cli, ctx.clis).mcp_capable(),
+        &CliProfile::resolve(ctx.agent_cli, ctx.clis),
     );
     let task_prompt = build_task_prompt(spec_entry);
     (
@@ -524,6 +525,7 @@ pub(crate) fn write_repo_discovery_file_with_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_cli::CliFamily;
 
     const UNSANDBOXED: &str = "runs at full-auto with no declared sandbox";
 
@@ -1083,13 +1085,25 @@ mod tests {
     fn no_boot_block_is_built_with_the_supervisor_identity() {
         let broker_url = "http://127.0.0.1:9119";
         for mcp_capable in [false, true] {
-            let block = crate::skills::build_boot_block("supervisor", broker_url, mcp_capable);
+            let block = crate::skills::build_boot_block(
+                "supervisor",
+                broker_url,
+                &CliProfile::for_family(if mcp_capable {
+                    CliFamily::Claude
+                } else {
+                    CliFamily::Generic
+                }),
+            );
             assert!(
                 !block.contains("--agent supervisor "),
                 "no boot block may publish as the reserved id; got:\n{block}"
             );
         }
-        let helper_form = crate::skills::build_boot_block("supervisor", broker_url, false);
+        let helper_form = crate::skills::build_boot_block(
+            "supervisor",
+            broker_url,
+            &CliProfile::for_family(CliFamily::Generic),
+        );
         assert!(
             helper_form
                 .contains(".git-paw/skills/coordination/scripts/broker.sh --agent agent-supervisor status booting"),

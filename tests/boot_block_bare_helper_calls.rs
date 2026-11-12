@@ -2,6 +2,7 @@
 //! blocks ask for each `broker.sh` call to be run bare, so one path-scoped
 //! permission rule matches every call.
 
+use git_paw::agent_cli::{CliFamily, CliProfile};
 use git_paw::skills::build_boot_block;
 
 const BROKER_URL: &str = "http://127.0.0.1:9119";
@@ -25,7 +26,11 @@ fn assert_asks_for_bare_calls(block: &str, variant: &str) {
 /// Scenario: Standard boot block asks for bare helper calls.
 #[test]
 fn standard_boot_block_asks_for_bare_helper_calls() {
-    let block = build_boot_block("feat/test", BROKER_URL, false);
+    let block = build_boot_block(
+        "feat/test",
+        BROKER_URL,
+        &CliProfile::for_family(CliFamily::Generic),
+    );
     assert_asks_for_bare_calls(&block, "standard");
     for line in block.lines().filter(|l| l.contains("broker.sh --agent")) {
         assert!(
@@ -38,7 +43,11 @@ fn standard_boot_block_asks_for_bare_helper_calls() {
 /// Scenario: MCP boot block asks for bare helper calls.
 #[test]
 fn mcp_boot_block_asks_for_bare_helper_calls() {
-    let block = build_boot_block("feat/test", BROKER_URL, true);
+    let block = build_boot_block(
+        "feat/test",
+        BROKER_URL,
+        &CliProfile::for_family(CliFamily::Claude),
+    );
     assert_asks_for_bare_calls(&block, "MCP");
 }
 
@@ -46,7 +55,15 @@ fn mcp_boot_block_asks_for_bare_helper_calls() {
 #[test]
 fn bare_call_instruction_names_no_agent_cli() {
     for mcp in [false, true] {
-        let block = build_boot_block("feat/test", BROKER_URL, mcp);
+        let block = build_boot_block(
+            "feat/test",
+            BROKER_URL,
+            &CliProfile::for_family(if mcp {
+                CliFamily::Claude
+            } else {
+                CliFamily::Generic
+            }),
+        );
         let paragraph = block
             .split("\n\n")
             .find(|p| p.contains("call bare"))
