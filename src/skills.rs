@@ -281,6 +281,13 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
                 ),
             },
             BundledFile {
+                path: "assets/cli/codex/skill.md",
+                source: "assets/agent-skills/coordination/assets/cli/codex/skill.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/cli/codex/skill.md"
+                ),
+            },
+            BundledFile {
                 path: "assets/cli/generic/skill.md",
                 source: "assets/agent-skills/coordination/assets/cli/generic/skill.md",
                 content: include_str!(
@@ -6308,6 +6315,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                     "{slot:?} for {family}"
                 );
             }
+            // `codex` registers a skill fragment only: its boot slot falls back.
+            let codex = match slot {
+                FragmentSlot::Skill => asset(&slot.path(CliFamily::Codex)),
+                FragmentSlot::Boot => generic,
+            };
+            assert_eq!(select_fragment(CliFamily::Codex, slot, coordination), codex);
             let docs_fetch = bundled_package("docs-fetch").unwrap();
             assert_eq!(select_fragment(CliFamily::Claude, slot, docs_fetch), "");
         }
@@ -6324,6 +6337,131 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             FragmentSlot::Boot.path(CliFamily::Generic),
             "assets/cli/generic/boot.md"
         );
+    }
+
+    /// The coordination skill rendered for an agent on CLI `cli` resolved
+    /// against `clis`.
+    fn coordination_for_cli(cli: &str, clis: &HashMap<String, CustomCli>) -> String {
+        let tmpl = resolve_embedded("coordination").unwrap();
+        render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+            CliProfile::resolve(cli, clis).family(),
+        )
+    }
+
+    /// The coordination package's own fragment text for `family`'s skill slot.
+    fn skill_fragment(family: CliFamily) -> &'static str {
+        let coordination = bundled_package("coordination").unwrap();
+        select_fragment(family, FragmentSlot::Skill, coordination).trim_end()
+    }
+
+    /// Spec skill-agent "Bundled skill text carries the agent's own CLI
+    /// fragment" / Scenario "A Claude-family agent gets the Claude fragment".
+    #[test]
+    fn a_claude_family_agent_gets_the_claude_fragment() {
+        let rendered = coordination_for_cli("claude", &HashMap::new());
+        assert!(rendered.contains(skill_fragment(CliFamily::Claude)));
+        assert!(!rendered.contains(skill_fragment(CliFamily::Generic)));
+        assert!(!rendered.contains("{{CLI_NOTES}}"));
+    }
+
+    /// Spec skill-agent "The CLI fragment is selected from the agent's
+    /// resolved CLI family" / Scenario "An unrecognised CLI gets the generic
+    /// fragment".
+    #[test]
+    fn an_unrecognised_cli_gets_the_generic_fragment() {
+        let mut clis = HashMap::new();
+        clis.insert(
+            "my-agent".to_string(),
+            CustomCli {
+                command: "my-agent".to_string(),
+                ..CustomCli::default()
+            },
+        );
+        for (cli, clis) in [("my-agent", &clis), ("never-heard-of-it", &HashMap::new())] {
+            assert_eq!(CliProfile::resolve(cli, clis).family(), CliFamily::Generic);
+            let rendered = coordination_for_cli(cli, clis);
+            assert!(
+                rendered.contains(skill_fragment(CliFamily::Generic)),
+                "{cli}"
+            );
+            assert!(
+                !rendered.contains(skill_fragment(CliFamily::Claude)),
+                "{cli}"
+            );
+        }
+    }
+
+    /// Spec skill-agent "The CLI fragment is selected from the agent's
+    /// resolved CLI family" / Scenario "A custom variant inherits its declared
+    /// family".
+    #[test]
+    fn a_custom_variant_inherits_its_declared_family() {
+        let mut clis = HashMap::new();
+        clis.insert(
+            "my-variant".to_string(),
+            CustomCli {
+                command: "my-variant-bin".to_string(),
+                family: Some("claude".to_string()),
+                ..CustomCli::default()
+            },
+        );
+        let rendered = coordination_for_cli("my-variant", &clis);
+        assert!(rendered.contains(skill_fragment(CliFamily::Claude)));
+        assert!(!rendered.contains(skill_fragment(CliFamily::Generic)));
+    }
+
+    /// Spec skill-agent "The CLI fragment is selected from the agent's
+    /// resolved CLI family" / Scenario "A family without a fragment falls back
+    /// to generic".
+    #[test]
+    fn a_family_without_a_fragment_falls_back_to_generic() {
+        let coordination = bundled_package("coordination").unwrap();
+        let unregistered: Vec<CliFamily> = CliFamily::ALL
+            .into_iter()
+            .filter(|f| {
+                !coordination
+                    .assets
+                    .iter()
+                    .any(|a| a.path == FragmentSlot::Skill.path(*f))
+            })
+            .collect();
+        assert!(!unregistered.is_empty(), "some family ships no fragment");
+        for family in unregistered {
+            let rendered = coordination_for_cli(family.as_str(), &HashMap::new());
+            assert!(
+                rendered.contains(skill_fragment(CliFamily::Generic)),
+                "{family}"
+            );
+        }
+    }
+
+    /// Spec skill-agent "The CLI fragment is selected from the agent's
+    /// resolved CLI family" / Scenario "A render with no agent uses generic" —
+    /// the repository-root half (the MCP half lives with `get_skill`).
+    #[test]
+    fn a_root_render_uses_the_generic_fragment() {
+        let empty = tempfile::tempdir().unwrap();
+        let resolved = ResolvedPackage {
+            package: bundled_package("coordination").unwrap(),
+            template: resolve_from("coordination", &user_roots(empty.path())).unwrap(),
+        };
+        // The root ignores the agent family it is handed.
+        let inputs = RenderInputs {
+            root: true,
+            family: CliFamily::Claude,
+            ..test_render_inputs()
+        };
+        let body = render_package_body(&resolved, &inputs);
+        assert!(body.contains(skill_fragment(CliFamily::Generic)));
+        assert!(!body.contains(skill_fragment(CliFamily::Claude)));
+        let skill_md = &render_package(&resolved, &inputs)[0].content;
+        assert!(skill_md.contains(skill_fragment(CliFamily::Generic)));
     }
 
     /// Spec boot-block "Helper function signature" / Scenario "Function
