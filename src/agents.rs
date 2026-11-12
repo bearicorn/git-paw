@@ -2138,7 +2138,10 @@ mod tests {
 
     #[test]
     fn embedded_coordination_does_not_contain_cherry_pick() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         assert!(!content.contains("git cherry-pick"));
         assert!(!content.contains("Cherry-pick peer commits"));
         assert!(content.contains("agent.blocked"));
@@ -2146,13 +2149,19 @@ mod tests {
 
     #[test]
     fn embedded_coordination_retains_supervisor_side_integration_language() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         assert!(content.contains("supervisor cherry-picks and merges"));
     }
 
     #[test]
     fn embedded_coordination_documents_automatic_status() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         let lower = content.to_lowercase();
         assert!(lower.contains("automatic"));
         assert!(lower.contains("post-commit"));
@@ -2160,14 +2169,20 @@ mod tests {
 
     #[test]
     fn embedded_coordination_does_not_require_manual_status_publish() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         assert!(!content.contains("MUST publish `agent.status`"));
         assert!(!content.contains("You MUST publish `agent.status`"));
     }
 
     #[test]
     fn embedded_coordination_still_contains_optin_operations() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         assert!(content.contains("agent.blocked"));
         assert!(content.contains("agent.artifact"));
         assert!(content.contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll"));
@@ -2175,7 +2190,10 @@ mod tests {
 
     #[test]
     fn embedded_coordination_requires_no_push() {
-        let content = include_str!("../assets/agent-skills/coordination.md");
+        let content = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .skill_md
+            .content;
         assert!(content.contains("MUST NOT push"));
     }
 

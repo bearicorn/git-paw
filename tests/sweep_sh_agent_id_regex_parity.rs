@@ -14,8 +14,10 @@
 //! on pattern text — the two could legitimately be spelled differently, but
 //! they may never disagree about an id.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use git_paw::broker::messages::slugify_branch;
@@ -31,8 +33,7 @@ mod slug_corpus;
 /// anything — a parity test that cannot find its subject is not passing, it is
 /// absent.
 fn sweep_sh_pattern() -> String {
-    let sweep = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh");
-    let text = std::fs::read_to_string(&sweep).expect("read bundled sweep.sh");
+    let text = packages::script("sweep.sh");
     let line = text
         .lines()
         .find(|l| l.trim_start().starts_with("broker_rule = re.compile("))
@@ -41,7 +42,7 @@ fn sweep_sh_pattern() -> String {
                 "no `broker_rule = re.compile(...)` line in {} — if the phantom filter's \
                  validator moved or was renamed, update this test to find it (or delete it, \
                  if the shell copy is gone)",
-                sweep.display()
+                packages::script_source("sweep.sh")
             )
         });
     let start = line.find("r\"").expect("pattern opens with r\"") + 2;

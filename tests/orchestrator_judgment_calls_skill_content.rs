@@ -9,8 +9,6 @@
 //! own guard — otherwise a future edit can silently drop a responsibility and
 //! the smart model is handed work with no doctrine for deciding it.
 
-use std::fs;
-
 /// Tokens that would bake a specific consumer's stack into an exported asset,
 /// violating the export-agnosticism design principle.
 ///
@@ -38,7 +36,8 @@ const STACK_SPECIFIC_TOKENS: &[&str] = &[
 ];
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

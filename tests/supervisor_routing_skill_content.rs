@@ -16,10 +16,9 @@
 //! and SHALL state the roster is re-read after `git paw add` /
 //! `git paw remove`.
 
-use std::fs;
-
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 
@@ -302,7 +301,8 @@ fn pane_resolution_re_resolves_after_add_or_remove() {
 // carry none of the supervisor-only routing patterns.
 #[test]
 fn coordination_skill_has_no_routing_patterns() {
-    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+    let coordination = git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path");
     assert!(
         !coordination.contains("/tell"),

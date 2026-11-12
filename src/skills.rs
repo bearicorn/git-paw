@@ -42,7 +42,7 @@ pub struct BundledFile {
     /// Path relative to the package root (e.g. `"scripts/broker.sh"`).
     pub path: &'static str,
     /// Repository-relative path of the source file the content is embedded
-    /// from (e.g. `"assets/scripts/broker.sh"`).
+    /// from (e.g. `"assets/agent-skills/coordination/scripts/broker.sh"`).
     pub source: &'static str,
     /// The embedded file content.
     pub content: &'static str,
@@ -117,8 +117,8 @@ pub const PAW_COMMON_SCRIPT: &str = "_paw_common.sh";
 /// package's scripts.
 const PAW_COMMON: BundledFile = BundledFile {
     path: "scripts/_paw_common.sh",
-    source: "assets/scripts/_paw_common.sh",
-    content: include_str!("../assets/scripts/_paw_common.sh"),
+    source: "assets/agent-skills/_shared/scripts/_paw_common.sh",
+    content: include_str!("../assets/agent-skills/_shared/scripts/_paw_common.sh"),
 };
 
 /// The registered bundled packages, in registry order.
@@ -132,15 +132,15 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
         name: "orchestrator",
         skill_md: BundledFile {
             path: "SKILL.md",
-            source: "assets/agent-skills/orchestrator.md",
-            content: include_str!("../assets/agent-skills/orchestrator.md"),
+            source: "assets/agent-skills/orchestrator/SKILL.md",
+            content: include_str!("../assets/agent-skills/orchestrator/SKILL.md"),
         },
         scripts: &[
             PAW_COMMON,
             BundledFile {
                 path: "scripts/sweep.sh",
-                source: "assets/scripts/sweep.sh",
-                content: include_str!("../assets/scripts/sweep.sh"),
+                source: "assets/agent-skills/orchestrator/scripts/sweep.sh",
+                content: include_str!("../assets/agent-skills/orchestrator/scripts/sweep.sh"),
             },
         ],
         references: &[],
@@ -151,28 +151,30 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
         name: "coordination",
         skill_md: BundledFile {
             path: "SKILL.md",
-            source: "assets/agent-skills/coordination.md",
-            content: include_str!("../assets/agent-skills/coordination.md"),
+            source: "assets/agent-skills/coordination/SKILL.md",
+            content: include_str!("../assets/agent-skills/coordination/SKILL.md"),
         },
         scripts: &[
             PAW_COMMON,
             BundledFile {
                 path: "scripts/broker.sh",
-                source: "assets/scripts/broker.sh",
-                content: include_str!("../assets/scripts/broker.sh"),
+                source: "assets/agent-skills/coordination/scripts/broker.sh",
+                content: include_str!("../assets/agent-skills/coordination/scripts/broker.sh"),
             },
         ],
         references: &[],
         assets: &[
             BundledFile {
                 path: "assets/boot-block.md",
-                source: "assets/boot-block-template.md",
-                content: include_str!("../assets/boot-block-template.md"),
+                source: "assets/agent-skills/coordination/assets/boot-block.md",
+                content: include_str!("../assets/agent-skills/coordination/assets/boot-block.md"),
             },
             BundledFile {
                 path: "assets/boot-block-mcp.md",
-                source: "assets/boot-block-mcp-template.md",
-                content: include_str!("../assets/boot-block-mcp-template.md"),
+                source: "assets/agent-skills/coordination/assets/boot-block-mcp.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/boot-block-mcp.md"
+                ),
             },
         ],
         gate: ProvisionGate::BrokerEnabled,
@@ -181,15 +183,15 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
         name: "docs-fetch",
         skill_md: BundledFile {
             path: "SKILL.md",
-            source: "assets/agent-skills/docs-fetch.md",
-            content: include_str!("../assets/agent-skills/docs-fetch.md"),
+            source: "assets/agent-skills/docs-fetch/SKILL.md",
+            content: include_str!("../assets/agent-skills/docs-fetch/SKILL.md"),
         },
         scripts: &[
             PAW_COMMON,
             BundledFile {
                 path: "scripts/docs-fetch.sh",
-                source: "assets/scripts/docs-fetch.sh",
-                content: include_str!("../assets/scripts/docs-fetch.sh"),
+                source: "assets/agent-skills/docs-fetch/scripts/docs-fetch.sh",
+                content: include_str!("../assets/agent-skills/docs-fetch/scripts/docs-fetch.sh"),
             },
         ],
         references: &[],
@@ -202,8 +204,8 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
         name: "cli-setup",
         skill_md: BundledFile {
             path: "SKILL.md",
-            source: "assets/agent-skills/cli-setup.md",
-            content: include_str!("../assets/agent-skills/cli-setup.md"),
+            source: "assets/agent-skills/cli-setup/SKILL.md",
+            content: include_str!("../assets/agent-skills/cli-setup/SKILL.md"),
         },
         scripts: &[],
         references: &[],

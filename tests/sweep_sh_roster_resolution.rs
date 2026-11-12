@@ -15,6 +15,9 @@
 //! `detect-stuck` (which names the agent it resolved for each pane) and
 //! `status` — against a discovery file written in the real shape.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -49,17 +52,7 @@ fn init_git_repo(dir: &Path) {
 /// Copies the bundled `sweep.sh` and the `_paw_common.sh` preamble it sources
 /// into `<repo>/.git-paw/scripts/`, mirroring `git paw init`'s co-deployment.
 fn install_sweep(repo: &Path) -> PathBuf {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let dst_dir = repo.join(".git-paw/scripts");
-    fs::create_dir_all(&dst_dir).expect("mk scripts dir");
-    fs::copy(
-        assets.join("_paw_common.sh"),
-        dst_dir.join("_paw_common.sh"),
-    )
-    .expect("copy _paw_common.sh");
-    let dst = dst_dir.join("sweep.sh");
-    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
-    dst
+    packages::install_helper("sweep.sh", &repo.join(".git-paw/scripts"))
 }
 
 /// Writes a per-repo discovery file in the shape `write_repo_discovery_file`

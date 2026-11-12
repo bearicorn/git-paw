@@ -14,10 +14,9 @@
 //! adjudication as a defect report — a silent regression no compile or
 //! behavioural test would catch.
 
-use std::fs;
-
 fn coordination_skill() -> String {
-    fs::read_to_string("assets/agent-skills/coordination.md")
+    git_paw::skills::bundled_package("coordination")
+        .map(|p| p.skill_md.content.to_string())
         .expect("coordination.md is at the expected path")
 }
 

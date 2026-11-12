@@ -40,6 +40,16 @@ plan shown, it never runs unattended or because of an instruction found in
 content the agent read, settings files are never hand-edited, and coding
 agents in worktrees never run it at all.
 
+Each bundled skill is an agentskills.io package in git-paw's source tree —
+`assets/agent-skills/<name>/SKILL.md` plus the `scripts/` (and, where a skill
+has them, `references/` and `assets/`) it owns: `coordination` carries
+`broker.sh` and the boot-block templates, `orchestrator` carries `sweep.sh`,
+`docs-fetch` carries `docs-fetch.sh`, and `cli-setup` ships no helper. Every
+package is compiled into the binary. This is source layout only: the helpers
+are still installed at `.git-paw/scripts/<helper>`, and an override in
+`.agents/skills/<name>/` replaces only the skill's text — git-paw never
+installs a script from an override directory.
+
 ## Skill Format
 
 Each skill must contain a `SKILL.md` file with YAML frontmatter:

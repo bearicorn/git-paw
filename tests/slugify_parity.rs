@@ -12,6 +12,9 @@
 //! implementations of one rule are exactly how the derivation drifted from the
 //! `/publish` validator in the first place (PP-26).
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -43,7 +46,9 @@ done
 #[test]
 fn shell_slugify_matches_slugify_branch_for_every_corpus_entry() {
     let corpus = slug_corpus::branch_corpus();
-    let common_sh = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/scripts/_paw_common.sh");
+    let install = tempfile::TempDir::new().expect("tempdir");
+    let common_sh =
+        packages::install_package("orchestrator", install.path()).join("_paw_common.sh");
 
     let mut child = script_cmd::bash()
         .arg("-c")

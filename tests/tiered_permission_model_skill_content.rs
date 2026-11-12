@@ -14,10 +14,9 @@
 //! *Prompt-free operation is attributed to the agent CLI's permission
 //! system*.
 
-use std::fs;
-
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

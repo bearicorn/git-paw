@@ -787,15 +787,12 @@ fn pane_listings_name_the_agent_window_not_the_bare_session() {
         }
     }
 
-    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    for entry in std::fs::read_dir(&scripts)
-        .expect("read assets/scripts")
-        .flatten()
+    for script in git_paw::skills::bundled_packages()
+        .iter()
+        .flat_map(|p| p.scripts)
     {
-        let path = entry.path();
-        let Ok(body) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let path = script.source;
+        let body = script.content;
         for (n, line) in body.lines().enumerate() {
             let code = line.trim_start();
             if code.starts_with('#') {
@@ -807,7 +804,7 @@ fn pane_listings_name_the_agent_window_not_the_bare_session() {
                     .next()
                     .unwrap_or("");
                 if !target.contains(":0") {
-                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, code));
+                    offenders.push(format!("{}:{}: {}", path, n + 1, code));
                 }
             }
         }

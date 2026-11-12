@@ -10,6 +10,9 @@
 //! dedicated server, and sweep.sh's bare `tmux display-message` follows
 //! `$TMUX`, so it never touches the default socket.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -45,17 +48,7 @@ fn init_git_repo(dir: &Path) {
 /// preamble it sources — into `<repo>/.git-paw/scripts/`, mirroring the
 /// co-deployment `git paw init` guarantees.
 fn install_sweep(repo: &Path) -> std::path::PathBuf {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let dst_dir = repo.join(".git-paw/scripts");
-    fs::create_dir_all(&dst_dir).expect("mk scripts dir");
-    fs::copy(
-        assets.join("_paw_common.sh"),
-        dst_dir.join("_paw_common.sh"),
-    )
-    .expect("copy _paw_common.sh");
-    let dst = dst_dir.join("sweep.sh");
-    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
-    dst
+    packages::install_helper("sweep.sh", &repo.join(".git-paw/scripts"))
 }
 
 /// Writes a per-repo discovery JSON, optionally carrying an unknown extra

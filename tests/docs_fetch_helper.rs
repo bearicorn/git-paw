@@ -5,6 +5,9 @@
 //! section-by-anchor retrieval, default vs overridden docs base URL, and
 //! non-zero exit with a diagnostic on a missing page.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -15,9 +18,9 @@ use std::process::{Command, Output};
 use serial_test::serial;
 use tempfile::TempDir;
 
-/// Absolute path to the bundled helper under test.
-fn helper_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/docs-fetch.sh")
+/// Installs the bundled helper under test into `install`; returns its path.
+fn helper_path(install: &Path) -> PathBuf {
+    packages::install_helper("docs-fetch.sh", install)
 }
 
 /// Creates a git repo with fixtures and (optionally) a `docs_base_url` pointing
@@ -82,8 +85,9 @@ fn setup_repo(with_base_url: bool) -> TempDir {
 }
 
 fn run(repo: &Path, args: &[&str]) -> Output {
+    let install = TempDir::new().expect("tempdir");
     script_cmd::bash()
-        .arg(helper_path())
+        .arg(helper_path(install.path()))
         .args(args)
         .current_dir(repo)
         .output()

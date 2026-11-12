@@ -3,7 +3,7 @@
 //! What survives the classifier's retirement from the
 //! `broker-mediated-approvals` work. No git-paw process sends approval
 //! keystrokes any more, so the in-binary send gate is gone; the discipline it
-//! enforced lives on in `assets/scripts/sweep.sh`'s `approve`, the only
+//! enforced lives on in the orchestrator package's `sweep.sh` `approve`, the only
 //! approval path left, which re-confirms the prompt on a fresh capture and
 //! refuses pane 0 in shell.
 //!

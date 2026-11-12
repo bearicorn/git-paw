@@ -11,6 +11,9 @@
 //! Driven against a REAL broker, so "published nothing" is asserted against
 //! what the broker actually holds rather than a stub's idea of it.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -44,13 +47,7 @@ fn init_git_repo(dir: &Path) {
 /// Copies the bundled helpers into `<root>/.git-paw/scripts/`, mirroring
 /// `git paw init`'s co-deployment.
 fn install_helpers(root: &Path) -> PathBuf {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
-    let dst = root.join(".git-paw/scripts");
-    fs::create_dir_all(&dst).expect("mk scripts dir");
-    for name in ["_paw_common.sh", "broker.sh"] {
-        fs::copy(assets.join(name), dst.join(name)).unwrap_or_else(|e| panic!("copy {name}: {e}"));
-    }
-    dst.join("broker.sh")
+    packages::install_helper("broker.sh", &root.join(".git-paw/scripts"))
 }
 
 fn write_broker_config(root: &Path, port: u16) {

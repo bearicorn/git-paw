@@ -6,10 +6,9 @@
 //! agent through `sweep.sh tell`, never raw `tmux send-keys`, and must say
 //! what to do with each result.
 
-use std::fs;
-
 fn skill() -> String {
-    fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

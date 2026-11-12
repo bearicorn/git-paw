@@ -8,6 +8,9 @@
 //! terminal port's tmux adapter encodes a surface as the `pane_index` /
 //! `dashboard_pane` integers they carry.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
@@ -70,10 +73,7 @@ fn a_discovery_file_round_trips_byte_identically() {
 /// Runs `sweep.sh`'s `resolve_agent_for_path` — extracted verbatim from the
 /// bundled script — against `session_file` for `path`.
 fn sweep_resolve(session_file: &Path, path: &Path) -> String {
-    let script = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh"),
-    )
-    .unwrap();
+    let script = packages::script("sweep.sh");
     let start = script
         .find("resolve_agent_for_path() {")
         .expect("sweep.sh defines resolve_agent_for_path");
@@ -143,10 +143,8 @@ fn sweep_sh_and_the_core_rule_name_the_same_agent_for_a_surface_owner() {
 /// `sweep.sh` still parses after the documentation comment.
 #[test]
 fn sweep_sh_is_syntactically_valid() {
-    let status = script_cmd::bash()
-        .args(["-n"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh"))
-        .status()
-        .unwrap();
+    let install = tempfile::TempDir::new().unwrap();
+    let sweep = packages::install_helper("sweep.sh", install.path());
+    let status = script_cmd::bash().args(["-n"]).arg(sweep).status().unwrap();
     assert!(status.success());
 }

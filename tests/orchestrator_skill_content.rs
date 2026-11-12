@@ -14,7 +14,8 @@ use git_paw::specs::SpecBackendKind;
 
 /// The raw orchestrator template, frontmatter included.
 fn template() -> String {
-    std::fs::read_to_string("assets/agent-skills/orchestrator.md")
+    git_paw::skills::bundled_package("orchestrator")
+        .map(|p| p.skill_md.content.to_string())
         .expect("orchestrator.md is at the expected path")
 }
 

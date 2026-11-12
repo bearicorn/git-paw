@@ -9,11 +9,13 @@
 //! A request is accepted (202) only when its header equals the broker's
 //! credential, so an accepted publish proves the header carried it.
 
+#[path = "helpers/packages.rs"]
+mod packages;
+
 #[path = "helpers/script_cmd.rs"]
 mod script_cmd;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::SystemTime;
@@ -24,10 +26,6 @@ use git_paw::session::{Session, SessionMode, SessionStatus, save_session_in};
 use tempfile::TempDir;
 
 const CREDENTIAL: &str = "5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn shell_tools_available() -> bool {
     ["bash", "curl", "git", "python3"]
@@ -81,12 +79,8 @@ fn fixture_repo(dir: &Path, port: u16) -> PathBuf {
         format!("[broker]\nenabled = true\nport = {port}\nbind = \"127.0.0.1\"\n"),
     )
     .expect("write config.toml");
-    for script in ["_paw_common.sh", "broker.sh", "sweep.sh"] {
-        let dst = paw.join("scripts").join(script);
-        fs::copy(repo_root().join("assets/scripts").join(script), &dst)
-            .unwrap_or_else(|e| panic!("copy {script}: {e}"));
-        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    packages::install_package("coordination", &paw.join("scripts"));
+    packages::install_package("orchestrator", &paw.join("scripts"));
     fs::write(dir.join("seed.txt"), "seed\n").expect("write seed");
     run(&["add", "seed.txt"]);
     run(&["commit", "-q", "-m", "seed"]);
