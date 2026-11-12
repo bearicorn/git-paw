@@ -7550,6 +7550,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     #[test]
     fn embedded_resolution_returns_each_registered_skill_md() {
         let empty = tempfile::tempdir().unwrap();
+        let mut checked = 0;
         for package in bundled_packages() {
             let tmpl = resolve_with_config_dir(package.name, Some(empty.path())).unwrap();
             if tmpl.source != Source::Embedded {
@@ -7558,7 +7559,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             }
             let (_, body) = parse_standardized_metadata(package.skill_md.content).unwrap();
             assert_eq!(tmpl.content, body, "{}", package.name);
+            checked += 1;
         }
+        assert!(
+            checked > 0,
+            "no package resolved from the embedded registry"
+        );
     }
 
     #[test]

@@ -919,12 +919,12 @@ fn audit_package_files(package: &str, files: &[BundledFile]) {
 
 /// Every registered prose file, as `(package, package-relative path)` — the
 /// audit's input set.
-fn registered_package_text_files() -> Vec<(&'static str, &'static str)> {
+fn registered_package_text_files() -> Vec<(&'static str, BundledFile)> {
     let mut set = Vec::new();
     for package in bundled_packages() {
         let files: Vec<BundledFile> = package.files().copied().collect();
         for file in prose_files(&files) {
-            set.push((package.name, file.path));
+            set.push((package.name, *file));
         }
     }
     set
@@ -932,9 +932,10 @@ fn registered_package_text_files() -> Vec<(&'static str, &'static str)> {
 
 #[test]
 fn audit_covers_every_registered_package_text_file() {
-    for package in bundled_packages() {
-        let files: Vec<BundledFile> = package.files().copied().collect();
-        audit_package_files(package.name, &files);
+    let audited = registered_package_text_files();
+    assert!(!audited.is_empty(), "the audit's input set is empty");
+    for (package, file) in &audited {
+        audit_package_files(package, std::slice::from_ref(file));
     }
 }
 
@@ -948,7 +949,9 @@ fn every_registered_prose_file_is_in_the_audited_set() {
         expected.extend(package.assets.iter().map(|f| f.path));
         for path in expected {
             assert!(
-                audited.contains(&(package.name, path)),
+                audited
+                    .iter()
+                    .any(|(name, file)| *name == package.name && file.path == path),
                 "{}/{path} is registered but not audited",
                 package.name
             );

@@ -3,7 +3,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! pinning the "Declaring regions" subsection into the bundled
-//! `assets/agent-skills/coordination.md` so a future edit can't silently drop
+//! `assets/agent-skills/coordination/SKILL.md` so a future edit can't silently drop
 //! the region-declaration guidance.
 
 fn coordination_skill() -> String {

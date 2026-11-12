@@ -3,7 +3,7 @@
 //!
 //! These are WHEN-the-skill-is-rendered / THEN-the-prose-SHALL-state
 //! requirements pinning the worktree-environment orientation section into
-//! `assets/agent-skills/coordination.md` so a future edit can't silently
+//! `assets/agent-skills/coordination/SKILL.md` so a future edit can't silently
 //! regress it: `Operation not permitted` framed as policy (not a fault) with
 //! don't-probe guidance, gitignored install artifacts with an
 //! install-if-genuinely-missing directive, and the setuid-`ps`-under-sandbox

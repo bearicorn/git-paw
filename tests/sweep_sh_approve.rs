@@ -2,7 +2,7 @@
 //! broker-mediated-approvals re-confirm gate (capability
 //! `stuck-prompt-detection`).
 //!
-//! Each test installs the bundled `assets/scripts/sweep.sh`, stands up a real
+//! Each test installs the bundled `assets/agent-skills/orchestrator/scripts/sweep.sh`, stands up a real
 //! detached tmux session on a test-owned socket, lays a synthetic prompt into
 //! a coding-agent pane, and drives `sweep.sh approve` — asserting it sends
 //! keys only on a live prompt, sends nothing when the prompt cleared, and

@@ -1,5 +1,5 @@
 //! Skill-content assertions for the conflict-acknowledgement guidance in
-//! the bundled coordination skill (`assets/agent-skills/coordination.md`).
+//! the bundled coordination skill (`assets/agent-skills/coordination/SKILL.md`).
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! requirements, following the pattern in

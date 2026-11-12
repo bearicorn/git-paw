@@ -11,8 +11,8 @@ use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use git_paw::skills::{
-    BundledPackage, PAW_COMMON_SCRIPT, ProvisionGate, Source, bundled_package, bundled_packages,
-    resolve, validate_skill_dir,
+    BundledPackage, ORCHESTRATOR_SKILL, PAW_COMMON_SCRIPT, ProvisionGate, Source, bundled_package,
+    bundled_packages, render_standardized, resolve, to_skill_md, validate_skill_dir,
 };
 use serial_test::serial;
 use tempfile::TempDir;
@@ -26,9 +26,12 @@ fn package_root() -> PathBuf {
 /// package itself.
 const SHARED_DIR: &str = "_shared";
 
-/// Every file under `dir`, as paths relative to `base` with `/` separators.
+/// Every non-hidden file under `dir`, as paths relative to `base` with `/` separators.
 fn files_under(dir: &Path, base: &Path, out: &mut BTreeSet<String>) {
     for entry in fs::read_dir(dir).expect("read dir").flatten() {
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             files_under(&path, base, out);
@@ -382,9 +385,8 @@ fn a_content_requirement_on_a_pre_package_path_is_checked_against_the_package_fi
     assert!(sweep.content.contains("cmd_approve()"));
 }
 
-// skill-packages / Scenario: Init writes the same files — the helper names,
-// content and modes, and the skill export paths, that `git paw init` wrote
-// before packaging.
+// skill-packages / Scenario: Init writes the same files
+// skill-packages / Scenario: Rendering is byte-identical across the restructure
 #[test]
 #[serial]
 fn init_writes_the_same_files() {
@@ -413,7 +415,7 @@ fn init_writes_the_same_files() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    // The pre-package install set, unchanged.
+    // Init must keep writing exactly these files.
     assert_eq!(
         names,
         ["_paw_common.sh", "broker.sh", "docs-fetch.sh", "sweep.sh"]
@@ -429,10 +431,24 @@ fn init_writes_the_same_files() {
         }
     }
 
-    for rel in [
-        ".git-paw/skills/orchestrator/SKILL.md",
-        ".git-paw/skills/cli-setup/SKILL.md",
-    ] {
-        assert!(repo.path().join(rel).is_file(), "{rel} exported");
+    // Each exported SKILL.md is exactly the render of its embedded package,
+    // with the config `init` just wrote.
+    let config = git_paw::config::load_config_from(&home.path().join("absent.toml"), repo.path())
+        .expect("load config");
+    let backends: Vec<_> = git_paw::specs::resolved_spec_kind(&config)
+        .into_iter()
+        .collect();
+    let supervisor = config.supervisor.clone().unwrap_or_default();
+    for name in [ORCHESTRATOR_SKILL, "cli-setup"] {
+        let template = resolve(name).expect("resolve");
+        assert_eq!(template.source, Source::Embedded, "{name} is not shadowed");
+        let expected = if name == ORCHESTRATOR_SKILL {
+            render_standardized(&template, &supervisor.gate_commands(), &backends)
+        } else {
+            to_skill_md(&template)
+        };
+        let rel = format!(".git-paw/skills/{name}/SKILL.md");
+        let exported = fs::read_to_string(repo.path().join(&rel)).expect("exported skill");
+        assert_eq!(exported, expected, "{rel}");
     }
 }

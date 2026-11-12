@@ -1154,8 +1154,9 @@ fn announce_orchestrator_paths(out: &mut dyn Output) {
         crate::agents::SIDECAR_REL_PATH
     ));
     out.line(&format!(
-        "Orchestrator skill:   {}/SKILL.md",
-        crate::init::exported_skill_dirs()[0]
+        "Orchestrator skill:   {}/{}/SKILL.md",
+        crate::init::SKILLS_DIR,
+        crate::skills::ORCHESTRATOR_SKILL
     ));
 }
 

@@ -4,7 +4,7 @@
 //! pinning the `skill-agent` capability's file-reading and scratch-file
 //! discipline into the bundled coordination skill
 //! (`### Prefer native read tools over shell pipelines` in
-//! `assets/agent-skills/coordination.md`), following the pattern established
+//! `assets/agent-skills/coordination/SKILL.md`), following the pattern established
 //! in `tests/commit_discipline_skill_content.rs`.
 
 fn coordination_skill() -> String {

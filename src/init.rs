@@ -385,7 +385,7 @@ pub fn export_skills(
 
 /// The directory the exported skills live under, relative to the repository
 /// root.
-const SKILLS_DIR: &str = ".git-paw/skills";
+pub const SKILLS_DIR: &str = ".git-paw/skills";
 
 /// Fails when `path` exists as a symlink.
 fn refuse_symlink(path: &Path) -> Result<(), PawError> {

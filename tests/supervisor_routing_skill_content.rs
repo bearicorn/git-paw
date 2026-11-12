@@ -3,7 +3,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! that pin the `/agents` + `/tell` "Routing through the supervisor" section
-//! into the bundled `assets/agent-skills/orchestrator.md` so a future edit can't
+//! into the bundled `assets/agent-skills/orchestrator/SKILL.md` so a future edit can't
 //! silently drop the routing conventions (tasks 4, 5, 6, 7.1, 8). The
 //! executable behaviour is unit-tested in `git_paw::coordination`; these
 //! scenarios cover the prose-only requirements that have no other asserting

@@ -2,7 +2,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! that pin the tip-resolution and merge-base verification guidance into the
-//! bundled `assets/agent-skills/orchestrator.md`, so a future edit cannot
+//! bundled `assets/agent-skills/orchestrator/SKILL.md`, so a future edit cannot
 //! silently re-introduce the stale-`$SHA` snapshot bug that produced the
 //! v0.9.0 doc-audit false negative.
 //!

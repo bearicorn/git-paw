@@ -1,6 +1,6 @@
 //! Skill-content assertions for the `orchestrator-skill-export` conversion of
 //! the bundled supervisor skill into the orchestrator skill
-//! (`assets/agent-skills/orchestrator.md`).
+//! (`assets/agent-skills/orchestrator/SKILL.md`).
 //!
 //! Each test pins a WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! scenario from the change's `skill-agent`, `supervisor-skill-discipline`

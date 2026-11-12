@@ -1,4 +1,4 @@
-//! End-to-end tests for the bundled `assets/scripts/docs-fetch.sh` helper,
+//! End-to-end tests for the bundled `assets/agent-skills/docs-fetch/scripts/docs-fetch.sh` helper,
 //! exercised against `file://` fixtures so no network is required.
 //!
 //! Covers docs-fetch-skill scenarios: discovery via `llms.txt`, whole-page and

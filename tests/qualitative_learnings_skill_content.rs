@@ -3,7 +3,7 @@
 //! These scenarios are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! requirements: they pin the heuristic gates, the per-category primary
 //! identifiers, the documented body shapes, and the no-speculative-publishing
-//! discipline into the bundled `assets/agent-skills/orchestrator.md` so a future
+//! discipline into the bundled `assets/agent-skills/orchestrator/SKILL.md` so a future
 //! edit can't silently drop them.
 
 fn supervisor_skill() -> String {

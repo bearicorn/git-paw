@@ -1,7 +1,7 @@
 //! The bundled shell helper derives the same `agent_id` as the Rust side.
 //!
 //! `agent-id-slug-safety` (`broker-protocol`, "Branch slug function"): the
-//! shell `slugify` in `assets/scripts/_paw_common.sh` — the fallback
+//! shell `slugify` in `assets/agent-skills/_shared/scripts/_paw_common.sh` — the fallback
 //! `broker.sh` uses when no `--agent` is given — SHALL return the same string
 //! as [`git_paw::broker::messages::slugify_branch`] for every input.
 //!
