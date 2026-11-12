@@ -49,7 +49,8 @@ agents in worktrees never run it at all.
 Each bundled skill is an agentskills.io package in git-paw's source tree —
 `assets/agent-skills/<name>/SKILL.md` plus the `scripts/` (and, where a skill
 has them, `references/` and `assets/`) it owns: `coordination` carries
-`broker.sh` and the boot-block templates, `orchestrator` carries `sweep.sh`,
+`broker.sh` and the boot-block templates, `orchestrator` carries `sweep.sh`
+and its three audit-gate references,
 `docs-fetch` carries `docs-fetch.sh`, and `cli-setup` ships no helper. Every
 package is compiled into the binary and installed as a package — see
 [Installed packages](#installed-packages). An override in
@@ -65,7 +66,7 @@ git-paw installs each bundled package as the directory
 |------|---------|
 | `SKILL.md` | the skill, rendered for that location, with `name` / `description` frontmatter |
 | `scripts/` | the package's helpers and the shared `_paw_common.sh` preamble, executable (`0o755`) |
-| `references/` | reference documents, rendered like `SKILL.md` (no bundled package ships one today) |
+| `references/` | reference documents, rendered with the same values as `SKILL.md` — `orchestrator` ships `references/gates/spec-audit.md`, `doc-audit.md` and `security-audit.md`, the audit gates its Workflow points at |
 
 A package's `assets/` (the boot-block templates and the
 [per-CLI fragments](#per-cli-fragments), say) are render-time inputs and are
