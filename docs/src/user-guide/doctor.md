@@ -137,11 +137,16 @@ the reason doctor fails**: they never report ✗.
 - ⚠ when a **granted helper script** differs from the copy this binary
   bundles, naming its path. This one matters most: the allowlist lets that
   script run without a prompt, so drift in it is drift in what runs
-  unprompted. The paths checked are the ones the applied allow entries name —
-  the package path `.git-paw/skills/<package>/scripts/<helper>`, or
-  `.git-paw/scripts/<helper>` for entries applied before the package move —
-  in the main checkout and in every session worktree, because a granted path
-  is relative and resolves against whichever directory the session runs in.
+  unprompted. Every allow value in the target settings file is followed —
+  git-paw's own entries, ones you wrote, and durable grants the CLI saved
+  when someone answered "don't ask again" — and, for each one that names a
+  bundled helper at its package path `.git-paw/skills/<package>/scripts/` or
+  at `.git-paw/scripts/` (however it is spelled: with `./`, behind `bash` or
+  `sh`, or as an absolute path), **every** bundled script in that helper's
+  directory is checked, including the shared `_paw_common.sh` preamble the
+  helper sources. Scripts are checked in the main checkout and in every
+  session worktree, because a granted path is relative and resolves against
+  whichever directory the session runs in.
 
 What counts as **applied** is judged against the CLI's target settings file,
 not against git-paw's record: a planned entry is applied when that file holds

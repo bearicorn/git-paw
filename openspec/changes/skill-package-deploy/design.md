@@ -79,8 +79,9 @@ State after v0.19.0 that this change builds on (verified 2026-11-11):
 ### D1 — Install layout: `SKILL.md` + `scripts/` + `references/`, never `assets/`
 
 `.git-paw/skills/<name>/SKILL.md` is rendered with the same inputs the sidecar uses for that
-location (worktree: the agent's branch and session broker URL; repo root: current branch,
-configured broker URL, `[supervisor]` gate commands — the inputs MCP `get_skill` and v0.18.0's
+location (worktree: the agent's branch and session broker URL; repo root: the orchestrator's
+reserved agent id `supervisor` — never the current branch, so a branch switch leaves the root skills
+current — configured broker URL, `[supervisor]` gate commands — the inputs MCP `get_skill` and v0.18.0's
 orchestrator export already use). `scripts/` are written `0o755`. `references/` are rendered like
 `SKILL.md`. A package's `assets/` are render-time inputs (boot-block templates, per-CLI fragments)
 and are not installed. Every install writes each file that is missing or differs and leaves an

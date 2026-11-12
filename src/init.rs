@@ -237,7 +237,7 @@ pub fn refresh_root_scripts(
 /// the current branch, so a branch switch leaves the root skills current),
 /// the configured broker URL, the project name, the
 /// `[supervisor]` gate commands and the configured spec format. Pure apart
-/// from resolving overrides and the current branch: writes nothing, so
+/// from resolving overrides: writes nothing, so
 /// `git paw doctor` can compare the installed root files with it.
 ///
 /// # Errors

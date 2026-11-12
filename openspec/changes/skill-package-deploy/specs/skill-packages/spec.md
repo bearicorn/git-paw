@@ -84,6 +84,20 @@ When `git paw start` refreshes the root packages, it SHALL compare each rendered
 
 Test: `tests/e2e_start_root_packages.rs::a_gate_command_configured_after_init_reaches_the_root_skill`, `init::tests::the_root_refresh_renders_from_the_current_config`
 
+### Requirement: Root packages render as the orchestrator
+
+The system SHALL render the root packages' branch placeholder with the orchestrator's reserved agent id, never the current branch, so switching branches does not change the rendered root files.
+
+#### Scenario: Root packages render the orchestrator's id whatever the branch
+
+- **GIVEN** a repository whose main checkout is on branch `feat/one`
+- **WHEN** the root packages are rendered, and rendered again after switching to `feat/two`
+- **THEN** the root `coordination` `SKILL.md` SHALL render its branch placeholder as the orchestrator's reserved id `supervisor`
+- **AND** SHALL NOT contain `feat-one`
+- **AND** both renders SHALL be identical
+
+Test: `init::tests::root_packages_render_the_supervisor_id_whatever_the_branch`
+
 ### Requirement: Every launch path installs the worktree's selected packages
 
 Every launch path that creates or re-attaches an agent worktree — bare, spec-driven and supervisor-mode `git paw start`, and `git paw add` — SHALL install exactly the packages selected for that worktree into `<worktree>/.git-paw/skills/` before the agent's boot prompt is submitted.

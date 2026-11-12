@@ -889,13 +889,37 @@ pub fn helper_paths(roots: &[PathBuf], applied_allow: &[String]) -> Vec<PathBuf>
 
 /// The relative helper path a `Bash(<path> …)` allow value names, when the
 /// path is a bundled helper at its package path or its compatibility path.
+///
+/// The path is normalised the way a shell would still reach the same file: a
+/// leading `./`, a `bash` / `sh` interpreter prefix, and an absolute path (cut
+/// back to its last `.git-paw/skills/` or `.git-paw/scripts/` component) all
+/// name the helper too.
 fn granted_helper_path(value: &str) -> Option<String> {
     let spec = value.strip_prefix(&format!("{COMMAND_TOOL}("))?;
-    let path: String = spec
+    let spec = ["bash ", "sh "]
+        .iter()
+        .find_map(|interpreter| spec.strip_prefix(interpreter))
+        .unwrap_or(spec)
+        .trim_start();
+    let word: String = spec
         .chars()
         .take_while(|c| !matches!(c, ' ' | ':' | '*' | ')'))
         .collect();
-    is_helper_path(&path).then_some(path)
+    let mut path = word.as_str();
+    while let Some(rest) = path.strip_prefix("./") {
+        path = rest;
+    }
+    if path.starts_with('/') {
+        let cut = [
+            format!("/{}/", facts::PACKAGE_DIR),
+            format!("/{HELPER_DIR}/"),
+        ]
+        .iter()
+        .filter_map(|marker| path.rfind(marker.as_str()))
+        .max()?;
+        path = &path[cut + 1..];
+    }
+    is_helper_path(path).then(|| path.to_string())
 }
 
 /// Every bundled script installed beside the granted helper at `path`: the
@@ -1327,6 +1351,53 @@ mod tests {
             ]
         );
         assert_eq!(paths.len(), 2 * rel.len(), "every root is walked");
+    }
+
+    // A grant reaches the same helper however its path is spelled: `./`, an
+    // interpreter prefix or an absolute path are drift-checked like the bare
+    // relative path.
+    #[test]
+    fn granted_helper_path_normalises_the_spellings_a_grant_can_use() {
+        for (value, expected) in [
+            (
+                "Bash(.git-paw/scripts/broker.sh *)",
+                Some(".git-paw/scripts/broker.sh"),
+            ),
+            (
+                "Bash(./.git-paw/scripts/broker.sh *)",
+                Some(".git-paw/scripts/broker.sh"),
+            ),
+            (
+                "Bash(./.git-paw/skills/coordination/scripts/broker.sh status)",
+                Some(".git-paw/skills/coordination/scripts/broker.sh"),
+            ),
+            (
+                "Bash(bash .git-paw/scripts/sweep.sh *)",
+                Some(".git-paw/scripts/sweep.sh"),
+            ),
+            (
+                "Bash(sh ./.git-paw/skills/orchestrator/scripts/sweep.sh status *)",
+                Some(".git-paw/skills/orchestrator/scripts/sweep.sh"),
+            ),
+            (
+                "Bash(/home/u/repo/.git-paw/skills/coordination/scripts/broker.sh *)",
+                Some(".git-paw/skills/coordination/scripts/broker.sh"),
+            ),
+            (
+                "Bash(/home/u/repo/.git-paw/worktrees/x/.git-paw/scripts/sweep.sh *)",
+                Some(".git-paw/scripts/sweep.sh"),
+            ),
+            (
+                "Bash(.git-paw/scripts/broker.sh:*)",
+                Some(".git-paw/scripts/broker.sh"),
+            ),
+            ("Bash(/usr/bin/broker.sh *)", None),
+            ("Bash(make test *)", None),
+            ("Bash(.git-paw/skills/x/scripts/evil.sh *)", None),
+            ("Edit(.git-paw/scripts/broker.sh)", None),
+        ] {
+            assert_eq!(granted_helper_path(value).as_deref(), expected, "{value}");
+        }
     }
 
     // The shared preamble a granted helper sources is drift-checked too: a

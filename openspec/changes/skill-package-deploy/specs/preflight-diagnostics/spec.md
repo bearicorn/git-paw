@@ -152,7 +152,7 @@ Test: `cli_setup::doctor::tests::a_modified_granted_helper_warns_naming_its_path
 - **WHEN** `git paw doctor` runs
 - **THEN** the setup check SHALL be ⚠ naming that preamble's path
 
-Test: `cli_setup::doctor::tests::a_tampered_preamble_beside_a_granted_helper_is_checked`, `cli_setup::doctor::tests::helper_paths_follow_the_applied_allow_entries`
+Test: `cli_setup::doctor::tests::a_tampered_preamble_beside_a_granted_helper_is_checked`, `cli_setup::doctor::tests::helper_paths_follow_the_applied_allow_entries`, `cli_setup::doctor::tests::granted_helper_path_normalises_the_spellings_a_grant_can_use`, `tests/doctor_e2e.rs::a_modified_preamble_beside_a_granted_helper_is_reported_at_both_paths`, `tests/doctor_e2e.rs::an_unplanned_allow_value_over_a_tampered_helper_is_reported`
 
 #### Scenario: Entries applied before the package move are out of date
 

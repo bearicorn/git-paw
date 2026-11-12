@@ -1463,3 +1463,75 @@ fn entries_applied_before_the_package_move_are_out_of_date() {
     let after = std::fs::read_to_string(&settings).unwrap_or_default();
     assert!(!after.contains(".git-paw/scripts/"), "{after}");
 }
+
+/// Applies the allowlist, then rewrites the settings file's `permissions.allow`
+/// to `allow` (the record is left as setup wrote it).
+fn apply_then_set_allow(sandbox: &Sandbox, allow: &[&str]) {
+    sandbox
+        .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
+        .assert()
+        .success();
+    let settings = sandbox.repo.join(".claude/settings.local.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+    let list = value["permissions"]["allow"].as_array_mut().expect("allow");
+    list.extend(
+        allow
+            .iter()
+            .map(|v| serde_json::Value::String((*v).to_string())),
+    );
+    std::fs::write(&settings, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+/// preflight-diagnostics: *A modified preamble beside a granted helper is
+/// reported* — a tampered `_paw_common.sh` beside a granted helper, at the
+/// package path and at `.git-paw/scripts/`, is ⚠ naming that path.
+#[test]
+#[serial]
+fn a_modified_preamble_beside_a_granted_helper_is_reported_at_both_paths() {
+    for (rel, extra) in [
+        (".git-paw/skills/coordination/scripts/_paw_common.sh", None),
+        (
+            ".git-paw/scripts/_paw_common.sh",
+            Some("Bash(.git-paw/scripts/broker.sh *)"),
+        ),
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.init();
+        apply_then_set_allow(&sandbox, &extra.into_iter().collect::<Vec<_>>());
+        let preamble = sandbox.repo.join(rel);
+        std::fs::write(&preamble, "# tampered\n").expect("tamper preamble");
+
+        let (status, detail) = setup_status(&sandbox);
+        assert_eq!(status, "warn", "{rel}: {detail}");
+        assert!(
+            detail.contains(rel),
+            "the warning must name {rel}: {detail}"
+        );
+    }
+}
+
+/// preflight-diagnostics: the drift check follows every allow value in the
+/// target file — here one setup did not plan (a durable grant the CLI saved,
+/// spelled with `./`), over a tampered helper.
+#[test]
+#[serial]
+fn an_unplanned_allow_value_over_a_tampered_helper_is_reported() {
+    for grant in [
+        "Bash(.git-paw/scripts/broker.sh status)",
+        "Bash(./.git-paw/scripts/broker.sh status)",
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.init();
+        apply_then_set_allow(&sandbox, &[grant]);
+        let helper = sandbox.repo.join(".git-paw/scripts/broker.sh");
+        std::fs::write(&helper, "#!/bin/sh\necho tampered\n").expect("tamper helper");
+
+        let (status, detail) = setup_status(&sandbox);
+        assert_eq!(status, "warn", "{grant}: {detail}");
+        assert!(
+            detail.contains(".git-paw/scripts/broker.sh"),
+            "{grant}: the warning must name the helper: {detail}"
+        );
+    }
+}
