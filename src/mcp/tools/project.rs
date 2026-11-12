@@ -202,7 +202,17 @@ impl GitPawMcpServer {
                     let supervisor = cfg.supervisor.clone().unwrap_or_default();
                     skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
                 } else {
-                    skills::render(&template, &branch, &broker_url, &project, &gates, &backends)
+                    // No agent CLI is known here, so the per-CLI fragments
+                    // render their `generic` form.
+                    skills::render(
+                        &template,
+                        &branch,
+                        &broker_url,
+                        &project,
+                        &gates,
+                        &backends,
+                        crate::agent_cli::CliFamily::Generic,
+                    )
                 };
                 let source = match template.source {
                     Source::Embedded => "embedded",

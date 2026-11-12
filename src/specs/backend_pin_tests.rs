@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+use crate::agent_cli::CliFamily;
 use crate::config::{self, PawConfig};
 use crate::mcp::RepoContext;
 use crate::mcp::query::specs as mcp_specs;
@@ -115,6 +116,7 @@ fn snapshot(kind: SpecBackendKind) -> String {
         "git-paw",
         &crate::skills::GateCommands::default(),
         &[kind],
+        CliFamily::Generic,
     );
 
     let ctx = ctx_for(root);

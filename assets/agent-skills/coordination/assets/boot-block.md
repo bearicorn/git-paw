@@ -56,4 +56,4 @@ Replace `<describe what you need>` and `<agent-id or resource>` with specific de
 
 ### PASTE HANDLING
 
-When you paste text, Claude may collapse it into `[Pasted text #N]`. After any paste operation, send an additional Enter key to ensure the full content is processed. This is especially important after pasting the boot instructions themselves.
+{{CLI_BOOT_NOTES}}

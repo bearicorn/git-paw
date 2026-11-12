@@ -11,6 +11,7 @@
 //! stack-specific) assumptions into a bundled asset that ships to
 //! polyglot users.
 
+use git_paw::agent_cli::CliFamily;
 use git_paw::skills::{
     BundledFile, GateCommands, SkillFormat, SkillTemplate, Source, bundled_package,
     bundled_packages, render,
@@ -55,6 +56,7 @@ fn render_supervisor_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -70,6 +72,7 @@ fn render_cli_setup_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -85,6 +88,7 @@ fn render_coordination_for(backends: &[SpecBackendKind]) -> String {
         "git-paw",
         &GateCommands::default(),
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -909,6 +913,7 @@ fn rendered_for_every_backend(package: &str, file: &BundledFile) -> Vec<(String,
                 "git-paw",
                 &GateCommands::default(),
                 &backends,
+                CliFamily::Generic,
             ),
         ));
     }

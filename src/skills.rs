@@ -32,6 +32,8 @@
 //! - `{{GIT_PAW_BROKER_URL}}` is substituted at render time with the actual broker URL
 //! - `{{SKILL_NAME}}` is replaced with the skill name from metadata
 //! - `{{SKILL_DESCRIPTION}}` is replaced with the skill description from metadata
+//! - `{{CLI_NOTES}}` / `{{CLI_BOOT_NOTES}}` are replaced with the per-CLI skill /
+//!   boot fragment selected for the agent's CLI family ([`select_fragment`])
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,7 @@ use std::fmt::Write as _;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
+use crate::agent_cli::{CliFamily, CliProfile};
 use crate::config::CustomCli;
 
 /// One file of a bundled skill package, embedded at compile time.
@@ -263,6 +266,34 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
                     "../assets/agent-skills/coordination/assets/boot-block-mcp.md"
                 ),
             },
+            BundledFile {
+                path: "assets/cli/claude/skill.md",
+                source: "assets/agent-skills/coordination/assets/cli/claude/skill.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/cli/claude/skill.md"
+                ),
+            },
+            BundledFile {
+                path: "assets/cli/claude/boot.md",
+                source: "assets/agent-skills/coordination/assets/cli/claude/boot.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/cli/claude/boot.md"
+                ),
+            },
+            BundledFile {
+                path: "assets/cli/generic/skill.md",
+                source: "assets/agent-skills/coordination/assets/cli/generic/skill.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/cli/generic/skill.md"
+                ),
+            },
+            BundledFile {
+                path: "assets/cli/generic/boot.md",
+                source: "assets/agent-skills/coordination/assets/cli/generic/boot.md",
+                content: include_str!(
+                    "../assets/agent-skills/coordination/assets/cli/generic/boot.md"
+                ),
+            },
         ],
         gate: ProvisionGate::BrokerEnabled,
     },
@@ -391,6 +422,10 @@ pub struct RenderInputs<'a> {
     pub gates: GateCommands<'a>,
     /// The resolved spec backends.
     pub backends: &'a [crate::specs::SpecBackendKind],
+    /// The family of the agent's resolved CLI profile, selecting the per-CLI
+    /// fragments ([`select_fragment`]); ignored for the repository root
+    /// ([`Self::root`]), which renders [`CliFamily::Generic`].
+    pub family: CliFamily,
 }
 
 /// One file of a package as installed: its path relative to the package
@@ -425,6 +460,7 @@ pub fn render_package_body(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>
         inputs.project,
         &inputs.gates,
         inputs.backends,
+        inputs.family,
     )
 }
 
@@ -474,6 +510,94 @@ pub fn render_package(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> 
         });
     }
     files
+}
+
+/// The directory, relative to a package root, that holds a package's per-CLI
+/// fragments: `assets/cli/<family>/<slot>.md`, `<family>` being
+/// [`CliFamily::as_str`].
+pub const CLI_FRAGMENT_DIR: &str = "assets/cli";
+
+/// A slot a per-CLI fragment renders into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentSlot {
+    /// The skill slot, rendered into `{{CLI_NOTES}}`.
+    Skill,
+    /// The boot slot, rendered into `{{CLI_BOOT_NOTES}}`.
+    Boot,
+}
+
+impl FragmentSlot {
+    /// Both slots.
+    pub const ALL: [Self; 2] = [Self::Skill, Self::Boot];
+
+    /// The placeholder the slot's fragment renders into.
+    #[must_use]
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Skill => "{{CLI_NOTES}}",
+            Self::Boot => "{{CLI_BOOT_NOTES}}",
+        }
+    }
+
+    /// The fragment's file name inside a family directory.
+    #[must_use]
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Skill => "skill.md",
+            Self::Boot => "boot.md",
+        }
+    }
+
+    /// The package-relative path of `family`'s fragment for this slot.
+    #[must_use]
+    pub fn path(self, family: CliFamily) -> String {
+        format!(
+            "{CLI_FRAGMENT_DIR}/{}/{}",
+            family.as_str(),
+            self.file_name()
+        )
+    }
+}
+
+/// Selects the per-CLI fragment `package` renders into `slot` for an agent of
+/// `family`: the family's own fragment when the package registers one at
+/// [`FragmentSlot::path`], else the package's `generic` fragment, else the
+/// empty string. Pure; never compares a family or CLI name — the family only
+/// names a directory, and a missing entry falls back.
+#[must_use]
+pub fn select_fragment(
+    family: CliFamily,
+    slot: FragmentSlot,
+    package: &BundledPackage,
+) -> &'static str {
+    let find = |family: CliFamily| {
+        let path = slot.path(family);
+        package
+            .assets
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.content)
+    };
+    find(family)
+        .or_else(|| find(CliFamily::Generic))
+        .unwrap_or("")
+}
+
+/// Substitutes `{{CLI_NOTES}}` and `{{CLI_BOOT_NOTES}}` in `text` with the
+/// fragments [`select_fragment`] picks from the bundled package `package`
+/// for `family`. Text naming no CLI placeholder, or a `package` that is not
+/// registered, is returned unchanged.
+fn substitute_cli_fragments(text: &str, family: CliFamily, package: &str) -> String {
+    let mut out = text.to_string();
+    for slot in FragmentSlot::ALL {
+        if out.contains(slot.placeholder())
+            && let Some(package) = bundled_package(package)
+        {
+            let fragment = select_fragment(family, slot, package).trim_end();
+            out = out.replace(slot.placeholder(), fragment);
+        }
+    }
+    out
 }
 
 /// Returns the content of the named file of the coordination package.
@@ -1057,32 +1181,49 @@ pub fn cli_speaks_mcp<S: BuildHasher>(cli: &str, clis: &HashMap<String, CustomCl
 ///   stability and any future broker-URL placeholder; the boot block no
 ///   longer inlines the URL — each event calls the coordination package's `broker.sh`
 ///   (the `agent-broker-helper` capability), which discovers the URL itself.
-/// * `mcp_capable` - Whether the target CLI speaks MCP (see
-///   [`cli_speaks_mcp`]). `true` renders the four events as MCP publish
-///   tool invocations (capability `mcp-agent-publish`); `false` — the safe
-///   default for a non-MCP or unrecognized CLI (design D4) — renders the
-///   `broker.sh` helper form.
+/// * `cli` - The agent's resolved CLI profile, the function's only source of
+///   per-CLI choice. Its MCP capability ([`CliProfile::mcp_capable`]) picks
+///   the form: MCP-capable renders the four events as MCP publish tool
+///   invocations (capability `mcp-agent-publish`); otherwise — the safe
+///   default for a non-MCP or unrecognized CLI (design D4) — the `broker.sh`
+///   helper form. Its family ([`CliProfile::family`]) picks the boot fragment
+///   rendered into `{{CLI_BOOT_NOTES}}` (see [`select_fragment`]).
 ///
 /// # Returns
 ///
 /// A string containing the complete boot instruction block with the
 /// `{{BRANCH_ID}}` placeholder pre-expanded so each invocation carries the
 /// agent's literal id.
-pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) -> String {
-    boot_block_for_id(&slugify_branch(branch_id), broker_url, mcp_capable)
+#[must_use]
+pub fn build_boot_block(branch_id: &str, broker_url: &str, cli: &CliProfile) -> String {
+    boot_block_for_id(&slugify_branch(branch_id), broker_url, cli)
 }
 
 /// Boot-block renderer taking an already-resolved `agent_id`.
-fn boot_block_for_id(agent_id: &str, broker_url: &str, mcp_capable: bool) -> String {
-    let template = if mcp_capable {
+fn boot_block_for_id(agent_id: &str, broker_url: &str, cli: &CliProfile) -> String {
+    let template = if cli.mcp_capable() {
         coordination_asset("assets/boot-block-mcp.md")
     } else {
         coordination_asset("assets/boot-block.md")
     };
+    render_boot_template(template, agent_id, broker_url, cli)
+}
 
-    substitute_helper_paths(template)
-        .replace("{{BRANCH_ID}}", agent_id)
-        .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
+/// Substitutes a boot-block `template` for one agent: helper paths, the
+/// `cli` family's boot fragment, `{{BRANCH_ID}}` and `{{GIT_PAW_BROKER_URL}}`.
+fn render_boot_template(
+    template: &str,
+    agent_id: &str,
+    broker_url: &str,
+    cli: &CliProfile,
+) -> String {
+    substitute_cli_fragments(
+        &substitute_helper_paths(template),
+        cli.family(),
+        "coordination",
+    )
+    .replace("{{BRANCH_ID}}", agent_id)
+    .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
 
 /// Marker opening the drive-loop directive region inside the bundled
@@ -1215,6 +1356,14 @@ pub struct GateCommands<'a> {
 /// `{{CHANGE_ID}}` form is whitelisted from this warning since the spec
 /// expects it to survive intact (see the `agent-skills` spec delta).
 ///
+/// ## Per-CLI fragments
+///
+/// - `{{CLI_NOTES}}` / `{{CLI_BOOT_NOTES}}` — the skill / boot fragment the
+///   template's package registers for the agent's CLI `family` (see
+///   [`select_fragment`]), falling back to the package's `generic` fragment.
+///   A render with no agent CLI (the repository root, MCP `get_skill`) passes
+///   [`CliFamily::Generic`].
+///
 /// For standardized skills, additional metadata placeholders may be available:
 /// - `{{SKILL_NAME}}` — the skill name from metadata
 /// - `{{SKILL_DESCRIPTION}}` — the skill description from metadata
@@ -1225,6 +1374,7 @@ pub fn render(
     project: &str,
     gates: &GateCommands<'_>,
     backends: &[crate::specs::SpecBackendKind],
+    family: CliFamily,
 ) -> String {
     render_for_agent_id(
         template,
@@ -1233,6 +1383,7 @@ pub fn render(
         project,
         gates,
         backends,
+        family,
     )
 }
 
@@ -1259,6 +1410,7 @@ pub fn render_for_supervisor(
         project,
         gates,
         backends,
+        CliFamily::Generic,
     )
 }
 
@@ -1270,6 +1422,7 @@ fn render_for_agent_id(
     project: &str,
     gates: &GateCommands<'_>,
     backends: &[crate::specs::SpecBackendKind],
+    family: CliFamily,
 ) -> String {
     const NOT_CONFIGURED: &str = "(not configured)";
     let branch_id = branch_id.to_string();
@@ -1319,6 +1472,7 @@ fn render_for_agent_id(
         .replace("{{DOC_TOOL_COMMAND}}", gates.doc_tool_command.unwrap_or(""))
         .replace("{{SPEC_PATH_DOCTRINE}}", &spec_doctrine);
     output = substitute_helper_paths(&output);
+    output = substitute_cli_fragments(&output, family, &template.name);
 
     // `{{CHANGE_ID}}` is intentionally NOT substituted: it is a
     // per-invocation placeholder owned by the supervisor agent at
@@ -1562,6 +1716,7 @@ pub fn render_standardized(
         "",
         gates,
         backends,
+        CliFamily::Generic,
     );
     let body = with_drive_loop_directive(&body, false);
     let description = template
@@ -1743,6 +1898,15 @@ pub fn supervisor_boot_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A boot-block profile: MCP-capable (`claude` family) or not (`generic`).
+    fn test_boot_profile(mcp_capable: bool) -> CliProfile {
+        CliProfile::for_family(if mcp_capable {
+            CliFamily::Claude
+        } else {
+            CliFamily::Generic
+        })
+    }
 
     /// Resolves `name` with no override root: only the embedded default can
     /// answer, whatever the developer's machine has under its config
@@ -2044,6 +2208,7 @@ mod tests {
             project: "proj",
             gates: GateCommands::default(),
             backends: &[],
+            family: CliFamily::Generic,
         }
     }
 
@@ -3302,6 +3467,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("feat-http-broker"));
         assert!(!output.contains("{{BRANCH_ID}}"));
@@ -3326,6 +3492,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("http://127.0.0.1:9119/status"));
         assert!(!output.contains("{{GIT_PAW_BROKER_URL}}"));
@@ -3350,6 +3517,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         let expected = slugify_branch("Feature/HTTP_Broker");
         assert_eq!(output, format!("id={expected}"));
@@ -3366,6 +3534,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         let b = render(
             &tmpl,
@@ -3374,6 +3543,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(a, b);
     }
@@ -3406,6 +3576,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("feat-x"));
     }
@@ -3429,6 +3600,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(
             output.contains("{{UNKNOWN_THING}}"),
@@ -3447,6 +3619,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(
             !output.contains("{{"),
@@ -3657,6 +3830,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[crate::specs::SpecBackendKind::OpenSpec],
+            CliFamily::Generic,
         );
         assert!(
             rendered.contains("openspec/changes/"),
@@ -4473,6 +4647,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(output, "Run sphinx-build -W docs docs/_build for API docs.");
         assert!(!output.contains("{{DOC_TOOL_COMMAND}}"));
@@ -4500,6 +4675,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(output, "API doc tool: ``");
         assert!(!output.contains("(not configured)"));
@@ -4524,6 +4700,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[SpecBackendKind::OpenSpec],
+            CliFamily::Generic,
         );
         assert!(openspec_output.contains("openspec/changes/"));
         assert!(!openspec_output.contains("{{SPEC_PATH_DOCTRINE}}"));
@@ -4535,6 +4712,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[SpecBackendKind::SpecKit],
+            CliFamily::Generic,
         );
         assert!(speckit_output.contains(".specify/specs/"));
     }
@@ -4557,6 +4735,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("no spec backend"));
     }
@@ -4697,6 +4876,7 @@ mod tests {
             "my-app",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("paw-my-app"));
         assert!(!output.contains("{{PROJECT_NAME}}"));
@@ -4721,6 +4901,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("feat-http-broker"));
         assert!(output.contains("paw-git-paw"));
@@ -4833,6 +5014,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("Name: test-skill, Desc: Test description"));
         assert!(!output.contains("{{SKILL_NAME}}"));
@@ -4860,6 +5042,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(output, "Run `just check` after each merge.");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -4883,6 +5066,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(output, "Baseline: (not configured)");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -4909,6 +5093,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
+            CliFamily::Generic,
         );
         assert!(
             !output.contains("{{TEST_COMMAND}}"),
@@ -4952,6 +5137,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         )
     }
 
@@ -4977,6 +5163,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(
             output.contains("Run just check."),
@@ -5015,6 +5202,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(
             output.contains("Run cargo clippy -- -D warnings."),
@@ -5050,6 +5238,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("Run cargo build."), "got: {output}");
 
@@ -5082,6 +5271,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("Run mdbook build docs/."), "got: {output}");
 
@@ -5114,6 +5304,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(
             output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
@@ -5149,6 +5340,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("Run cargo fmt --check."), "got: {output}");
 
@@ -5181,6 +5373,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(output.contains("Run cargo audit."), "got: {output}");
 
@@ -5214,6 +5407,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         for needle in [
             "CMD-TEST",
@@ -5244,6 +5438,7 @@ mod tests {
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
 
         // Gate 1 (Testing) section.
@@ -5369,6 +5564,7 @@ mod tests {
             "git-paw",
             &gates,
             &[],
+            CliFamily::Generic,
         );
         assert!(
             output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
@@ -5534,6 +5730,7 @@ mod tests {
             "proj",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         let real = with_drive_loop_directive(&rendered, true);
         let lower = real.to_lowercase();
@@ -5578,6 +5775,7 @@ mod tests {
             "proj",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         for unattended in [true, false] {
             let out = with_drive_loop_directive(&rendered, unattended).to_lowercase();
@@ -5630,6 +5828,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "proj",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         let out = with_drive_loop_directive(&rendered, true);
         assert!(
@@ -5652,6 +5851,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "proj",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         let governance = crate::config::GovernanceConfig {
             dod: Some(PathBuf::from("docs/dod.md")),
@@ -5714,7 +5914,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     // Boot block function tests
     #[test]
     fn boot_block_contains_all_four_essential_events() {
-        let block = build_boot_block("feat/errors", "http://localhost:9119", false);
+        let block = build_boot_block(
+            "feat/errors",
+            "http://localhost:9119",
+            &test_boot_profile(false),
+        );
         assert!(
             block.contains("### 1. REGISTER"),
             "Missing REGISTER section"
@@ -5732,7 +5936,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// fallback still publishes `agent.artifact { status: "done" }`.
     #[test]
     fn boot_block_all_four_events_call_helper_no_raw_curl() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
 
         // No raw broker curl anywhere.
         assert!(
@@ -5782,7 +5990,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// `broker.sh` calls.
     #[test]
     fn boot_block_mcp_form_calls_publish_tools_no_helper_script() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", true);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(true),
+        );
 
         assert!(
             !block.contains(
@@ -5935,7 +6147,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     #[test]
     fn a_coding_branch_named_supervisor_does_not_get_the_reserved_id() {
         for mcp_capable in [false, true] {
-            let block = build_boot_block("supervisor", "http://127.0.0.1:9119", mcp_capable);
+            let block = build_boot_block(
+                "supervisor",
+                "http://127.0.0.1:9119",
+                &test_boot_profile(mcp_capable),
+            );
             assert!(
                 block.contains("agent-supervisor"),
                 "a branch named supervisor must derive agent-supervisor (mcp={mcp_capable}); \
@@ -5966,6 +6182,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "proj",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(rendered, "id=agent-supervisor");
     }
@@ -5998,8 +6215,16 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// question — neither adds nor omits an event relative to the other.
     #[test]
     fn boot_block_both_forms_cover_the_same_four_events() {
-        let helper_form = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
-        let mcp_form = build_boot_block("feat/test", "http://127.0.0.1:9119", true);
+        let helper_form = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
+        let mcp_form = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(true),
+        );
 
         for section in [
             "### 1. REGISTER",
@@ -6017,7 +6242,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_substitutes_branch_id_placeholder() {
-        let block = build_boot_block("Feature/HTTP_Broker", "http://localhost:9119", false);
+        let block = build_boot_block(
+            "Feature/HTTP_Broker",
+            "http://localhost:9119",
+            &test_boot_profile(false),
+        );
         assert!(
             block.contains("feature-http-broker"),
             "Branch ID not properly slugified"
@@ -6030,7 +6259,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_uses_helper_not_raw_broker_url() {
-        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", false);
+        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", &test_boot_profile(false));
         // The broker URL and JSON shaping now live inside the helper, so the
         // boot block must not inline a raw broker `curl` for any event.
         assert!(
@@ -6047,9 +6276,139 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
+    // --- per-cli-skill-templates: fragment selection + profile-driven boot ---
+
+    /// Task 1.1 selection table: a registered family gets its own fragment,
+    /// an unregistered family and `generic` get the `generic` fragment, and a
+    /// package registering neither yields nothing.
+    #[test]
+    fn select_fragment_table() {
+        let coordination = bundled_package("coordination").unwrap();
+        let asset = |path: &str| {
+            coordination
+                .assets
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("{path} registered"))
+                .content
+        };
+        for slot in FragmentSlot::ALL {
+            let claude = asset(&slot.path(CliFamily::Claude));
+            let generic = asset(&slot.path(CliFamily::Generic));
+            assert_ne!(claude, generic, "{slot:?}: fragments differ");
+            for (family, expected) in [
+                (CliFamily::Claude, claude),
+                (CliFamily::Qwen, generic),
+                (CliFamily::Cursor, generic),
+                (CliFamily::Generic, generic),
+            ] {
+                assert_eq!(
+                    select_fragment(family, slot, coordination),
+                    expected,
+                    "{slot:?} for {family}"
+                );
+            }
+            let docs_fetch = bundled_package("docs-fetch").unwrap();
+            assert_eq!(select_fragment(CliFamily::Claude, slot, docs_fetch), "");
+        }
+    }
+
+    /// The fragment paths are the family's config name under `assets/cli/`.
+    #[test]
+    fn fragment_paths_use_the_family_config_name() {
+        assert_eq!(
+            FragmentSlot::Skill.path(CliFamily::Cursor),
+            format!("assets/cli/{}/skill.md", CliFamily::Cursor.as_str())
+        );
+        assert_eq!(
+            FragmentSlot::Boot.path(CliFamily::Generic),
+            "assets/cli/generic/boot.md"
+        );
+    }
+
+    /// Spec boot-block "Helper function signature" / Scenario "Function
+    /// accepts required parameters".
+    #[test]
+    fn build_boot_block_accepts_required_parameters() {
+        for family in CliFamily::ALL {
+            let profile = CliProfile::for_family(family);
+            let _ = build_boot_block("feat/errors", "http://localhost:9119", &profile);
+        }
+    }
+
+    /// Spec boot-block "Helper function signature" / Scenario "Function
+    /// returns boot block string".
+    #[test]
+    fn build_boot_block_returns_boot_block_string() {
+        let block: String = build_boot_block(
+            "feat/errors",
+            "http://localhost:9119",
+            &CliProfile::for_family(CliFamily::Claude),
+        );
+        assert!(block.contains("## BOOT INSTRUCTIONS"), "{block}");
+    }
+
+    /// Spec boot-block "Helper function signature" / Scenario "The generic
+    /// profile yields the helper form with the generic fragment".
+    #[test]
+    fn generic_profile_yields_the_helper_form_with_the_generic_fragment() {
+        let coordination = bundled_package("coordination").unwrap();
+        let profile = CliProfile::for_family(CliFamily::Generic);
+        let block = build_boot_block("feat/errors", "http://localhost:9119", &profile);
+        assert!(
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-errors status booting"
+            ),
+            "the generic profile renders the helper form: {block}"
+        );
+        assert!(
+            !block.contains("publish_status"),
+            "the generic profile does not render the MCP form: {block}"
+        );
+        let generic = select_fragment(CliFamily::Generic, FragmentSlot::Boot, coordination);
+        assert!(block.contains(generic.trim_end()), "{block}");
+        assert!(!block.contains("{{CLI_BOOT_NOTES}}"), "{block}");
+    }
+
+    /// Spec boot-block "Template variable substitution" / Scenario "Branch ID
+    /// substitution".
+    #[test]
+    fn boot_template_branch_id_substitution() {
+        let profile = CliProfile::for_family(CliFamily::Generic);
+        let block = build_boot_block("feat/errors", "http://localhost:9119", &profile);
+        assert!(block.contains("--agent feat-errors "), "{block}");
+        let rendered = render_boot_template(
+            "a={{BRANCH_ID}} b={{BRANCH_ID}}",
+            &slugify_branch("feat/errors"),
+            "http://localhost:9119",
+            &profile,
+        );
+        assert_eq!(rendered, "a=feat-errors b=feat-errors");
+    }
+
+    /// Spec boot-block "Template variable substitution" / Scenario "Broker URL
+    /// substitution".
+    #[test]
+    fn boot_template_broker_url_substitution() {
+        let rendered = render_boot_template(
+            "{{GIT_PAW_BROKER_URL}}/publish {{GIT_PAW_BROKER_URL}}",
+            "feat-errors",
+            "http://localhost:9119",
+            &CliProfile::for_family(CliFamily::Claude),
+        );
+        assert_eq!(
+            rendered,
+            "http://localhost:9119/publish http://localhost:9119"
+        );
+    }
+
     #[test]
     fn boot_block_contains_paste_handling_instructions() {
-        let block = build_boot_block("feat/x", "http://localhost:9119", false);
+        let block = build_boot_block(
+            "feat/x",
+            "http://localhost:9119",
+            &CliProfile::for_family(CliFamily::Claude),
+        );
         assert!(
             block.contains("PASTE HANDLING"),
             "Missing paste handling section"
@@ -6066,7 +6425,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_question_section_emphasizes_waiting() {
-        let block = build_boot_block("feat/x", "http://localhost:9119", false);
+        let block = build_boot_block("feat/x", "http://localhost:9119", &test_boot_profile(false));
         assert!(
             block.contains("DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"),
             "Missing wait emphasis"
@@ -6079,8 +6438,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_is_deterministic() {
-        let a = build_boot_block("feat/x", "http://localhost:9119", false);
-        let b = build_boot_block("feat/x", "http://localhost:9119", false);
+        let a = build_boot_block("feat/x", "http://localhost:9119", &test_boot_profile(false));
+        let b = build_boot_block("feat/x", "http://localhost:9119", &test_boot_profile(false));
         assert_eq!(a, b, "Boot block generation should be deterministic");
     }
 
@@ -6089,7 +6448,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let block = build_boot_block(
             "fix/topological-cycle-fallback",
             "http://localhost:9119",
-            false,
+            &test_boot_profile(false),
         );
         assert!(
             block.contains("fix-topological-cycle-fallback"),
@@ -6099,7 +6458,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_contains_pre_expanded_helper_invocations() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
 
         // Each event calls the helper with the pre-expanded branch id.
         assert!(
@@ -6131,7 +6494,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_done_section_leads_with_commit_instruction() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
         let done_body = done_section_body(&block);
 
         let commit_idx = done_body
@@ -6151,7 +6518,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_done_section_names_committed_status_published_by_hook() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
         let done_body = done_section_body(&block);
 
         assert!(
@@ -6167,7 +6538,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_done_section_scopes_manual_done_to_code_less_tasks() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
         let done_body = done_section_body(&block);
 
         let hits = ["docs-only", "planning", "exploration"]
@@ -6183,7 +6558,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_done_section_warns_against_manual_done_with_uncommitted_changes() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
         let done_body = done_section_body(&block);
 
         assert!(
@@ -6202,7 +6581,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn boot_block_done_section_retains_manual_done_helper() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let block = build_boot_block(
+            "feat/test",
+            "http://127.0.0.1:9119",
+            &test_boot_profile(false),
+        );
         let done_body = done_section_body(&block);
 
         // The manual fallback is now a copy-pasteable broker.sh artifact
@@ -6746,6 +7129,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         )
     }
 
@@ -6758,6 +7142,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         )
     }
 
@@ -6933,6 +7318,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 ..Default::default()
             },
             &[],
+            CliFamily::Generic,
         )
     }
 
@@ -7692,37 +8078,82 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
-    /// Spec "Per-CLI compact mechanism table" /
-    /// "Table includes claude and claude-oss explicitly" (now: a `claude` row
-    /// and no user-defined variant row) + "Generic 'other' row points users at
-    /// their CLI's equivalent".
-    #[test]
-    fn coordination_skill_per_cli_mechanism_table() {
+    /// The context-budget section of the coordination skill rendered for an
+    /// agent of `family`.
+    fn context_budget_section(family: CliFamily) -> String {
         let tmpl = resolve_embedded("coordination").unwrap();
-        let start = tmpl
-            .content
+        let rendered = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+            family,
+        );
+        let start = rendered
+            .find("### Context budget")
+            .expect("context-budget section present");
+        let rest = &rendered[start..];
+        let end = rest[4..].find("\n### ").map_or(rest.len(), |e| e + 4);
+        rest[..end].to_string()
+    }
+
+    /// Spec skill-agent "Compact mechanism for the agent's own CLI" /
+    /// Scenario "Claude-family agent sees its slash commands".
+    #[test]
+    fn claude_family_agent_sees_its_slash_commands() {
+        let section = context_budget_section(CliFamily::Claude);
+        let mechanism = &section[section
             .find("#### Per-CLI mechanism")
-            .expect("per-CLI mechanism subsection present");
-        let section = &tmpl.content[start..];
-        // A claude row naming /compact and /clear; no row for `claude-oss`,
-        // a name one project chose for its own `[clis]` entry.
+            .expect("mechanism subsection present")..];
         assert!(
-            section.contains("| `claude` | `/compact` | `/clear` |"),
-            "table should contain a claude row naming /compact and /clear"
+            mechanism.contains("compacts with `/compact`")
+                && mechanism.contains("clears with `/clear`"),
+            "a claude-family agent should be told /compact and /clear: {mechanism}"
         );
         assert!(
-            !section.contains("claude-oss"),
-            "table should not name a project's own CLI variant"
+            !mechanism.contains("/save") && !mechanism.contains("| other |"),
+            "a claude-family agent should see only its own CLI's mechanism: {mechanism}"
         );
-        // Generic "other" fallback row directing to the CLI's equivalent.
-        let other = section
-            .find("| other |")
-            .map(|o| &section[o..(o + 200).min(section.len())])
-            .expect("table should contain an 'other' fallback row");
+    }
+
+    /// Spec skill-agent "Compact mechanism for the agent's own CLI" /
+    /// Scenario "Generic fallback points users at their CLI's equivalent".
+    #[test]
+    fn generic_fallback_points_users_at_their_clis_equivalent() {
+        let coordination = bundled_package("coordination").unwrap();
+        let without_fragment: Vec<CliFamily> = CliFamily::ALL
+            .into_iter()
+            .filter(|f| {
+                !coordination
+                    .assets
+                    .iter()
+                    .any(|a| a.path == FragmentSlot::Skill.path(*f))
+            })
+            .chain(std::iter::once(CliFamily::Generic))
+            .collect();
         assert!(
-            other.contains("/compact") && other.contains("/save") && other.contains("/reset"),
-            "the 'other' row should point users at the CLI's /compact, /save, or /reset equivalent"
+            without_fragment.len() > 1,
+            "some family has no skill fragment"
         );
+        for family in without_fragment {
+            let section = context_budget_section(family);
+            let mechanism = &section[section
+                .find("#### Per-CLI mechanism")
+                .expect("mechanism subsection present")..];
+            assert!(
+                mechanism.contains("/compact")
+                    && mechanism.contains("/save")
+                    && mechanism.contains("/reset"),
+                "{family}: the fallback should point at the CLI's /compact, /save, or /reset \
+                 equivalent: {mechanism}"
+            );
+            assert!(
+                !mechanism.contains("| `claude` |"),
+                "{family}: no CLI table remains: {mechanism}"
+            );
+        }
     }
 
     // --- opsx role-gating skill sections (opsx-role-gating 2.3, 7.3, 1a.4) ---
@@ -7742,6 +8173,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "git-paw",
             &GateCommands::default(),
             backends,
+            CliFamily::Generic,
         )
     }
 
@@ -8012,11 +8444,16 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 .unwrap()
                 .content;
             assert!(!template.is_empty());
+            let profile = test_boot_profile(mcp);
             assert_eq!(
-                build_boot_block("feat/x", "http://b", mcp),
-                substitute_helper_paths(template)
-                    .replace("{{BRANCH_ID}}", "feat-x")
-                    .replace("{{GIT_PAW_BROKER_URL}}", "http://b")
+                build_boot_block("feat/x", "http://b", &profile),
+                substitute_cli_fragments(
+                    &substitute_helper_paths(template),
+                    profile.family(),
+                    "coordination"
+                )
+                .replace("{{BRANCH_ID}}", "feat-x")
+                .replace("{{GIT_PAW_BROKER_URL}}", "http://b")
             );
         }
     }
@@ -8641,6 +9078,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "git-paw",
             &GateCommands::default(),
             &[],
+            CliFamily::Generic,
         );
         assert_eq!(
             output,
@@ -8658,7 +9096,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     // Scenario: The rendered boot block invokes the package helper.
     #[test]
     fn the_rendered_boot_block_invokes_the_package_helper() {
-        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", false);
+        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", &test_boot_profile(false));
         assert!(
             block.contains(
                 ".git-paw/skills/coordination/scripts/broker.sh --agent feat-x status booting"

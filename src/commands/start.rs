@@ -343,6 +343,7 @@ pub fn start(
             project: &project,
             gates: crate::skills::GateCommands::default(),
             backends: &[],
+            family: profile.family(),
         };
         crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
         let rendered_skill =
@@ -507,11 +508,7 @@ pub fn start(
                 &cli_command,
                 &config.clis,
             )?;
-            let boot_block = crate::skills::build_boot_block(
-                branch,
-                &broker_config.url(),
-                profile.mcp_capable(),
-            );
+            let boot_block = crate::skills::build_boot_block(branch, &broker_config.url(), profile);
             let prefill =
                 compose_launch_prompt(Some(&boot_block), None, &state.worktrees[idx].worktree_path);
 
@@ -855,6 +852,7 @@ fn launch_spec_session(
                 .map(|s| s.gate_commands())
                 .unwrap_or_default(),
             backends: &session_backends,
+            family: profile.family(),
         };
         crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
         let rendered_skill =
@@ -1028,9 +1026,9 @@ fn launch_spec_session(
             &config.clis,
         )?;
         let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
-        let boot_block = broker_config.enabled.then(|| {
-            crate::skills::build_boot_block(branch, &broker_config.url(), profile.mcp_capable())
-        });
+        let boot_block = broker_config
+            .enabled
+            .then(|| crate::skills::build_boot_block(branch, &broker_config.url(), profile));
         let prompt = compose_launch_prompt(
             boot_block.as_deref(),
             Some(&task_prompt.prose),
