@@ -18,7 +18,7 @@
 
 ## 4. Export guard
 
-- [ ] 4.1 `tests/lang_agnostic_skill_audit.rs`: render per family + `generic`; vendor tokens allowed only from the family's own fragment; a package file under `assets/cli/<family>/` is read as that family's fragment by the per-file audit; regression tests "A fragment naming another vendor fails" and "A vendor name in a base template fails"; "Generic rendering is vendor-free"
+- [x] 4.1 `tests/lang_agnostic_skill_audit.rs`: render per family + `generic`; vendor tokens allowed only from the family's own fragment; a package file under `assets/cli/<family>/` is read as that family's fragment by the per-file audit; regression tests "A fragment naming another vendor fails" and "A vendor name in a base template fails"; "Generic rendering is vendor-free"
 
 ## 5. Docs
 
