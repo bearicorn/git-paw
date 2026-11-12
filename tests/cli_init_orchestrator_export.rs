@@ -370,22 +370,17 @@ fn exports_stay_untracked_without_the_root_gitignore_entry() {
 }
 
 // skill-packages / Scenario: The root-only skill exports come from the registry
+// — superseded by *Init installs every package at the root*: every registered
+// package, root-only or not, is installed at the root.
 #[test]
 #[serial]
-fn init_exports_exactly_the_registered_root_only_packages() {
-    use git_paw::skills::{ProvisionGate, bundled_packages};
+fn init_installs_exactly_the_registered_packages() {
+    use git_paw::skills::bundled_packages;
 
     let tmp = repo(None);
     init(tmp.path());
 
-    let mut expected: Vec<&str> = bundled_packages()
-        .iter()
-        .filter(|p| p.gate == ProvisionGate::RootOnly)
-        .map(|p| p.name)
-        .collect();
-    assert!(expected.contains(&"orchestrator"), "{expected:?}");
-    assert!(expected.contains(&"cli-setup"), "{expected:?}");
-
+    let mut expected: Vec<&str> = bundled_packages().iter().map(|p| p.name).collect();
     let mut exported: Vec<String> = fs::read_dir(tmp.path().join(".git-paw/skills"))
         .expect("skills dir")
         .filter_map(Result::ok)

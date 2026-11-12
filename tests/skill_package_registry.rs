@@ -252,6 +252,15 @@ fn the_binary_renders_bundled_skills_with_no_assets_on_disk() {
 #[serial]
 fn an_overrides_script_is_not_installed() {
     let project = TempDir::new().expect("project");
+    // A repository, so production resolution finds its override level.
+    assert!(
+        StdCommand::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(project.path())
+            .status()
+            .expect("git init")
+            .success()
+    );
     let override_dir = project.path().join(".agents/skills/coordination");
     fs::create_dir_all(override_dir.join("scripts")).expect("mkdir override");
     fs::write(
@@ -272,7 +281,22 @@ fn an_overrides_script_is_not_installed() {
     };
     let resolved =
         git_paw::skills::resolve_from("coordination", &roots).expect("coordination resolves");
-    git_paw::init::provision_worktree_helpers(worktree.path(), true, false)
+    let packages = git_paw::skills::resolve_worktree_packages(
+        git_paw::skills::WorktreeInputs {
+            broker_enabled: true,
+            docs_base_url_configured: false,
+        },
+        project.path(),
+    )
+    .expect("selection resolves");
+    let inputs = git_paw::skills::RenderInputs {
+        branch: "feat/x",
+        broker_url: "http://127.0.0.1:9119",
+        project: "proj",
+        gates: git_paw::skills::GateCommands::default(),
+        backends: &[],
+    };
+    git_paw::init::provision_worktree_helpers(worktree.path(), &packages, &inputs)
         .expect("provision worktree helpers");
 
     assert_eq!(resolved.source, Source::AgentsStandard);
@@ -280,8 +304,25 @@ fn an_overrides_script_is_not_installed() {
         resolved.content.contains("OVERRIDE-MARKER"),
         "the override's skill text is what renders"
     );
-    let installed = fs::read_to_string(worktree.path().join(".git-paw/scripts/broker.sh"))
-        .expect("broker.sh provisioned");
+    let installed = fs::read_to_string(
+        worktree
+            .path()
+            .join(".git-paw/skills/coordination/scripts/broker.sh"),
+    )
+    .expect("broker.sh provisioned");
+    let compat = fs::read_to_string(worktree.path().join(".git-paw/scripts/broker.sh"))
+        .expect("compatibility copy provisioned");
+    assert_eq!(compat, installed);
+    assert!(
+        fs::read_to_string(
+            worktree
+                .path()
+                .join(".git-paw/skills/coordination/SKILL.md")
+        )
+        .expect("SKILL.md provisioned")
+        .contains("OVERRIDE-MARKER feat-x"),
+        "the installed SKILL.md renders the override's text"
+    );
     let embedded = bundled_package("coordination")
         .expect("registered")
         .scripts
@@ -384,8 +425,11 @@ fn a_content_requirement_on_a_pre_package_path_is_checked_against_the_package_fi
     assert!(sweep.content.contains("cmd_approve()"));
 }
 
-// skill-packages / Scenario: Init writes the same files
-// skill-packages / Scenario: Rendering is byte-identical across the restructure
+// skill-packages / Scenario: Init writes the same files — re-pointed by
+// *Installation supersedes the packaging identity pin*: the compatibility
+// directory holds exactly the bundled helpers, byte-identical to the
+// registry, and each root SKILL.md equals a fresh render of its package with
+// the config `init` just wrote (not the pre-package output).
 #[test]
 #[serial]
 fn init_writes_the_same_files() {

@@ -330,7 +330,10 @@ pub struct SpecWorkflowProbe {
 pub struct ScriptProbe {
     /// File name, e.g. `sweep.sh`.
     pub name: &'static str,
-    /// Whether the file exists under `.git-paw/scripts/`.
+    /// Path relative to the repository root, e.g.
+    /// `.git-paw/skills/orchestrator/scripts/sweep.sh`.
+    pub path: String,
+    /// Whether the file exists.
     pub present: bool,
     /// Whether it carries the executable bit (always `true` off Unix).
     pub executable: bool,
@@ -338,11 +341,31 @@ pub struct ScriptProbe {
     pub matches_embedded: bool,
 }
 
-/// Bundled-script facts, plus the interpreter every bundled script needs.
+/// State of one bundled package installed at the repository root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageProbe {
+    /// The package name, e.g. `orchestrator`.
+    pub name: &'static str,
+    /// Whether `.git-paw/skills/<name>/SKILL.md` exists.
+    pub skill_md_present: bool,
+    /// Rendered files (`SKILL.md`, references) present on disk whose content
+    /// differs from what the running binary renders from the current config,
+    /// relative to the repository root.
+    pub stale: Vec<String>,
+    /// The package's scripts under its `scripts/`.
+    pub scripts: Vec<ScriptProbe>,
+}
+
+/// Bundled-package facts, plus the interpreter every bundled script needs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BundledScriptsProbe {
-    /// One entry per script `git paw init` installs.
-    pub scripts: Vec<ScriptProbe>,
+    /// Whether `.git-paw/config.toml` exists. When it does not, the packages,
+    /// helpers and compatibility copies are reported as one line.
+    pub initialised: bool,
+    /// One entry per registered bundled package.
+    pub packages: Vec<PackageProbe>,
+    /// The helpers' deprecated compatibility copies under `.git-paw/scripts/`.
+    pub compatibility: Vec<ScriptProbe>,
     /// Description of the Python 3 interpreter found on `PATH`, or `None`.
     pub python3: Option<String>,
 }
@@ -438,7 +461,7 @@ pub struct SupervisorProbe {
     /// verbs come from the resolved stack preset, never from a hard-coded
     /// git-paw toolchain (design D7).
     pub gates: Vec<GateCommandProbe>,
-    /// Whether `.git-paw/scripts/sweep.sh` is installed.
+    /// Whether the orchestrator package's `sweep.sh` is installed.
     pub sweep_installed: bool,
     /// Whether `budget_max_cost` is set while not every configured worker CLI
     /// reports cost, so the cap can never fire.
@@ -1121,45 +1144,64 @@ fn placement_word(placement: WorktreePlacement) -> &'static str {
 /// running binary's embedded copy, plus the Python 3 interpreter they need.
 #[must_use]
 pub fn check_bundled_scripts(probe: &BundledScriptsProbe) -> Vec<CheckResult> {
-    const REINSTALL: &str = "run `git paw init` to (re)install the bundled helper scripts";
+    const REINSTALL: &str = "run `git paw init` to (re)install the bundled skill packages";
+    const RERENDER: &str = "run `git paw start` or `git paw init` to re-render it from the \
+                            current config";
 
-    let mut checks: Vec<CheckResult> = probe
-        .scripts
-        .iter()
-        .map(|script| {
-            if !script.present {
+    let mut checks: Vec<CheckResult> = Vec::new();
+    if probe.initialised {
+        for package in &probe.packages {
+            let dir = format!("{}/{}", crate::skills::INSTALL_DIR, package.name);
+            checks.push(if !package.skill_md_present {
                 CheckResult::fail(
                     GROUP_BUNDLED_SCRIPTS,
-                    script.name,
-                    format!(".git-paw/scripts/{} is missing", script.name),
+                    package.name,
+                    format!("{dir}/SKILL.md is missing"),
                     REINSTALL,
                 )
-            } else if !script.executable {
-                CheckResult::fail(
-                    GROUP_BUNDLED_SCRIPTS,
-                    script.name,
-                    format!(".git-paw/scripts/{} is not executable", script.name),
-                    REINSTALL,
-                )
-            } else if script.matches_embedded {
-                CheckResult::ok(
-                    GROUP_BUNDLED_SCRIPTS,
-                    script.name,
-                    "installed, executable, matches this binary",
-                )
-            } else {
+            } else if !package.stale.is_empty() {
                 CheckResult::warn(
                     GROUP_BUNDLED_SCRIPTS,
-                    script.name,
+                    package.name,
                     format!(
-                        ".git-paw/scripts/{} differs from this binary's embedded version",
-                        script.name
+                        "{} is stale — it differs from what the current config renders",
+                        package.stale.join(", ")
                     ),
-                    REINSTALL,
+                    RERENDER,
                 )
-            }
-        })
-        .collect();
+            } else {
+                CheckResult::ok(
+                    GROUP_BUNDLED_SCRIPTS,
+                    package.name,
+                    format!("installed at {dir}/, rendered from the current config"),
+                )
+            });
+            checks.extend(
+                package
+                    .scripts
+                    .iter()
+                    .map(|script| script_check(script, script.name, REINSTALL, true)),
+            );
+        }
+        // Nothing bundled invokes the compatibility path, so a missing or
+        // stale copy only warns.
+        checks.extend(probe.compatibility.iter().map(|script| {
+            script_check(
+                script,
+                &format!("{} (compatibility copy)", script.name),
+                REINSTALL,
+                false,
+            )
+        }));
+    } else {
+        checks.push(CheckResult::warn(
+            GROUP_BUNDLED_SCRIPTS,
+            "packages",
+            "not initialised — no .git-paw/config.toml, so the bundled skill packages \
+             and helpers were not checked",
+            "run `git paw init`",
+        ));
+    }
 
     checks.push(match &probe.python3 {
         Some(found) => CheckResult::ok(GROUP_BUNDLED_SCRIPTS, "python3", found.clone()),
@@ -1173,6 +1215,48 @@ pub fn check_bundled_scripts(probe: &BundledScriptsProbe) -> Vec<CheckResult> {
     });
 
     checks
+}
+
+/// One helper-script line. A missing or non-executable script is ✗ when
+/// `missing_fails` (a package helper) and ⚠ otherwise (a compatibility copy);
+/// a stale one is always ⚠.
+fn script_check(
+    script: &ScriptProbe,
+    name: &str,
+    remedy: &str,
+    missing_fails: bool,
+) -> CheckResult {
+    let missing = |detail: String| {
+        if missing_fails {
+            CheckResult::fail(GROUP_BUNDLED_SCRIPTS, name, detail, remedy)
+        } else {
+            CheckResult::warn(GROUP_BUNDLED_SCRIPTS, name, detail, remedy)
+        }
+    };
+    if !script.present {
+        missing(format!("{} is missing", script.path))
+    } else if !script.executable {
+        missing(format!("{} is not executable", script.path))
+    } else if script.matches_embedded {
+        CheckResult::ok(
+            GROUP_BUNDLED_SCRIPTS,
+            name,
+            format!(
+                "{} — installed, executable, matches this binary",
+                script.path
+            ),
+        )
+    } else {
+        CheckResult::warn(
+            GROUP_BUNDLED_SCRIPTS,
+            name,
+            format!(
+                "{} differs from this binary's embedded version",
+                script.path
+            ),
+            remedy,
+        )
+    }
 }
 
 /// `skill sources` check: names where each bundled skill resolves from. ✗ when
@@ -1281,6 +1365,11 @@ pub fn check_broker(probe: &BrokerProbe) -> Vec<CheckResult> {
     }]
 }
 
+/// The orchestrator package's `sweep.sh`, relative to the repository root.
+fn sweep_helper_path() -> String {
+    crate::skills::helper_invocation_path("sweep.sh").unwrap_or_default()
+}
+
 /// Supervisor checks: every configured gate command resolves on `PATH`, and
 /// `sweep.sh` is installed.
 ///
@@ -1332,13 +1421,16 @@ pub fn check_supervisor(probe: &SupervisorProbe) -> Vec<CheckResult> {
         CheckResult::ok(
             GROUP_SUPERVISOR,
             "sweep.sh",
-            ".git-paw/scripts/sweep.sh is installed",
+            format!("{} is installed", sweep_helper_path()),
         )
     } else {
         CheckResult::fail(
             GROUP_SUPERVISOR,
             "sweep.sh",
-            ".git-paw/scripts/sweep.sh is missing — the supervisor helper cannot run",
+            format!(
+                "{} is missing — the supervisor helper cannot run",
+                sweep_helper_path()
+            ),
             "run `git paw init` to install it",
         )
     });
@@ -2057,7 +2149,34 @@ fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
     // relative path resolves against whichever of them a session runs in.
     let mut roots = vec![repo_root.to_path_buf()];
     roots.extend(session_worktree_roots(repo_root));
-    let helpers = setup_doctor::helper_paths(&roots)
+    // The allow entries applied: every recorded one, and every planned one
+    // the target file holds (an entry the user already had is not recorded).
+    let planned = crate::cli_setup::facts::planned_allow_entries();
+    let mut applied_allow: Vec<String> = entries
+        .iter()
+        .filter(|e| e.kind == record::EntryKind::Allow)
+        .map(|e| e.value.clone())
+        .collect();
+    for path in targets.values() {
+        let allow = files
+            .get(path)
+            .cloned()
+            .flatten()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|root| root.pointer("/permissions/allow").cloned());
+        for value in allow
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            if planned.iter().any(|p| p == value) {
+                applied_allow.push(value.to_string());
+            }
+        }
+    }
+    let helpers = setup_doctor::helper_paths(&roots, &applied_allow)
         .iter()
         .filter_map(|p| setup_doctor::helper_state(p))
         .collect();
@@ -2167,24 +2286,65 @@ fn probe_skill_sources(repo_root: &Path) -> SkillSourcesProbe {
     }
 }
 
-/// Inspects `.git-paw/scripts/` against the binary's embedded helper scripts.
+/// Inspects the root packages under `.git-paw/skills/` and the compatibility
+/// copies under `.git-paw/scripts/` against the binary's embedded packages,
+/// and each rendered file against a fresh render from the current config.
+/// Read-only: the render is computed in memory and nothing is written.
 fn probe_bundled_scripts(repo_root: &Path) -> BundledScriptsProbe {
-    let scripts_dir = repo_root.join(".git-paw").join("scripts");
-    let scripts = crate::init::bundled_scripts()
-        .into_iter()
-        .map(|(name, embedded)| {
-            let path = scripts_dir.join(name);
-            let content = std::fs::read_to_string(&path).ok();
-            ScriptProbe {
-                name,
-                present: content.is_some(),
-                executable: is_executable(&path),
-                matches_embedded: content.is_some_and(|c| c == embedded),
+    let initialised = repo_root.join(".git-paw").join("config.toml").is_file();
+    let script = |rel: String, name: &'static str, embedded: &str| {
+        let path = repo_root.join(&rel);
+        let content = std::fs::read_to_string(&path).ok();
+        ScriptProbe {
+            name,
+            path: rel,
+            present: content.is_some(),
+            executable: is_executable(&path),
+            matches_embedded: content.is_some_and(|c| c == embedded),
+        }
+    };
+    let config = crate::config::load_config(repo_root, None).unwrap_or_default();
+    let rendered = crate::init::render_root_packages(repo_root, &config).unwrap_or_default();
+    let packages = crate::skills::bundled_packages()
+        .iter()
+        .map(|package| {
+            let dir = package.install_dir();
+            let stale = rendered
+                .iter()
+                .filter(|(p, _)| p.name == package.name)
+                .flat_map(|(_, files)| files.iter().filter(|f| !f.executable))
+                .filter_map(|file| {
+                    let rel = format!("{dir}/{}", file.path);
+                    let on_disk = std::fs::read_to_string(repo_root.join(&rel)).ok()?;
+                    (on_disk != file.content).then_some(rel)
+                })
+                .collect();
+            PackageProbe {
+                name: package.name,
+                skill_md_present: repo_root.join(package.skill_md_path()).is_file(),
+                stale,
+                scripts: package
+                    .scripts
+                    .iter()
+                    .map(|f| script(format!("{dir}/{}", f.path), f.file_name(), f.content))
+                    .collect(),
             }
         })
         .collect();
+    let compatibility = crate::init::bundled_scripts()
+        .into_iter()
+        .map(|(name, embedded)| {
+            script(
+                format!("{}/{name}", crate::init::COMPAT_SCRIPTS_DIR),
+                name,
+                embedded,
+            )
+        })
+        .collect();
     BundledScriptsProbe {
-        scripts,
+        initialised,
+        packages,
+        compatibility,
         python3: probe_python3(),
     }
 }
@@ -2278,9 +2438,7 @@ fn probe_supervisor(config: &PawConfig, repo_root: &Path) -> SupervisorProbe {
                 })
             })
             .collect(),
-        sweep_installed: is_executable(
-            &repo_root.join(".git-paw").join("scripts").join("sweep.sh"),
-        ),
+        sweep_installed: is_executable(&repo_root.join(sweep_helper_path())),
         // The drive loop's rule over a different set: the doctor reads config,
         // so it checks the configured CLIs (`default_cli`, `default_spec_cli`,
         // the presets), where the loop checks the session's workers. With no

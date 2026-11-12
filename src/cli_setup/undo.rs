@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::facts::{CliSetupFacts, HELPER_DIR, SetupItem};
+use super::facts::{CliSetupFacts, HELPER_DIR, PACKAGE_DIR, SetupItem};
 use super::plan::{Refusal, Snapshots, exclusion_line};
 use super::record::{EntryKind, RecordEntry, SetupRecord};
 
@@ -459,11 +459,31 @@ fn classify(entry: &RecordEntry, row: &CliSetupFacts, snapshots: &Snapshots) -> 
     None
 }
 
-/// Returns whether a value is `Bash(<helper dir>/<name>…)` naming a
-/// helper-script file name.
+/// Returns whether a value is `Bash(.git-paw/scripts/<name>…)` (the shape
+/// v0.17.0–v0.19.0 wrote) or `Bash(.git-paw/skills/<package>/scripts/<name>…)`
+/// (the package path), naming a helper-script file name.
 fn names_helper_script(value: &str) -> bool {
-    let prefix = format!("Bash({HELPER_DIR}/");
-    let Some(rest) = value.strip_prefix(&prefix) else {
+    let Some(rest) = value.strip_prefix("Bash(") else {
+        return false;
+    };
+    let rest = if let Some(rest) = rest.strip_prefix(&format!("{HELPER_DIR}/")) {
+        rest
+    } else if let Some(rest) = rest.strip_prefix(&format!("{PACKAGE_DIR}/")) {
+        let Some((package, rest)) = rest.split_once('/') else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix("scripts/") else {
+            return false;
+        };
+        if package.is_empty()
+            || !package
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return false;
+        }
+        rest
+    } else {
         return false;
     };
     let name: String = rest
@@ -493,7 +513,8 @@ fn is_file_tool_rule_under_git_paw(value: &str) -> bool {
 }
 
 /// Returns whether the allow list would still hold an entry naming a path
-/// under the helper directory once `removals` are applied.
+/// under the compatibility helper directory or the package directory once
+/// `removals` are applied.
 ///
 /// Every allow entry counts, not only git-paw's: a grant the user added
 /// themselves needs the protection just as much.
@@ -517,7 +538,9 @@ fn helper_grant_remains(target: &Value, row: &CliSetupFacts, removals: &[UndoRem
                 .iter()
                 .any(|r| r.key_path.as_deref() == Some(allow_key.as_str()) && r.value == *value)
         })
-        .any(|value| value.contains(&format!("{HELPER_DIR}/")))
+        .any(|value| {
+            value.contains(&format!("{HELPER_DIR}/")) || value.contains(&format!("{PACKAGE_DIR}/"))
+        })
 }
 
 /// Returns the target with every removal applied, so emptiness can be judged.
@@ -1127,5 +1150,113 @@ mod tests {
         assert!(!is_file_tool_rule_under_git_paw(
             "Bash(.git-paw/scripts/broker.sh *)"
         ));
+    }
+
+    fn ask_entry(value: &str) -> RecordEntry {
+        json_entry(EntryKind::Ask, "permissions.ask", value)
+    }
+
+    /// Undoes every entry in `allow`, `ask` and `deny`, recorded and present
+    /// beside a user entry, and returns the plan.
+    fn undo_all(allow: &[&str], ask: &[&str], deny: &[&str]) -> UndoPlan {
+        let mut entries: Vec<RecordEntry> = allow.iter().map(|v| allow_entry(v)).collect();
+        entries.extend(ask.iter().map(|v| ask_entry(v)));
+        entries.extend(deny.iter().map(|v| deny_entry(v)));
+        let mut file_allow = vec!["Bash(make test *)"];
+        file_allow.extend(allow);
+        let body = serde_json::json!({
+            "model": "x",
+            "permissions": { "allow": file_allow, "ask": ask, "deny": deny }
+        });
+        plan_ok(&record(entries), &CLAUDE, &snaps(&body.to_string()))
+    }
+
+    // Scenario: Entries recorded before the package move are undone — a
+    // v0.17.0–v0.19.0 record naming `.git-paw/scripts/` paths, its protection
+    // included, is removed and nothing else changes.
+    #[test]
+    fn entries_recorded_before_the_package_move_are_undone() {
+        let allow = [
+            "Bash(.git-paw/scripts/broker.sh *)",
+            "Bash(.git-paw/scripts/docs-fetch.sh find *)",
+            "Bash(.git-paw/scripts/sweep.sh status *)",
+        ];
+        let ask = [
+            "Bash(.git-paw/scripts/sweep.sh approve *)",
+            "Edit(**/.git-paw/config.toml)",
+        ];
+        let deny = ["Edit(**/.git-paw/scripts/**)"];
+        let p = undo_all(&allow, &ask, &deny);
+
+        let mut expected: Vec<String> = allow.iter().map(ToString::to_string).collect();
+        expected.extend(ask.iter().map(ToString::to_string));
+        expected.extend(deny.iter().map(ToString::to_string));
+        let mut removed = removed_values(&p);
+        removed.sort();
+        expected.sort();
+        assert_eq!(removed, expected);
+        assert!(p.reported.is_empty(), "{:?}", p.reported);
+    }
+
+    // Scenario: Package-path entries are undone — allow, ask and both deny
+    // rules.
+    #[test]
+    fn package_path_entries_are_undone() {
+        let allow = [
+            "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh learn *)",
+        ];
+        let ask = [
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)",
+            "Bash(.git-paw/scripts/sweep.sh tell *)",
+            "Edit(**/.git-paw/config.toml)",
+        ];
+        let deny = [
+            "Edit(**/.git-paw/skills/**)",
+            "Edit(**/.git-paw/scripts/**)",
+        ];
+        let p = undo_all(&allow, &ask, &deny);
+
+        let mut expected: Vec<String> = allow
+            .iter()
+            .chain(&ask)
+            .chain(&deny)
+            .map(ToString::to_string)
+            .collect();
+        let mut removed = removed_values(&p);
+        removed.sort();
+        expected.sort();
+        assert_eq!(removed, expected);
+        assert!(p.reported.is_empty(), "{:?}", p.reported);
+    }
+
+    // Protection stays while an allow entry naming a package path remains.
+    #[test]
+    fn protection_is_kept_while_a_package_path_grant_remains() {
+        let rec = record(vec![deny_entry("Edit(**/.git-paw/skills/**)")]);
+        let snapshots = snaps(
+            r#"{"permissions":{"allow":["Bash(.git-paw/skills/coordination/scripts/broker.sh*)"],
+                "deny":["Edit(**/.git-paw/skills/**)"]}}"#,
+        );
+        let p = plan_ok(&rec, &CLAUDE, &snapshots);
+        assert!(removed_values(&p).is_empty(), "{:?}", removed_values(&p));
+    }
+
+    #[test]
+    fn both_helper_path_shapes_are_recognised() {
+        assert!(names_helper_script("Bash(.git-paw/scripts/broker.sh *)"));
+        assert!(names_helper_script(
+            "Bash(.git-paw/skills/coordination/scripts/broker.sh *)"
+        ));
+        assert!(!names_helper_script(
+            "Bash(.git-paw/skills/coordination/broker.sh *)"
+        ));
+        assert!(!names_helper_script(
+            "Bash(.git-paw/skills/../scripts/x.sh *)"
+        ));
+        assert!(!names_helper_script(
+            "Bash(.git-paw/skills/a/scripts/sub/x.sh *)"
+        ));
+        assert!(!names_helper_script("Bash(make test *)"));
     }
 }

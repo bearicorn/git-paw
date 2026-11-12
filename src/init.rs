@@ -15,16 +15,25 @@ use crate::error::PawError;
 use crate::git;
 use crate::session;
 
-/// Gitignore entries managed by init. `.git-paw/tmp/` is the repo-local
-/// scratch dir (isolated verify worktrees, self-test sessions) — preferred
-/// over OS temp because it is OS-independent, so it must never be committed.
+/// Gitignore entries managed by init: every path git-paw writes under
+/// `.git-paw/` except `config.toml`, so `git add .git-paw/` stages only the
+/// config. `.git-paw/tmp/` is the repo-local scratch dir (isolated verify
+/// worktrees, self-test sessions) — preferred over OS temp because it is
+/// OS-independent. An explicit list rather than `.git-paw/*` plus a negation,
+/// which would also hide a file a consumer deliberately keeps there.
 const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/logs/",
     ".git-paw/tmp/",
     ".git-paw/worktrees/",
     ".git-paw/skills/",
+    ".git-paw/scripts/",
+    ".git-paw/sessions/",
     ".git-paw/session-summary.md",
     ".git-paw/session-learnings.md",
+    ".git-paw/AGENTS.local.md",
+    ".git-paw/.sweep-progress",
+    ".git-paw/.sweep-stuck-dedup",
+    ".git-paw/.add-remove.lock",
 ];
 
 /// The bundled helper scripts [`run_init`] installs, as
@@ -74,13 +83,13 @@ pub fn required_gitignore_entries() -> &'static [&'static str] {
 /// Runs the `git paw init` command.
 ///
 /// Creates `.git-paw/` directory structure, generates a default config,
-/// installs the bundled `sweep.sh` supervisor helper at
-/// `<repo>/.git-paw/scripts/sweep.sh` (executable mode `0o755` on Unix),
-/// and manages `.gitignore`. The script is overwritten on every invocation
-/// so re-running `git paw init` picks up updates that ship with new
-/// versions of the binary. Idempotent for the other side effects —
-/// running twice produces identical results for the directory tree,
-/// `config.toml`, and `.gitignore`.
+/// installs every bundled skill package under `<repo>/.git-paw/skills/`
+/// (helpers executable, mode `0o755` on Unix) with the helpers' deprecated
+/// compatibility copies under `.git-paw/scripts/`, and manages `.gitignore`.
+/// A package file is rewritten only when its content differs, so re-running
+/// `git paw init` picks up updates that ship with new versions of the binary.
+/// Idempotent — running twice produces identical results for the directory
+/// tree, `config.toml`, and `.gitignore`.
 pub fn run_init() -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::InitError(format!("cannot read current directory: {e}")))?;
@@ -89,7 +98,6 @@ pub fn run_init() -> Result<(), PawError> {
     let paw_dir = repo_root.join(".git-paw");
     let logs_dir = paw_dir.join("logs");
     let tmp_dir = paw_dir.join("tmp");
-    let scripts_dir = paw_dir.join("scripts");
     let config_path = paw_dir.join("config.toml");
 
     // 1. Create .git-paw/ directory
@@ -111,17 +119,7 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Created .git-paw/tmp/");
     }
 
-    // 3. Create .git-paw/scripts/ directory and install the bundled helpers
-    //    (sweep.sh for the supervisor, broker.sh and docs-fetch.sh for the
-    //    coding agents). Each is reported only when its content changed.
-    if !scripts_dir.is_dir() {
-        println!("  Created .git-paw/scripts/");
-    }
     let mut managed_changed = false;
-    for (rel, outcome) in refresh_root_scripts(&repo_root)? {
-        outcome.report(&rel);
-        managed_changed |= outcome.changed();
-    }
 
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor
     //    preferences and for the spec system to record in `[specs]`. For an
@@ -172,10 +170,12 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Updated .gitignore");
     }
 
-    // 6. Export the orchestrator and cli-setup skills in the standardized
-    //    layout, rendered from the (possibly just written) config.
+    // 6. Install every bundled package at the root under `.git-paw/skills/`
+    //    (rendered from the possibly just written config), with the helpers'
+    //    compatibility copies under `.git-paw/scripts/`. Each file is reported
+    //    only when its content changed.
     let config = config::load_config(&repo_root, None).unwrap_or_default();
-    for (rel, outcome) in export_skills(&repo_root, &config)? {
+    for (rel, outcome) in refresh_root_scripts(&repo_root, &config)? {
         outcome.report(&rel);
         managed_changed |= outcome.changed();
     }
@@ -207,71 +207,190 @@ pub fn run_init() -> Result<(), PawError> {
     Ok(())
 }
 
-/// Installs the [`bundled_scripts`] under `<repo_root>/.git-paw/scripts/`,
-/// writing only changed files, and returns each one's relative path and
-/// [`WriteOutcome`]. Init and every supervised launch call this, so a new
-/// skill never runs with an old `sweep.sh`.
+/// Installs every registered bundled package at the repository root under
+/// `.git-paw/skills/<package>/`, with its helpers' compatibility copies under
+/// `.git-paw/scripts/`, writing only files that are missing or differ, and
+/// returns each file's repository-relative path and [`WriteOutcome`].
+///
+/// Rendered files (`SKILL.md`, references) are compared with a fresh render
+/// from `config` as it is now ([`render_root_packages`]), so a config change
+/// made after `git paw init` — a `[supervisor]` gate command, say — reaches the
+/// root packages on the next call. `git paw init`, every `git paw start` and a
+/// drive loop bound to an existing session call this, so a skill never runs
+/// with an old helper and a fresh clone gets its root helpers without `init`.
+/// It never writes the config, `.gitignore` or `AGENTS.md`.
 ///
 /// # Errors
 ///
-/// Returns an error when a script cannot be written or is a symlink.
-pub fn refresh_root_scripts(repo_root: &Path) -> Result<Vec<(String, WriteOutcome)>, PawError> {
-    let scripts_dir = repo_root.join(".git-paw").join("scripts");
-    create_dir_if_missing(&scripts_dir)?;
-    bundled_scripts()
+/// Returns an error when a skill cannot be resolved, a file cannot be written,
+/// or a target (or a directory on the way) is a symlink.
+pub fn refresh_root_scripts(
+    repo_root: &Path,
+    config: &config::PawConfig,
+) -> Result<Vec<(String, WriteOutcome)>, PawError> {
+    let rendered = render_root_packages(repo_root, config)?;
+    install_packages(repo_root, &rendered)
+}
+
+/// Renders every registered bundled package for the repository root, from
+/// session-independent inputs: the current branch (the `supervisor` id when
+/// none resolves), the configured broker URL, the project name, the
+/// `[supervisor]` gate commands and the configured spec format. Pure apart
+/// from resolving overrides and the current branch: writes nothing, so
+/// `git paw doctor` can compare the installed root files with it.
+///
+/// # Errors
+///
+/// Returns an error when a package's skill cannot be resolved.
+pub fn render_root_packages(
+    repo_root: &Path,
+    config: &config::PawConfig,
+) -> Result<
+    Vec<(
+        &'static crate::skills::BundledPackage,
+        Vec<crate::skills::RenderedFile>,
+    )>,
+    PawError,
+> {
+    let skill_err = |e: crate::skills::SkillError| PawError::InitError(e.to_string());
+    let backends: Vec<crate::specs::SpecBackendKind> = crate::specs::resolved_spec_kind(config)
         .into_iter()
-        .map(|(name, content)| {
-            install_script(&scripts_dir.join(name), content)
-                .map(|outcome| (format!(".git-paw/scripts/{name}"), outcome))
+        .collect();
+    let supervisor = config.supervisor.clone().unwrap_or_default();
+    let branch = git::current_branch(repo_root)
+        .unwrap_or_else(|_| crate::surface::SUPERVISOR_AGENT_ID.to_string());
+    let broker_url = config.broker.url();
+    let project = git::project_name(repo_root);
+    let inputs = crate::skills::RenderInputs {
+        branch: &branch,
+        broker_url: &broker_url,
+        project: &project,
+        gates: supervisor.gate_commands(),
+        backends: &backends,
+    };
+    crate::skills::bundled_packages()
+        .iter()
+        .map(|package| {
+            let template = crate::skills::resolve(package.name, repo_root).map_err(skill_err)?;
+            let resolved = crate::skills::ResolvedPackage { package, template };
+            Ok((package, crate::skills::render_package(&resolved, &inputs)))
         })
         .collect()
 }
 
-/// Provisions the agent-side bundled helper scripts into an agent worktree's
-/// `.git-paw/scripts/` directory, from the same embedded assets [`run_init`]
-/// uses. Called at per-worktree setup (`git paw start` / `git paw add`) so the
-/// agent finds the helpers at the relative path its boot block invokes —
-/// without hand-copying them from `assets/`.
+/// Provisions the packages a launch path selected for an agent worktree
+/// ([`crate::skills::resolve_worktree_packages`]) into
+/// `<worktree_root>/.git-paw/skills/<package>/`, rendered for that agent, with
+/// their helpers' compatibility copies under `.git-paw/scripts/`. Called at
+/// per-worktree setup on every launch path (bare, spec-driven and supervisor
+/// `git paw start`, `git paw add`) before the agent's boot prompt, so the
+/// agent finds the helper at the path its boot block invokes without
+/// hand-copying it.
 ///
-/// A fresh worktree checkout has no `.git-paw/scripts/` (it is gitignored, so
-/// not part of the checked-out tree), so an agent's relative
-/// `.git-paw/scripts/broker.sh` invocation would otherwise fail until the
-/// agent copied it by hand. Sourcing the content from the embedded assets (the
-/// same ones `git paw init` installs) guarantees a worktree's helper matches
-/// the running binary's version rather than the repo's possibly-stale copy.
+/// A fresh worktree checkout has none of these (they are gitignored). Helpers
+/// always come from the binary's embedded registry, never from a skill
+/// override directory, so a worktree's helper matches the running binary.
+/// Idempotent: a reused worktree's files are rewritten only when missing or
+/// different.
 ///
-/// Idempotent — always (re)writes the scripts and re-sets the executable bit,
-/// so re-attaching a reused worktree refreshes them without error. The scripts
-/// written are exactly those of the packages
-/// [`crate::skills::packages_for_worktree`] selects: `broker.sh` when
-/// `broker_enabled`, `docs-fetch.sh` when `docs_base_url_configured`. The
-/// shared `_paw_common.sh` preamble accompanies whichever helper is
-/// provisioned — each one sources it, so a helper without it cannot run.
-/// Helpers always come from the binary's embedded registry, never from a skill
-/// override directory.
+/// # Errors
+///
+/// Returns an error when a file cannot be written or a target is a symlink.
 pub fn provision_worktree_helpers(
     worktree_root: &Path,
-    broker_enabled: bool,
-    docs_base_url_configured: bool,
+    packages: &[crate::skills::ResolvedPackage],
+    inputs: &crate::skills::RenderInputs<'_>,
 ) -> Result<(), PawError> {
-    let scripts_dir = worktree_root.join(".git-paw").join("scripts");
-    create_dir_if_missing(&scripts_dir)?;
-    let inputs = crate::skills::WorktreeInputs {
-        broker_enabled,
-        docs_base_url_configured,
-    };
-    let mut installed: Vec<&str> = Vec::new();
-    for file in crate::skills::packages_for_worktree(inputs)
-        .into_iter()
-        .flat_map(|p| p.scripts)
-    {
-        if !installed.contains(&file.file_name()) {
-            install_script(&scripts_dir.join(file.file_name()), file.content)?;
-            installed.push(file.file_name());
-        }
-    }
+    let rendered: Vec<_> = packages
+        .iter()
+        .map(|resolved| {
+            (
+                resolved.package,
+                crate::skills::render_package(resolved, inputs),
+            )
+        })
+        .collect();
+    install_packages(worktree_root, &rendered)?;
     Ok(())
 }
+
+/// The one writer of installed packages: writes each rendered package under
+/// `<root>/.git-paw/skills/<package>/` (scripts `0o755`) and each helper's
+/// compatibility copy — `_paw_common.sh` included — under
+/// `<root>/.git-paw/scripts/`, from the same embedded constants, through the
+/// atomic [`write_managed_file`]. Also writes the self-ignoring
+/// `.git-paw/skills/.gitignore`, which keeps the packages out of `git add -A`
+/// even where `.gitignore` predates the `.git-paw/skills/` entry.
+fn install_packages(
+    root: &Path,
+    rendered: &[(
+        &'static crate::skills::BundledPackage,
+        Vec<crate::skills::RenderedFile>,
+    )],
+) -> Result<Vec<(String, WriteOutcome)>, PawError> {
+    // A committed symlink anywhere on the way would redirect the writes
+    // outside the checkout; these directories hold binary-managed files only.
+    let mut dirs = vec![
+        ".git-paw".to_string(),
+        SKILLS_DIR.to_string(),
+        COMPAT_SCRIPTS_DIR.to_string(),
+    ];
+    for (package, files) in rendered {
+        let package_dir = format!("{SKILLS_DIR}/{}", package.name);
+        for file in files {
+            if let Some((sub, _)) = file.path.rsplit_once('/') {
+                dirs.push(format!("{package_dir}/{sub}"));
+            }
+        }
+        dirs.push(package_dir);
+    }
+    for dir in &dirs {
+        refuse_symlink(&root.join(dir))?;
+    }
+
+    create_dir_if_missing(&root.join(SKILLS_DIR))?;
+    let ignore_rel = format!("{SKILLS_DIR}/.gitignore");
+    let mut outcomes = vec![(
+        ignore_rel.clone(),
+        write_managed_file(&root.join(&ignore_rel), "*\n")?,
+    )];
+    let mut compat: Vec<(&'static str, &'static str)> = Vec::new();
+    for (package, files) in rendered {
+        for file in files {
+            let rel = format!("{SKILLS_DIR}/{}/{}", package.name, file.path);
+            let path = root.join(&rel);
+            if let Some(parent) = path.parent() {
+                create_dir_if_missing(parent)?;
+            }
+            let outcome = if file.executable {
+                install_script(&path, &file.content)?
+            } else {
+                write_managed_file(&path, &file.content)?
+            };
+            outcomes.push((rel, outcome));
+        }
+        for script in package.scripts {
+            if !compat.iter().any(|(name, _)| *name == script.file_name()) {
+                compat.push((script.file_name(), script.content));
+            }
+        }
+    }
+    if !compat.is_empty() {
+        create_dir_if_missing(&root.join(COMPAT_SCRIPTS_DIR))?;
+    }
+    for (name, content) in compat {
+        let rel = format!("{COMPAT_SCRIPTS_DIR}/{name}");
+        let outcome = install_script(&root.join(&rel), content)?;
+        outcomes.push((rel, outcome));
+    }
+    Ok(outcomes)
+}
+
+/// The deprecated compatibility directory every installed helper is also
+/// copied to, relative to the checkout root. Nothing bundled names it; it
+/// keeps invocations of the pre-package path working through 0.x and is
+/// removed under the v1.0.0 deprecation policy.
+pub const COMPAT_SCRIPTS_DIR: &str = ".git-paw/scripts";
 
 /// What a binary-managed write did to the file on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,89 +421,8 @@ impl WriteOutcome {
     }
 }
 
-/// The exported skill directories under `<repo>/.git-paw/skills/`, relative
-/// to the repository root, in write order — one per root-only bundled package
-/// ([`crate::skills::ProvisionGate::RootOnly`]), in registry order.
-#[must_use]
-pub fn exported_skill_dirs() -> Vec<String> {
-    root_only_packages()
-        .map(|p| format!("{SKILLS_DIR}/{}", p.name))
-        .collect()
-}
-
-/// The root-only bundled packages, in registry order.
-fn root_only_packages() -> impl Iterator<Item = &'static crate::skills::BundledPackage> {
-    crate::skills::bundled_packages()
-        .iter()
-        .filter(|p| p.gate == crate::skills::ProvisionGate::RootOnly)
-}
-
-/// Writes the exported skills — the orchestrator skill rendered by
-/// [`crate::skills::render_standardized`] and the resolved `cli-setup`
-/// skill — in the standardized layout under `<repo_root>/.git-paw/skills/`.
-///
-/// The orchestrator skill renders from session-independent inputs only: the
-/// `[supervisor]` gate commands and the configured `[specs]` format (none →
-/// the no-backend doctrine sentinel). `git paw init` and `git paw start` both
-/// call this, so the two write the same bytes for the same config and binary.
-/// Written in the main checkout only; no worktree receives them.
-///
-/// Returns each file's repository-relative path with its [`WriteOutcome`].
-///
-/// # Errors
-///
-/// Returns an error when a skill cannot be resolved, a directory cannot be
-/// created, or a file cannot be written (including a symlink at the target).
-pub fn export_skills(
-    repo_root: &Path,
-    config: &config::PawConfig,
-) -> Result<Vec<(String, WriteOutcome)>, PawError> {
-    let skill_err = |e: crate::skills::SkillError| PawError::InitError(e.to_string());
-
-    let backends: Vec<crate::specs::SpecBackendKind> = crate::specs::resolved_spec_kind(config)
-        .into_iter()
-        .collect();
-    let supervisor = config.supervisor.clone().unwrap_or_default();
-    let mut rendered = Vec::new();
-    for package in root_only_packages() {
-        let template = crate::skills::resolve(package.name, repo_root).map_err(skill_err)?;
-        let content = if package.name == crate::skills::ORCHESTRATOR_SKILL {
-            crate::skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
-        } else {
-            crate::skills::to_skill_md(&template)
-        };
-        rendered.push((format!("{SKILLS_DIR}/{}", package.name), content));
-    }
-
-    // A committed symlink anywhere on the way would redirect the writes
-    // outside the repository; these directories hold binary-managed files only.
-    for dir in [".git-paw", SKILLS_DIR]
-        .into_iter()
-        .chain(rendered.iter().map(|(dir, _)| dir.as_str()))
-    {
-        refuse_symlink(&repo_root.join(dir))?;
-    }
-    create_dir_if_missing(&repo_root.join(SKILLS_DIR))?;
-
-    // Self-ignoring: keeps the exports out of `git add -A` even in a repository
-    // whose `.gitignore` predates the `.git-paw/skills/` entry (a `start` with
-    // a newer binary, before `init` re-ran).
-    let ignore_rel = format!("{SKILLS_DIR}/.gitignore");
-    let mut outcomes = vec![(
-        ignore_rel.clone(),
-        write_managed_file(&repo_root.join(&ignore_rel), "*\n")?,
-    )];
-    for (dir, content) in &rendered {
-        create_dir_if_missing(&repo_root.join(dir))?;
-        let rel = format!("{dir}/SKILL.md");
-        let outcome = write_managed_file(&repo_root.join(&rel), content)?;
-        outcomes.push((rel, outcome));
-    }
-    Ok(outcomes)
-}
-
-/// The directory the exported skills live under, relative to the repository
-/// root.
+/// The directory the bundled packages are installed under, relative to the
+/// checkout root.
 pub const SKILLS_DIR: &str = ".git-paw/skills";
 
 /// Fails when `path` exists as a symlink.
@@ -402,62 +440,146 @@ fn refuse_symlink(path: &Path) -> Result<(), PawError> {
 /// Writes binary-managed `content` to `path` unless the file already holds
 /// exactly that content, and reports what happened.
 ///
-/// REFUSES when `path` is a symlink: `fs::write` follows links, so a link
-/// committed at a binary-managed path in a hostile repository would have
-/// this overwrite its target. A symlink there is never legitimate.
+/// The new content is written to a temporary file created exclusively in
+/// `path`'s own directory, given its final mode, and renamed over `path`. A
+/// same-directory rename is atomic, so a reader that already has the old file
+/// open (bash reads a running script incrementally) keeps reading the old
+/// bytes, and the next reader sees the complete new file — never a partial
+/// one. The temporary file is removed on any error.
+///
+/// REFUSES when `path` is a symlink: a link committed at a binary-managed path
+/// in a hostile repository is never legitimate, and naming it is safer than
+/// replacing it silently.
 fn write_managed_file(path: &Path, content: &str) -> Result<WriteOutcome, PawError> {
+    write_managed(path, content, None)
+}
+
+/// Writes a bundled helper script `content` to `path` through
+/// [`write_managed_file`]'s atomic replacement and leaves it executable (mode
+/// `0o755` on Unix) — already executable when the rename makes it visible.
+/// The scripts are binary-managed content: users with local edits SHALL back
+/// the file up before re-running `git paw init`.
+///
+/// REFUSES when `path` is a symlink. Provisioning runs on every launch path,
+/// into every agent worktree; a link committed at `.git-paw/scripts/broker.sh`
+/// in a hostile repository must never have its target overwritten or chmod-ed,
+/// so the write stops and names the path.
+fn install_script(path: &Path, content: &str) -> Result<WriteOutcome, PawError> {
+    write_managed(path, content, Some(0o755))
+}
+
+/// Shared body of [`write_managed_file`] and [`install_script`]; `mode` is the
+/// Unix mode to leave the file with (`None` keeps an existing file's mode, or
+/// `0o644` for a new one).
+fn write_managed(path: &Path, content: &str, mode: Option<u32>) -> Result<WriteOutcome, PawError> {
     refuse_symlink(path)?;
     let outcome = match fs::read(path) {
-        Ok(existing) if existing == content.as_bytes() => return Ok(WriteOutcome::Unchanged),
+        Ok(existing) if existing == content.as_bytes() => {
+            set_mode_if_needed(path, mode)?;
+            return Ok(WriteOutcome::Unchanged);
+        }
         Ok(_) => WriteOutcome::Updated,
         Err(_) => WriteOutcome::Created,
     };
-    fs::write(path, content)
-        .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        mode.or_else(|| {
+            fs::metadata(path)
+                .ok()
+                .map(|m| m.permissions().mode() & 0o7777)
+        })
+        .unwrap_or(0o644)
+    };
+    #[cfg(not(unix))]
+    let mode = mode.unwrap_or(0);
+    replace_atomically(path, content.as_bytes(), mode)?;
     Ok(outcome)
 }
 
-/// Writes a bundled helper script `content` to `path` and marks it
-/// executable (mode `0o755` on Unix). Overwrites any existing file at `path`
-/// whose content differs (the scripts are treated as binary-managed content
-/// — users with local edits SHALL back the file up before re-running
-/// `git paw init`). Shared by the `sweep.sh` and `broker.sh` installers.
-///
-/// REFUSES when `path` is a symlink. `fs::write` and `set_permissions` both
-/// follow links, so a link committed at `.git-paw/scripts/broker.sh` in a
-/// hostile repository would have this overwrite its target with the helper's
-/// content AND chmod it `0755` — and provisioning now runs on every launch
-/// path, into every agent worktree. A symlink there is never legitimate (the
-/// directory holds binary-managed files), so the safe answer is to stop and
-/// name the path rather than guess what the operator meant.
-fn install_script(path: &Path, content: &str) -> Result<WriteOutcome, PawError> {
-    if let Ok(meta) = fs::symlink_metadata(path)
-        && meta.file_type().is_symlink()
-    {
-        return Err(PawError::InitError(format!(
-            "refusing to write bundled helper through a symlink at '{}' — \
-             remove it and re-run; `.git-paw/scripts/` holds binary-managed files",
-            path.display()
-        )));
-    }
-    let outcome = write_managed_file(path, content)?;
-
+/// Re-sets `mode` on an unchanged file whose mode differs (an executable bit
+/// lost by hand); a no-op off Unix or when `mode` is `None`.
+fn set_mode_if_needed(path: &Path, mode: Option<u32>) -> Result<(), PawError> {
     #[cfg(unix)]
-    {
+    if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path)
+        let current = fs::metadata(path)
             .map_err(|e| PawError::InitError(format!("failed to stat '{}': {e}", path.display())))?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).map_err(|e| {
-            PawError::InitError(format!(
-                "failed to set executable bit on '{}': {e}",
-                path.display()
-            ))
-        })?;
+            .permissions()
+            .mode();
+        if current & 0o7777 != mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| {
+                PawError::InitError(format!(
+                    "failed to set the mode of '{}': {e}",
+                    path.display()
+                ))
+            })?;
+        }
     }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
 
-    Ok(outcome)
+/// Writes `bytes` to a fresh temporary file beside `path`, sets `mode` (Unix),
+/// and renames it over `path`; the temporary file is removed on any error.
+fn replace_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PawError> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let write_err = |e: std::io::Error| {
+        PawError::InitError(format!("failed to write '{}': {e}", path.display()))
+    };
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+
+    // Exclusive creation: an existing file (or a planted symlink) at the
+    // temporary path fails the open instead of being followed; retry with a
+    // fresh suffix.
+    let (tmp, mut file) = loop {
+        let candidate = dir.join(format!(
+            ".{name}.tmp-{}-{nanos:x}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(write_err(e)),
+        }
+    };
+
+    let result = (|| {
+        file.write_all(bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(write_err(e));
+    }
+    Ok(())
 }
 
 /// Creates a directory if it doesn't exist. Returns `true` if created.
@@ -1728,11 +1850,10 @@ test_command = "just check"
         assert_eq!(first, second);
     }
 
-    // --- provision_worktree_helpers ---
+    // --- package installation ---
 
     /// Returns `true` if `path` exists and carries the Unix executable bit.
-    /// Non-Unix targets only assert existence (mode bits are Unix-only, matching
-    /// [`install_script`]'s `#[cfg(unix)]` gate).
+    /// Non-Unix targets only assert existence (mode bits are Unix-only).
     fn is_executable(path: &Path) -> bool {
         if !path.exists() {
             return false;
@@ -1749,21 +1870,45 @@ test_command = "just check"
         }
     }
 
-    /// `fs::write` and `set_permissions` both follow symlinks, so a link
-    /// committed at `.git-paw/scripts/broker.sh` in a hostile repository would
-    /// have provisioning overwrite its target and chmod it `0755`. Provisioning
-    /// must refuse and name the path, leaving the target untouched.
-    /// A committed symlink at `.git-paw/skills` would redirect the exports
-    /// outside the repository; the export refuses and writes nothing there.
+    fn render_inputs() -> crate::skills::RenderInputs<'static> {
+        crate::skills::RenderInputs {
+            branch: "feat/x",
+            broker_url: "http://127.0.0.1:9119",
+            project: "proj",
+            gates: crate::skills::GateCommands::default(),
+            backends: &[],
+        }
+    }
+
+    /// Provisions the packages a worktree with these inputs selects.
+    fn provision(worktree: &Path, broker: bool, docs: bool) -> Result<(), PawError> {
+        let empty = TempDir::new().unwrap();
+        let packages = crate::skills::resolve_worktree_packages(
+            crate::skills::WorktreeInputs {
+                broker_enabled: broker,
+                docs_base_url_configured: docs,
+            },
+            empty.path(),
+        )
+        .unwrap();
+        provision_worktree_helpers(worktree, &packages, &render_inputs())
+    }
+
+    fn refresh(root: &Path) -> Vec<(String, WriteOutcome)> {
+        refresh_root_scripts(root, &config::PawConfig::default()).unwrap()
+    }
+
+    /// A committed symlink at `.git-paw/skills` would redirect the installs
+    /// outside the repository; the refresh refuses and writes nothing there.
     #[cfg(unix)]
     #[test]
-    fn export_refuses_a_symlinked_skills_directory() {
+    fn install_refuses_a_symlinked_skills_directory() {
         let repo = TempDir::new().unwrap();
         let elsewhere = TempDir::new().unwrap();
         fs::create_dir_all(repo.path().join(".git-paw")).unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".git-paw/skills")).unwrap();
 
-        let result = export_skills(repo.path(), &config::PawConfig::default());
+        let result = refresh_root_scripts(repo.path(), &config::PawConfig::default());
         assert!(
             result.is_err(),
             "a symlinked skills directory must be refused"
@@ -1771,9 +1916,12 @@ test_command = "just check"
         assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
     }
 
+    // skill-packages / Scenario: A symlink at an install target is refused —
+    // the write names the path and leaves the link's target untouched (and
+    // un-chmod-ed).
     #[cfg(unix)]
     #[test]
-    fn provision_refuses_to_write_a_helper_through_a_symlink() {
+    fn a_symlink_at_an_install_target_is_refused() {
         use std::os::unix::fs::PermissionsExt;
 
         let worktree = TempDir::new().unwrap();
@@ -1786,19 +1934,19 @@ test_command = "just check"
         fs::create_dir_all(&scripts).unwrap();
         std::os::unix::fs::symlink(&victim, scripts.join("broker.sh")).unwrap();
 
-        let err = provision_worktree_helpers(worktree.path(), true, false)
-            .expect_err("provisioning must refuse to write through a symlink");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("symlink") && msg.contains("broker.sh"),
-            "the error must name the refusal and the path; got: {msg}"
-        );
-
-        assert_eq!(
-            fs::read_to_string(&victim).unwrap(),
-            "untouched",
-            "the symlink target must not be overwritten"
-        );
+        for result in [
+            provision(worktree.path(), true, false),
+            refresh_root_scripts(worktree.path(), &config::PawConfig::default()).map(|_| ()),
+        ] {
+            let msg = result
+                .expect_err("the install must refuse to write through a symlink")
+                .to_string();
+            assert!(
+                msg.contains("symlink") && msg.contains(".git-paw/scripts/broker.sh"),
+                "the error must name the refusal and the path; got: {msg}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
         assert_eq!(
             fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
             0o600,
@@ -1806,123 +1954,259 @@ test_command = "just check"
         );
     }
 
-    // Scenario: start provisions the broker helper into each worktree — after a
-    // worktree setup with the broker enabled, broker.sh exists and is executable.
+    // skill-packages / Scenario: A reader of the old script is not cut off by
+    // a refresh — an open handle keeps reading the complete stale bytes, and
+    // the path then holds the complete bundled script, already executable.
     #[test]
-    fn provision_writes_executable_broker_helper_when_broker_enabled() {
+    fn a_reader_of_the_old_script_is_not_cut_off_by_a_refresh() {
+        use std::io::Read as _;
+
         let dir = TempDir::new().unwrap();
-        provision_worktree_helpers(dir.path(), true, false).unwrap();
-        let broker = dir.path().join(".git-paw/scripts/broker.sh");
-        assert!(
-            is_executable(&broker),
-            "broker.sh must exist and be executable"
-        );
-        // Version-matched: content is byte-identical to the embedded asset the
-        // running binary ships (the same one `git paw init` installs).
-        assert_eq!(
-            fs::read_to_string(&broker).unwrap(),
-            bundled_script("broker.sh")
-        );
-    }
+        refresh(dir.path());
+        let sweep = dir
+            .path()
+            .join(".git-paw/skills/orchestrator/scripts/sweep.sh");
+        let stale = format!("#!/usr/bin/env bash\n# stale\n{}\n", "x".repeat(64 * 1024));
+        fs::write(&sweep, &stale).unwrap();
+        let mut reader = fs::File::open(&sweep).unwrap();
 
-    // Scenario: docs-fetch helper provisioned only when configured — docs-fetch.sh
-    // is provisioned iff `docs_base_url` is configured, alongside broker.sh.
-    #[test]
-    fn provision_writes_docs_fetch_only_when_configured() {
-        // docs_base_url unset → docs-fetch.sh is NOT provisioned.
-        let unset = TempDir::new().unwrap();
-        provision_worktree_helpers(unset.path(), true, false).unwrap();
-        assert!(
-            !unset.path().join(".git-paw/scripts/docs-fetch.sh").exists(),
-            "docs-fetch.sh must not be provisioned when docs_base_url is unset"
-        );
+        refresh(dir.path());
 
-        // docs_base_url configured → docs-fetch.sh provisioned alongside broker.sh.
-        let set = TempDir::new().unwrap();
-        provision_worktree_helpers(set.path(), true, true).unwrap();
-        let docs_fetch = set.path().join(".git-paw/scripts/docs-fetch.sh");
-        assert!(
-            is_executable(&docs_fetch),
-            "docs-fetch.sh must be provisioned and executable when configured"
-        );
-        assert_eq!(
-            fs::read_to_string(&docs_fetch).unwrap(),
-            bundled_script("docs-fetch.sh")
-        );
-        assert!(
-            is_executable(&set.path().join(".git-paw/scripts/broker.sh")),
-            "broker.sh is provisioned alongside docs-fetch.sh"
-        );
-    }
-
-    // Broker disabled → broker.sh is not provisioned (mirrors the docs-fetch gate
-    // for the broker side of the requirement).
-    #[test]
-    fn provision_skips_broker_helper_when_broker_disabled() {
-        let dir = TempDir::new().unwrap();
-        provision_worktree_helpers(dir.path(), false, false).unwrap();
-        assert!(
-            !dir.path().join(".git-paw/scripts/broker.sh").exists(),
-            "broker.sh must not be provisioned when the broker is disabled"
-        );
-    }
-
-    // Scenario: provisioning is idempotent and version-matched — re-attaching an
-    // existing worktree refreshes the scripts without error, and a stale on-disk
-    // helper is overwritten with the running binary's bundled version.
-    #[test]
-    fn provision_is_idempotent_and_refreshes_stale_helper() {
-        let dir = TempDir::new().unwrap();
-        // First attach seeds the helper.
-        provision_worktree_helpers(dir.path(), true, true).unwrap();
-        // Simulate a stale worktree copy from an older binary.
-        let broker = dir.path().join(".git-paw/scripts/broker.sh");
-        fs::write(&broker, "#!/usr/bin/env bash\n# stale\n").unwrap();
-        // Re-attach: must succeed (no error on the pre-existing scripts dir) and
-        // refresh the helper back to the embedded version.
-        provision_worktree_helpers(dir.path(), true, true).unwrap();
-        assert!(
-            is_executable(&broker),
-            "broker.sh stays executable after refresh"
-        );
-        assert_eq!(
-            fs::read_to_string(&broker).unwrap(),
-            bundled_script("broker.sh"),
-            "re-attach refreshes the helper to the running binary's version"
-        );
-    }
-
-    // supervisor-launch / Scenario: A stale sweep.sh is replaced on a
-    // supervised launch (the refresh the launch calls).
-    #[test]
-    fn refresh_root_scripts_replaces_a_stale_script() {
-        let dir = TempDir::new().unwrap();
-        refresh_root_scripts(dir.path()).unwrap();
-        let sweep = dir.path().join(".git-paw/scripts/sweep.sh");
-        fs::write(&sweep, "#!/usr/bin/env bash\n# v0.18 sweep\n").unwrap();
-
-        let outcomes = refresh_root_scripts(dir.path()).unwrap();
-
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, stale, "the open handle must read the whole old file");
         assert_eq!(
             fs::read_to_string(&sweep).unwrap(),
             bundled_script("sweep.sh")
         );
         assert!(is_executable(&sweep));
+    }
+
+    // skill-packages / Scenario: No temporary file is left behind.
+    #[test]
+    fn no_temporary_file_is_left_behind() {
+        let dir = TempDir::new().unwrap();
+        let installed: Vec<String> = refresh(dir.path()).into_iter().map(|(r, _)| r).collect();
+        // A second pass over stale files exercises the replace path too.
+        fs::write(dir.path().join(".git-paw/scripts/sweep.sh"), "stale").unwrap();
+        refresh(dir.path());
+
+        let mut dirs = vec![dir.path().join(COMPAT_SCRIPTS_DIR)];
+        for package in crate::skills::bundled_packages() {
+            let root = dir.path().join(SKILLS_DIR).join(package.name);
+            dirs.push(root.join("scripts"));
+            dirs.push(root);
+        }
+        for d in dirs.into_iter().filter(|d| d.is_dir()) {
+            for entry in fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(installed.contains(&rel), "unexpected file {rel}");
+            }
+        }
+    }
+
+    // skill-packages / Scenario: Init installs every package at the root (the
+    // refresh `run_init` calls) — every registered package's SKILL.md, its
+    // helpers executable under `scripts/`, and no `assets/`.
+    #[test]
+    fn the_root_refresh_installs_every_package() {
+        let dir = TempDir::new().unwrap();
+        refresh(dir.path());
+        for package in crate::skills::bundled_packages() {
+            let root = dir.path().join(SKILLS_DIR).join(package.name);
+            assert!(root.join("SKILL.md").is_file(), "{}", package.name);
+            assert!(!root.join("assets").exists(), "{}", package.name);
+            for script in package.scripts {
+                let path = root.join(script.path);
+                assert!(is_executable(&path), "{}", path.display());
+                assert_eq!(fs::read_to_string(&path).unwrap(), script.content);
+            }
+        }
+    }
+
+    // skill-packages / Scenario: The compatibility copy matches the package
+    // copy — byte-identical, same executable mode.
+    #[test]
+    fn the_compatibility_copy_matches_the_package_copy() {
+        let dir = TempDir::new().unwrap();
+        refresh(dir.path());
+        for package in crate::skills::bundled_packages() {
+            for script in package.scripts {
+                let package_copy = dir
+                    .path()
+                    .join(SKILLS_DIR)
+                    .join(package.name)
+                    .join(script.path);
+                let compat = dir.path().join(COMPAT_SCRIPTS_DIR).join(script.file_name());
+                assert_eq!(fs::read(&compat).unwrap(), fs::read(&package_copy).unwrap());
+                assert!(is_executable(&compat), "{}", compat.display());
+            }
+        }
+    }
+
+    // skill-packages / Scenario: The worktree's SKILL.md is rendered for that
+    // agent.
+    #[test]
+    fn the_worktree_skill_md_is_rendered_for_that_agent() {
+        let dir = TempDir::new().unwrap();
+        provision(dir.path(), true, false).unwrap();
+        let skill =
+            fs::read_to_string(dir.path().join(".git-paw/skills/coordination/SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\nname: coordination\n"), "{skill}");
+        assert!(skill.contains("feat-x"), "{skill}");
+        for placeholder in [
+            "{{BRANCH_ID}}",
+            "{{GIT_PAW_BROKER_URL}}",
+            "{{PROJECT_NAME}}",
+        ] {
+            assert!(
+                !skill.contains(placeholder),
+                "{placeholder} left in {skill}"
+            );
+        }
+    }
+
+    // broker-agent-helper / Scenario: start provisions the broker helper into
+    // each worktree — executable, matching the embedded asset, with its
+    // byte-identical compatibility copy.
+    #[test]
+    fn provision_writes_executable_broker_helper_when_broker_enabled() {
+        let dir = TempDir::new().unwrap();
+        provision(dir.path(), true, false).unwrap();
+        let broker = dir
+            .path()
+            .join(".git-paw/skills/coordination/scripts/broker.sh");
+        assert!(is_executable(&broker), "broker.sh must be executable");
+        assert_eq!(
+            fs::read_to_string(&broker).unwrap(),
+            bundled_script("broker.sh")
+        );
+        let compat = dir.path().join(".git-paw/scripts/broker.sh");
+        assert!(is_executable(&compat));
+        assert_eq!(fs::read(&compat).unwrap(), fs::read(&broker).unwrap());
+        assert!(!dir.path().join(".git-paw/skills/orchestrator").exists());
+    }
+
+    // broker-agent-helper / Scenario: docs-fetch helper provisioned only when
+    // configured.
+    #[test]
+    fn provision_writes_docs_fetch_only_when_configured() {
+        let unset = TempDir::new().unwrap();
+        provision(unset.path(), true, false).unwrap();
+        assert!(!unset.path().join(".git-paw/skills/docs-fetch").exists());
+        assert!(!unset.path().join(".git-paw/scripts/docs-fetch.sh").exists());
+
+        let set = TempDir::new().unwrap();
+        provision(set.path(), true, true).unwrap();
+        let docs_fetch = set
+            .path()
+            .join(".git-paw/skills/docs-fetch/scripts/docs-fetch.sh");
+        assert!(is_executable(&docs_fetch));
+        assert_eq!(
+            fs::read_to_string(&docs_fetch).unwrap(),
+            bundled_script("docs-fetch.sh")
+        );
+        assert!(is_executable(
+            &set.path().join(".git-paw/scripts/docs-fetch.sh")
+        ));
+        assert!(is_executable(
+            &set.path()
+                .join(".git-paw/skills/coordination/scripts/broker.sh")
+        ));
+    }
+
+    // Broker disabled → no coordination package (mirrors the docs-fetch gate
+    // for the broker side of the requirement).
+    #[test]
+    fn provision_skips_broker_helper_when_broker_disabled() {
+        let dir = TempDir::new().unwrap();
+        provision(dir.path(), false, false).unwrap();
+        assert!(!dir.path().join(".git-paw/skills/coordination").exists());
+        assert!(!dir.path().join(".git-paw/scripts/broker.sh").exists());
+    }
+
+    // broker-agent-helper / Scenario: provisioning is idempotent and
+    // version-matched — re-attaching refreshes a stale helper and its
+    // compatibility copy without error.
+    #[test]
+    fn provision_is_idempotent_and_refreshes_stale_helper() {
+        let dir = TempDir::new().unwrap();
+        provision(dir.path(), true, true).unwrap();
+        let broker = dir
+            .path()
+            .join(".git-paw/skills/coordination/scripts/broker.sh");
+        let compat = dir.path().join(".git-paw/scripts/broker.sh");
+        fs::write(&broker, "#!/usr/bin/env bash\n# stale\n").unwrap();
+        fs::write(&compat, "#!/usr/bin/env bash\n# stale\n").unwrap();
+
+        provision(dir.path(), true, true).unwrap();
+        for path in [&broker, &compat] {
+            assert!(is_executable(path));
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                bundled_script("broker.sh")
+            );
+        }
+    }
+
+    // supervisor-launch / Scenario: A stale sweep.sh is replaced on a
+    // supervised launch (the refresh the launch calls) — at the package path
+    // and in its compatibility copy.
+    #[test]
+    fn refresh_root_scripts_replaces_a_stale_script() {
+        let dir = TempDir::new().unwrap();
+        refresh(dir.path());
+        let package_copy = dir
+            .path()
+            .join(".git-paw/skills/orchestrator/scripts/sweep.sh");
+        let compat = dir.path().join(".git-paw/scripts/sweep.sh");
+        for path in [&package_copy, &compat] {
+            fs::write(path, "#!/usr/bin/env bash\n# v0.18 sweep\n").unwrap();
+        }
+
+        let outcomes = refresh(dir.path());
+
+        for path in [&package_copy, &compat] {
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                bundled_script("sweep.sh")
+            );
+            assert!(is_executable(path));
+        }
         let changed: Vec<&str> = outcomes
             .iter()
             .filter(|(_, o)| o.changed())
             .map(|(rel, _)| rel.as_str())
             .collect();
-        assert_eq!(changed, [".git-paw/scripts/sweep.sh"]);
+        assert_eq!(
+            changed,
+            [
+                ".git-paw/skills/orchestrator/scripts/sweep.sh",
+                ".git-paw/scripts/sweep.sh"
+            ]
+        );
     }
 
-    // supervisor-launch / Scenario: An up-to-date script is not rewritten.
+    // supervisor-launch / Scenario: An up-to-date script is not rewritten —
+    // every package file and compatibility copy keeps its mtime.
     #[test]
     fn refresh_root_scripts_leaves_current_scripts_untouched() {
         let dir = TempDir::new().unwrap();
-        let first = refresh_root_scripts(dir.path()).unwrap();
-        assert_eq!(first.len(), bundled_scripts().len());
+        let first = refresh(dir.path());
         assert!(first.iter().all(|(_, o)| *o == WriteOutcome::Created));
+        assert!(
+            first
+                .iter()
+                .any(|(rel, _)| rel == ".git-paw/scripts/sweep.sh")
+        );
 
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
         for (rel, _) in &first {
@@ -1934,8 +2218,9 @@ test_command = "just check"
                 .unwrap();
         }
 
-        let second = refresh_root_scripts(dir.path()).unwrap();
+        let second = refresh(dir.path());
 
+        assert_eq!(second.len(), first.len());
         for (rel, outcome) in &second {
             assert_eq!(*outcome, WriteOutcome::Unchanged, "{rel}");
             let mtime = fs::metadata(dir.path().join(rel))
@@ -1944,5 +2229,32 @@ test_command = "just check"
                 .unwrap();
             assert_eq!(mtime, old, "{rel} was rewritten");
         }
+    }
+
+    // skill-packages / Scenario: A gate command configured after init reaches
+    // the root skill on the next start — the refresh compares with a fresh
+    // render of the current config.
+    #[test]
+    fn the_root_refresh_renders_from_the_current_config() {
+        let dir = TempDir::new().unwrap();
+        refresh(dir.path());
+        let skill = dir.path().join(".git-paw/skills/orchestrator/SKILL.md");
+        assert!(
+            fs::read_to_string(&skill)
+                .unwrap()
+                .contains("(not configured)")
+        );
+
+        let mut config = config::PawConfig::default();
+        config.supervisor = Some(config::SupervisorConfig {
+            test_command: Some("make test".to_string()),
+            ..config::SupervisorConfig::default()
+        });
+        let outcomes = refresh_root_scripts(dir.path(), &config).unwrap();
+
+        assert!(fs::read_to_string(&skill).unwrap().contains("make test"));
+        assert!(outcomes.iter().any(|(rel, o)| {
+            rel == ".git-paw/skills/orchestrator/SKILL.md" && *o == WriteOutcome::Updated
+        }));
     }
 }

@@ -9,7 +9,7 @@
 
 fn supervisor_skill() -> String {
     git_paw::skills::bundled_package("orchestrator")
-        .map(|p| p.skill_md.content.to_string())
+        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
         .expect("orchestrator.md is at the expected path")
 }
 

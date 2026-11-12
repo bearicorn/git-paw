@@ -293,14 +293,71 @@ fn exit_code_is_non_zero_exactly_when_a_check_fails() {
     }
 }
 
+// preflight-diagnostics / Scenario: An uninitialised repository is reported
+// once (PK-07) — no `.git-paw/config.toml`, so one ⚠ package line and no ✗
+// for a package, helper or compatibility copy.
 #[test]
-fn an_unprovisioned_repository_fails_on_the_missing_bundled_scripts() {
+fn an_uninitialised_repository_is_reported_once() {
     let sandbox = Sandbox::new();
+    let (_code, document) = sandbox.doctor_json();
+
+    let group: Vec<&serde_json::Value> = checks(&document)
+        .iter()
+        .filter(|c| c["group"] == "Bundled scripts")
+        .collect();
+    let lines: Vec<&&serde_json::Value> = group
+        .iter()
+        .filter(|c| c["name"] != "python3" && c["name"] != "skill sources")
+        .collect();
+    assert_eq!(lines.len(), 1, "exactly one package line: {document}");
+    assert_eq!(lines[0]["status"], "warn", "{}", lines[0]);
+    assert!(
+        lines[0]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not initialised"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["remedy"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("git paw init"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        group
+            .iter()
+            .all(|c| c["status"] != "fail" || c["name"] == "skill sources"),
+        "no ✗ for a package, helper or copy: {document}"
+    );
+}
+
+// preflight-diagnostics / Scenario: A bundled script is missing — in an
+// initialised repository, a missing package helper is ✗ naming `git paw init`.
+#[test]
+fn a_missing_package_helper_fails_naming_init() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    std::fs::remove_file(
+        sandbox
+            .repo
+            .join(".git-paw/skills/orchestrator/scripts/sweep.sh"),
+    )
+    .expect("remove sweep.sh");
     let (code, document) = sandbox.doctor_json();
 
     let sweep = checks(&document)
         .iter()
-        .find(|c| c["group"] == "Bundled scripts" && c["name"] == "sweep.sh")
+        .find(|c| {
+            c["group"] == "Bundled scripts"
+                && c["name"] == "sweep.sh"
+                && c["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains(".git-paw/skills/orchestrator/scripts/sweep.sh"))
+        })
         .unwrap_or_else(|| panic!("sweep.sh should be checked: {document}"));
     assert_eq!(sweep["status"], "fail");
     assert!(
@@ -311,6 +368,51 @@ fn an_unprovisioned_repository_fails_on_the_missing_bundled_scripts() {
         "the remedy should point at `git paw init`; check: {sweep}"
     );
     assert_ne!(code, 0);
+}
+
+// preflight-diagnostics / Scenario: A root skill rendered before a config
+// change is stale (PK-01) — ⚠ naming `git paw start` or `git paw init`, and
+// the file is left byte-identical.
+#[test]
+fn a_root_skill_rendered_before_a_config_change_is_stale() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let skill = sandbox.repo.join(".git-paw/skills/orchestrator/SKILL.md");
+    let before = std::fs::read(&skill).expect("read SKILL.md");
+    assert!(String::from_utf8_lossy(&before).contains("(not configured)"));
+    let config = sandbox.repo.join(".git-paw/config.toml");
+    let mut text = std::fs::read_to_string(&config).expect("read config");
+    text = if text.contains("\n[supervisor]\n") {
+        text.replacen(
+            "\n[supervisor]\n",
+            "\n[supervisor]\ntest_command = \"make test\"\n",
+            1,
+        )
+    } else {
+        format!("{text}\n[supervisor]\ntest_command = \"make test\"\n")
+    };
+    std::fs::write(&config, text).expect("write config");
+
+    let (_code, document) = sandbox.doctor_json();
+
+    let orchestrator = checks(&document)
+        .iter()
+        .find(|c| c["group"] == "Bundled scripts" && c["name"] == "orchestrator")
+        .unwrap_or_else(|| panic!("orchestrator package checked: {document}"));
+    assert_eq!(orchestrator["status"], "warn", "{orchestrator}");
+    assert!(
+        orchestrator["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stale"),
+        "{orchestrator}"
+    );
+    let remedy = orchestrator["remedy"].as_str().unwrap_or_default();
+    assert!(
+        remedy.contains("git paw start") || remedy.contains("git paw init"),
+        "{remedy}"
+    );
+    assert_eq!(std::fs::read(&skill).expect("re-read"), before);
 }
 
 #[test]
@@ -1046,7 +1148,7 @@ fn setup_status(sandbox: &Sandbox) -> (String, String) {
 #[test]
 #[serial]
 fn undo_and_reapply_converge_when_entries_pre_existed() {
-    const PRE_EXISTING: &str = "Bash(.git-paw/scripts/broker.sh *)";
+    const PRE_EXISTING: &str = "Bash(.git-paw/skills/coordination/scripts/broker.sh *)";
 
     let sandbox = Sandbox::new();
     sandbox.init();
@@ -1123,7 +1225,19 @@ fn every_registered_helper_is_installed_by_init_and_reported_by_doctor() {
     assert!(!helpers.is_empty(), "the registry lists helper scripts");
     for name in helpers {
         let installed = sandbox.repo.join(".git-paw").join("scripts").join(name);
-        assert!(installed.is_file(), "init should install {name}");
+        assert!(
+            installed.is_file(),
+            "init should install the compatibility copy of {name}"
+        );
+        assert!(
+            git_paw::skills::bundled_packages().iter().any(|p| sandbox
+                .repo
+                .join(p.install_dir())
+                .join("scripts")
+                .join(name)
+                .is_file()),
+            "init should install {name} in its package"
+        );
         assert!(
             checks(&document)
                 .iter()
@@ -1250,4 +1364,102 @@ fn the_skill_sources_probe_writes_nothing() {
     let before = (snapshot(&sandbox.repo), snapshot(&sandbox.home));
     sandbox.doctor(&["--json"]);
     assert_eq!(before, (snapshot(&sandbox.repo), snapshot(&sandbox.home)));
+}
+
+/// preflight-diagnostics: *Entries applied before the package move are out of
+/// date* — a record whose applied allowlist entries name `.git-paw/scripts/`
+/// paths, all present and unchanged, is ⚠ out of date with the `--undo` then
+/// `--allowlist` remedy, and doctor leaves the settings file and the record
+/// byte-identical.
+#[test]
+#[serial]
+fn entries_applied_before_the_package_move_are_out_of_date() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox
+        .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
+        .assert()
+        .success();
+
+    // Rewrite what was applied into the shape v0.17.0–v0.19.0 wrote: the
+    // same entries at the compatibility path, with its single deny rule.
+    let to_old = |text: &str| {
+        text.replace(".git-paw/skills/coordination/scripts/", ".git-paw/scripts/")
+            .replace(".git-paw/skills/docs-fetch/scripts/", ".git-paw/scripts/")
+            .replace(".git-paw/skills/orchestrator/scripts/", ".git-paw/scripts/")
+    };
+    let settings = sandbox.repo.join(".claude/settings.local.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+    for key in ["allow", "ask", "deny"] {
+        let mut seen = Vec::new();
+        value["permissions"][key]
+            .as_array_mut()
+            .expect(key)
+            .retain_mut(|v| {
+                let old = to_old(v.as_str().unwrap_or_default());
+                let keep = old != "Edit(**/.git-paw/skills/**)" && !seen.contains(&old);
+                seen.push(old.clone());
+                *v = serde_json::Value::String(old);
+                keep
+            });
+    }
+    std::fs::write(&settings, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let record = sandbox.repo.join(".git/git-paw/cli-setup.json");
+    let mut rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).expect("record")).expect("json");
+    let mut seen = Vec::new();
+    rec["entries"]
+        .as_array_mut()
+        .expect("entries")
+        .retain_mut(|e| {
+            let old = to_old(e["value"].as_str().unwrap_or_default());
+            let keep = old != "Edit(**/.git-paw/skills/**)" && !seen.contains(&old);
+            seen.push(old.clone());
+            e["value"] = serde_json::Value::String(old);
+            keep
+        });
+    std::fs::write(&record, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+    let before = (
+        std::fs::read(&settings).unwrap(),
+        std::fs::read(&record).unwrap(),
+    );
+
+    let (_code, document) = sandbox.doctor_json();
+    let check = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "claude setup")
+        .expect("a setup check for claude")
+        .clone();
+
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("out of date"),
+        "{check}"
+    );
+    let remedy = check["remedy"].as_str().unwrap_or_default();
+    assert!(
+        remedy.contains("git paw setup-cli claude --undo") && remedy.contains("--allowlist"),
+        "{remedy}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(&settings).unwrap(),
+            std::fs::read(&record).unwrap()
+        ),
+        before,
+        "doctor must leave the settings file and the record byte-identical"
+    );
+
+    // And the old record undoes cleanly (cli-setup: *Entries recorded before
+    // the package move are undone*).
+    sandbox
+        .paw(&["setup-cli", "claude", "--undo", "--yes"])
+        .assert()
+        .success();
+    let after = std::fs::read_to_string(&settings).unwrap_or_default();
+    assert!(!after.contains(".git-paw/scripts/"), "{after}");
 }

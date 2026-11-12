@@ -61,24 +61,34 @@ header. Root-side helpers (`sweep.sh verified`, `feedback-gate`,
 ## Broker helper
 
 `git paw init` installs a bundled agent-side helper at
-`.git-paw/scripts/broker.sh` — the agent-facing analogue of the supervisor's
-`sweep.sh`. `.git-paw/scripts/` is gitignored, so a fresh agent-worktree
-checkout does not contain it. `git paw start` and `git paw add` therefore
-**auto-provision the helper into each agent worktree** at setup: they write
-`broker.sh` (whenever the broker is enabled) and `docs-fetch.sh` (whenever
-`docs_base_url` is configured) — with the shared `_paw_common.sh` preamble
-both scripts source — into the worktree's `.git-paw/scripts/`,
-executable, from the same bundled assets `init` installs. The scripts are
-(re)written on every attach, so a worktree's helper always matches the running
-binary's version and agents never copy it by hand from `assets/`. The agent
-invokes the helper by its stable relative path.
+`.git-paw/skills/coordination/scripts/broker.sh` — the `coordination` skill
+package's helper, and the agent-facing analogue of the supervisor's
+`sweep.sh`. `.git-paw/skills/` is gitignored, so a fresh agent-worktree
+checkout does not contain it. Every launch path — bare, spec-driven and
+supervisor `git paw start`, and `git paw add` — therefore **auto-provisions the
+selected packages into each agent worktree** before the agent boots:
+`coordination` (whenever the broker is enabled) and `docs-fetch` (whenever
+`docs_base_url` is configured), each under the worktree's
+`.git-paw/skills/<package>/` with its `SKILL.md` rendered for that agent and
+its helper, beside the shared `_paw_common.sh` preamble, executable under
+`scripts/`. The same bytes are also written to the deprecated compatibility
+path `.git-paw/scripts/<helper>`, so an invocation of the old path keeps
+working. Everything comes from the running binary's embedded packages, so a
+worktree's helper always matches it and agents never copy one by hand. The
+agent invokes the helper by its stable relative package path.
+
+The helpers resolve the session they belong to from the repository's main
+checkout (the checkout that owns the git common directory), so
+`sweep.sh` run from inside an agent's worktree finds the same session, and
+shares the same approve claims, as one run at the root. `broker.sh` still
+takes its agent id from the current worktree's branch.
 
 The helper wraps every agent→broker `curl` an agent is allowed to make. It
 discovers the broker URL from `.git-paw/config.toml` `[broker]` (defaulting to
 `http://127.0.0.1:9119`) and shapes the JSON internally, so callers pass only
 simple arguments. The agent id comes from `--agent <id>` (the boot block
 passes the pre-expanded branch id) or, absent one, from slugifying the current
-worktree branch. Run `.git-paw/scripts/broker.sh --help` for the full surface.
+worktree branch. Run `.git-paw/skills/coordination/scripts/broker.sh --help` for the full surface.
 
 **In the repository's main working tree the helper needs an explicit
 `--agent <id>`.** Agents publish from linked worktrees; the main working tree is
@@ -125,7 +135,8 @@ rather than moving on. The same holds for the supervisor-side `sweep.sh`
 publish verbs.
 
 **The helpers are refreshed on every attach.** `git paw start` and
-`git paw add` (re)write `<worktree>/.git-paw/scripts/` from the bundled assets
+`git paw add` (re)write `<worktree>/.git-paw/skills/` and its
+`.git-paw/scripts/` compatibility copies from the bundled packages
 of the binary that launched the session, on every launch path, so a worktree's
 helper always matches that binary's version. Re-attaching a worktree that
 already has the scripts rewrites them rather than failing — which also means
@@ -136,21 +147,21 @@ developing git-paw itself) rather than a deployed copy.
 **Why a script and not a `git paw publish` subcommand?** The helper is an
 agent-internal mechanism. A user-facing subcommand would surface in `--help`
 and produce confusing errors when run by a human (no broker, no session). A
-script under `.git-paw/scripts/` is unambiguously agent-internal, mirrors the
+script under `.git-paw/skills/coordination/scripts/` is unambiguously agent-internal, mirrors the
 supervisor's `sweep.sh`, and gives you a single stable path that one
 permission rule in your agent CLI can name — see
 [Boot calls and permission prompts](#boot-calls-and-permission-prompts).
 
 ## Boot-Prompt Injection
 
-To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. The block calls `.git-paw/scripts/broker.sh` (with the pre-expanded `--agent <id>`) for four essential operations — no raw `curl` and no broker URL appear in the boot block. The block also asks the agent to run each helper call bare (no appended `; echo "exit=$?"` and no pipe), so a permission rule matching the helper's path matches every call:
+To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. The block calls `.git-paw/skills/coordination/scripts/broker.sh` (with the pre-expanded `--agent <id>`) for four essential operations — no raw `curl` and no broker URL appear in the boot block. The block also asks the agent to run each helper call bare (no appended `; echo "exit=$?"` and no pipe), so a permission rule matching the helper's path matches every call:
 
 ### 1. REGISTER - Immediate Status Publication
 
 Agents automatically publish their working status with a "booting" message as their very first action:
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-auth status booting
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth status booting
 ```
 
 ### 2. DONE - Task Completion Reporting
@@ -160,7 +171,7 @@ The primary completion path is `git commit`. The git-paw post-commit hook auto-p
 The boot block retains a manual `agent.artifact { status: "done" }` fallback for code-less tasks (docs-only updates handled outside the worktree, planning notes, exploration tasks where the artifact is information reported to the broker). The block warns agents NOT to publish manual `done` while their worktree has uncommitted changes — they should commit instead.
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-auth artifact --exports "" --files ""
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth artifact --exports "" --files ""
 ```
 
 ### 3. BLOCKED - Dependency Waiting Notification
@@ -168,7 +179,7 @@ The boot block retains a manual `agent.artifact { status: "done" }` fallback for
 Agents can properly declare when they're waiting on dependencies:
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-api blocked "auth token format" feat-auth
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-api blocked "auth token format" feat-auth
 ```
 
 ### 4. QUESTION - Uncertainty Escalation (Critical)
@@ -176,7 +187,7 @@ Agents can properly declare when they're waiting on dependencies:
 Agents are instructed to publish questions and wait for answers rather than guessing:
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-auth question "Should the JWT use RS256 or HS256 signing?"
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth question "Should the JWT use RS256 or HS256 signing?"
 ```
 
 **IMPORTANT**: The boot block explicitly instructs agents: "DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"
@@ -208,7 +219,7 @@ a declared family.
 
 The MCP publish surface has no inbox or poll tool, so even the MCP form of
 the boot block reads the agent's inbox with
-`.git-paw/scripts/broker.sh --agent <id> poll`.
+`.git-paw/skills/coordination/scripts/broker.sh --agent <id> poll`.
 
 ## Boot calls and permission prompts
 
@@ -221,8 +232,8 @@ and git-paw grants nothing on your behalf. Two things are in play:
   Under a mode that still prompts for shell commands, the boot publish *will*
   prompt;
 - **your own allow rules in that CLI.** The boot block always invokes the
-  helper at the single stable path `.git-paw/scripts/broker.sh` (or the
-  `bash .git-paw/scripts/broker.sh` form), precisely so one permission rule
+  helper at the single stable path `.git-paw/skills/coordination/scripts/broker.sh` (or the
+  `bash .git-paw/skills/coordination/scripts/broker.sh` form), precisely so one permission rule
   scoped to that exact path covers every boot call — never a broad `curl *`
   rule, and never per-endpoint `curl` prefixes that drift with URL
   normalisation or flag order.
@@ -477,7 +488,7 @@ session's authority credential (`403 {"error":"authority required"}`), so the
 supervisor publishes it through the helper, which attaches the credential:
 
 ```bash
-.git-paw/scripts/sweep.sh feedback-gate feat-auth testing "test for HS256 path is failing"
+.git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate feat-auth testing "test for HS256 path is failing"
 ```
 
 The wire body it sends:
@@ -511,7 +522,7 @@ verifier. Every `agent.verified` is a verdict, refused without the session's
 authority credential, so it is published through the root-side helper:
 
 ```bash
-.git-paw/scripts/sweep.sh verified feat-auth "all five gates pass"
+.git-paw/skills/orchestrator/scripts/sweep.sh verified feat-auth "all five gates pass"
 ```
 
 The wire body it sends:
@@ -595,7 +606,7 @@ curl -s "$GIT_PAW_BROKER_URL/messages/feat-auth?since=42"
 
 This cursor-based approach is lossless -- no messages are missed between polls, regardless of timing.
 
-Coding agents make the same read through the bundled helper, never a raw `curl` — `.git-paw/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>`, prints the returned messages, and ends with a `last_seq: <n>` line to pass as the next `since` (see [Broker helper](#broker-helper)).
+Coding agents make the same read through the bundled helper, never a raw `curl` — `.git-paw/skills/coordination/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>`, prints the returned messages, and ends with a `last_seq: <n>` line to pass as the next `since` (see [Broker helper](#broker-helper)).
 
 ## Waiting for Events
 
@@ -668,7 +679,7 @@ timing.
 The supervisor-side helper wraps both reads in one call:
 
 ```bash
-.git-paw/scripts/sweep.sh events <since> [wait]
+.git-paw/skills/orchestrator/scripts/sweep.sh events <since> [wait]
 ```
 
 `wait` defaults to **30** seconds. The verb calls `GET /log?since=&wait=` and
@@ -826,7 +837,7 @@ through the bundled [broker helper](#broker-helper), which publishes
 `{"status":"working","message":"<text>","modified_files":[]}`:
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-auth status "reviewing auth tests"
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth status "reviewing auth tests"
 ```
 
 The heartbeat reuses the existing `agent.status` shape — no new wire format is
@@ -840,7 +851,7 @@ naming what the agent is doing right now. Publish it with the helper's
 `--activity` flag:
 
 ```bash
-.git-paw/scripts/broker.sh --agent feat-auth status --activity "running the test suite" "working"
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth status --activity "running the test suite" "working"
 ```
 
 On the wire the phrase is one more field of the `agent.status` payload:
@@ -1114,11 +1125,11 @@ hardening `validate_token` while `feat-session` reworks `refresh_session`:
 
 ```bash
 # feat-auth
-.git-paw/scripts/broker.sh --agent feat-auth intent "harden token checks" src/auth.rs 900 \
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-auth intent "harden token checks" src/auth.rs 900 \
   --region src/auth.rs#function=validate_token
 
 # feat-session
-.git-paw/scripts/broker.sh --agent feat-session intent "rework session refresh" src/auth.rs 900 \
+.git-paw/skills/coordination/scripts/broker.sh --agent feat-session intent "rework session refresh" src/auth.rs 900 \
   --region src/auth.rs#function=refresh_session
 ```
 

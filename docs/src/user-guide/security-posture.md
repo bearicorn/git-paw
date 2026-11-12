@@ -207,8 +207,10 @@ also refuses when run from a linked worktree; that is a guard against a
 coding agent steering a peer by mistake, **not a security boundary** — the
 check is on the working directory, and anything able to run a command in the
 main checkout can run `git paw __send` there. A broad hand-written rule such
-as `Bash(.git-paw/scripts/sweep.sh *)` would let `tell` run without the
-prompt where the `ask` rule is missing; `git paw doctor` reports it as grant
+as `Bash(.git-paw/scripts/sweep.sh *)` (or the same at the package path
+`.git-paw/skills/orchestrator/scripts/sweep.sh`) would let `tell` run without
+the prompt where the `ask` rules are missing — the item writes them at both
+paths, because the deprecated compatibility copy still runs; `git paw doctor` reports it as grant
 residue. The twelfth entry, `sweep.sh events`, is a pure read of the
 broker's log and status — no keystroke, no verdict. See the full table in
 [Per-CLI Setup](cli-setup.md).
@@ -229,18 +231,27 @@ quieter variant: the helpers read `.git-paw/config.toml`, so an edited broker
 address turns a granted publish into exfiltration.
 
 So the allowlist item never writes the grants alone. In the same file and the
-same replacement it writes `Edit(**/.git-paw/scripts/**)` to `deny` and
-`Edit(**/.git-paw/config.toml)` to `ask`. Both were confirmed against the
-installed CLI before the item shipped — including that the deny rule also
-blocks the filesystem commands the edit-accepting mode auto-approves
-(`sed -i`, `cp`, `mv`, `rm`, `touch`, and `cd`-prefixed forms), and that it
-covers both the Edit and the Write tool, at any depth, from a worker's
-directory and from a root session reaching into a worker's copy.
+same replacement it writes `Edit(**/.git-paw/skills/**)` and
+`Edit(**/.git-paw/scripts/**)` to `deny` — the installed packages, where the
+granted helpers live, and the compatibility copies — and
+`Edit(**/.git-paw/config.toml)` to `ask`. Both deny rules were confirmed
+against the installed CLI (Claude Code 2.1.322) before the item shipped —
+including that they also block every filesystem command the edit-accepting
+mode auto-approves (`cp`, `mv`, `rm`, `touch`, `mkdir`, a `printf` redirect,
+plus `sed -i` and `cd`-prefixed forms), and that they cover both the Edit and
+the Write tool, on a package helper, its preamble, a package `SKILL.md` and a
+compatibility copy, at any depth, from a worker's directory and from a root
+session reaching into a worker's copy.
+
+**After an upgrade from v0.19.0 or earlier**, grants applied by the older
+version name `.git-paw/scripts/…`, which nothing bundled calls any more;
+`git paw doctor` reports them out of date, and only you replace them
+(`--undo`, then `--allowlist`). Until then helper calls prompt.
 
 **The gate.** An item is written only when its facts have been **verified**
 against an installed copy of that CLI. An unverified item can be planned with
 `--dry-run` but never written. The `claude` allowlist item ships verified
-against Claude Code 2.1.220 (2026-10-15); `git paw doctor` reports the
+against Claude Code 2.1.322 (2026-11-12); `git paw doctor` reports the
 current status.
 
 **Residual risks.** These remain even with the item applied:
@@ -306,7 +317,8 @@ The allowlist item grants `sweep.sh` **per subcommand**, and withholds
 `approve`, `verified`, `feedback-gate` and `conflict-ack` precisely because
 the target settings file reaches every session in the repository — a worker's
 as much as the orchestrator's. A durable allow rule naming one of those
-subcommands, or a whole-script `Bash(.git-paw/scripts/sweep.sh *)` wildcard
+subcommands, or a whole-script `Bash(.git-paw/scripts/sweep.sh *)` or
+`Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)` wildcard
 that covers them all, hands every agent session exactly what was withheld: it
 can press the approval keystroke in another pane, or publish a supervisor
 verdict, **without a prompt**. An agent can then approve its own permission

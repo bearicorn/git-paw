@@ -51,10 +51,80 @@ Each bundled skill is an agentskills.io package in git-paw's source tree —
 has them, `references/` and `assets/`) it owns: `coordination` carries
 `broker.sh` and the boot-block templates, `orchestrator` carries `sweep.sh`,
 `docs-fetch` carries `docs-fetch.sh`, and `cli-setup` ships no helper. Every
-package is compiled into the binary. This is source layout only: the helpers
-are still installed at `.git-paw/scripts/<helper>`, and an override in
+package is compiled into the binary and installed as a package — see
+[Installed packages](#installed-packages). An override in
 `.agents/skills/<name>/` replaces only the skill's text — git-paw never
 installs a script from an override directory.
+
+## Installed packages
+
+git-paw installs each bundled package as the directory
+`.git-paw/skills/<name>/`:
+
+| Path | Content |
+|------|---------|
+| `SKILL.md` | the skill, rendered for that location, with `name` / `description` frontmatter |
+| `scripts/` | the package's helpers and the shared `_paw_common.sh` preamble, executable (`0o755`) |
+| `references/` | reference documents, rendered like `SKILL.md` (no bundled package ships one today) |
+
+A package's `assets/` (the boot-block templates, say) are render-time inputs
+and are never installed.
+
+**Where.** `git paw init` and every `git paw start` install every package at
+the repository root, rendered with the current branch, the configured broker
+URL and the `[supervisor]` gate commands. Every launch path that creates or
+re-attaches an agent worktree — bare, spec-driven and supervisor
+`git paw start`, `git paw add` — installs exactly the packages selected for
+that worktree (`coordination` when the broker is enabled, `docs-fetch` when
+`docs_base_url` is set) into `<worktree>/.git-paw/skills/`, rendered with the
+agent's branch and the session's broker URL, before the agent boots; the same
+packages are injected into the agent's managed block, after a generated
+`## Skills` index naming each package's `SKILL.md` and helper.
+
+**Invocation path.** A helper's path is its package path —
+`.git-paw/skills/coordination/scripts/broker.sh`,
+`.git-paw/skills/orchestrator/scripts/sweep.sh`,
+`.git-paw/skills/docs-fetch/scripts/docs-fetch.sh`. Bundled prose names a
+helper only through the `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}` and
+`{{DOCS_FETCH_HELPER}}` placeholders, which every renderer fills in from the
+package registry.
+
+**Re-rendering.** Each install writes a file only when it is missing or
+differs from what the running binary renders from the config as it is now,
+so a `[supervisor]` gate command configured after `git paw init` reaches the
+root orchestrator skill on the next `git paw start`. `git paw doctor` reports
+a root `SKILL.md` that differs as ⚠ stale.
+
+**Atomic refresh.** Every installed file is written to a temporary file in its
+own directory, given its mode, and renamed over the target, so a running
+`sweep.sh` keeps reading the old script and the next run sees the complete new
+one — never a half-written file. A symlink at an install target is refused.
+
+**Compatibility copy (deprecated).** Wherever a package's helpers are
+installed, the same bytes are also written to `.git-paw/scripts/<helper>`
+(with `_paw_common.sh`), so a boot prompt already in a running agent's
+context, your own notes, and a CLI allow rule keyed on the old path keep
+working. Nothing bundled names that path any more. It is kept through 0.x and
+removed under the v1.0.0 deprecation policy.
+
+### Upgrading from v0.19.0 or earlier
+
+- Helpers moved from `.git-paw/scripts/<helper>` to
+  `.git-paw/skills/<package>/scripts/<helper>`; the old path still works as a
+  deprecated copy.
+- A `git paw setup-cli claude --allowlist` applied by an earlier version grants
+  the old paths, so `git paw doctor` reports the setup **out of date** and
+  agents' calls to the package path prompt again. Run
+  `git paw setup-cli claude --undo`, then `git paw setup-cli claude --allowlist`
+  (git-paw never rewrites a grant itself). See
+  [CLI setup → Upgrading](cli-setup.md#upgrading-from-v0190-or-earlier).
+- A CLI allow rule you wrote by hand for `.git-paw/scripts/…` should name
+  `.git-paw/skills/<package>/scripts/…` instead.
+- `git paw start` now injects the `docs-fetch` skill on the bare and
+  spec-driven paths too whenever `docs_base_url` is set, and installs the root
+  packages, so a fresh clone needs no `git paw init` for its helpers.
+- `sweep.sh` now works from inside an agent's worktree: it resolves the
+  session from the main checkout.
 
 ## Skill Format
 
@@ -93,6 +163,10 @@ Skills support these placeholders that get replaced at runtime:
 - `{{GIT_PAW_BROKER_URL}}` - Full broker URL
 - `{{SKILL_NAME}}` - Name from YAML frontmatter
 - `{{SKILL_DESCRIPTION}}` - Description from YAML frontmatter
+- `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}`, `{{DOCS_FETCH_HELPER}}` - the
+  package path of the `broker.sh`, `sweep.sh` and `docs-fetch.sh` helpers
+  (e.g. `.git-paw/skills/coordination/scripts/broker.sh`), derived from the
+  package registry; see [Installed packages](#installed-packages)
 
 ### Supervisor gate-command placeholders
 
@@ -282,9 +356,9 @@ resolves from.
 
 ## Exported skills
 
-`git paw init` (and every `git paw start`) also writes two bundled skills into
-the main checkout for the agent that drives the session, in the same
-standardized layout:
+`git paw init` (and every `git paw start`) installs every package at the root
+([Installed packages](#installed-packages)); two of them are for the agent
+that drives the session:
 
 - `.git-paw/skills/orchestrator/SKILL.md` — the orchestrator skill, rendered
   with your `[supervisor]` gate commands and configured spec format. It holds
@@ -361,4 +435,4 @@ Skill templates are only injected when the broker is enabled (`[broker] enabled 
 
 In addition to skill template injection, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. This ensures reliable agent self-reporting even if skill templates are not used or if agents don't read the AGENTS.md file thoroughly.
 
-The boot-prompt injection covers every essential coordination operation (register, done, blocked, question) with the agent's id pre-expanded, as calls to the bundled `.git-paw/scripts/broker.sh` helper — or, for CLIs whose [provider family](../supported-clis.md#provider-families) speaks MCP (`claude`, `codex`, `cursor-agent`, `agy`), as MCP publish-tool calls — and is active in both supervisor and manual broker modes. Set [`[clis.<name>] mcp = true|false`](../configuration/README.md#custom-clis) to override the family default for a given CLI identity. See the [Coordination documentation](coordination.md#boot-prompt-injection) for details.
+The boot-prompt injection covers every essential coordination operation (register, done, blocked, question) with the agent's id pre-expanded, as calls to the bundled `.git-paw/skills/coordination/scripts/broker.sh` helper — or, for CLIs whose [provider family](../supported-clis.md#provider-families) speaks MCP (`claude`, `codex`, `cursor-agent`, `agy`), as MCP publish-tool calls — and is active in both supervisor and manual broker modes. Set [`[clis.<name>] mcp = true|false`](../configuration/README.md#custom-clis) to override the family default for a given CLI identity. See the [Coordination documentation](coordination.md#boot-prompt-injection) for details.

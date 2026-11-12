@@ -10,8 +10,8 @@ the values of this session, and is rewritten each time the session starts.
   use this name; every tmux target names window 0 (`{{SESSION_NAME}}:0.<pane>`).
 - **Broker URL:** `{{GIT_PAW_BROKER_URL}}` — for reference only; reach the
   broker through the helpers or git-paw's MCP tools, which discover it.
-- **Helpers:** `.git-paw/scripts/sweep.sh` (reads, verdicts, answers, approvals
-  on the human's instruction) and `.git-paw/scripts/broker.sh --agent supervisor`
+- **Helpers:** `{{SWEEP_HELPER}}` (reads, verdicts, answers, approvals
+  on the human's instruction) and `{{BROKER_HELPER}} --agent supervisor`
   (questions and main-side intents), both run at the repository root.
 - **Roster:** `.git-paw/sessions/{{SESSION_NAME}}.json` — each agent's
   `branch_id`, `worktree_path` and `cli`; read it when you need an agent's pane.

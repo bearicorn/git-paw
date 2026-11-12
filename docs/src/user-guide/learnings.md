@@ -169,7 +169,7 @@ over the whole session, which only the supervisor LLM can make during its
 normal sweep and audit work. They ride the same `agent.learning` wire
 format and land in their own sections of `session-learnings.md`. The
 supervisor publishes them through the bundled
-`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper — a
+`.git-paw/skills/orchestrator/scripts/sweep.sh learn <category> <title> <body-json>` helper — a
 least-privilege, by-path publish path, never a raw curl.
 
 Because these are LLM judgments, the supervisor skill gates each one
@@ -334,7 +334,7 @@ idempotently without flooding consumers with duplicates.
 
 **The bundled `sweep.sh learn` helper uses the same scheme.** The supervisor
 publishes qualitative learnings through
-`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>`, and that
+`.git-paw/skills/orchestrator/scripts/sweep.sh learn <category> <title> <body-json>`, and that
 helper computes its `id` with exactly the form above — over the category, an
 empty branch id (supervisor learnings are cross-cutting), the canonical body,
 and the current UTC hour bucket. The two publishers therefore assign the same

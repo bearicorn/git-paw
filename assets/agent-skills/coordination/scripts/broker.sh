@@ -44,10 +44,11 @@ set -u
 # Discovery: project root, paw dir, broker URL, agent id.
 #
 # The project root, `.git-paw` paths, Python 3 interpreter, `discover_broker_url`
-# and `slugify` all come from the shared preamble `_paw_common.sh`, installed as
-# a sibling of this script by `git paw init`. Resolving it relative to this
-# file's own location works from both the bundled `assets/scripts/` tree and the
-# deployed `.git-paw/scripts/` directory.
+# and `slugify` all come from the shared preamble `_paw_common.sh`, installed
+# beside this script — in its package's `.git-paw/skills/<package>/scripts/` and
+# in the compatibility copy `.git-paw/scripts/` — by `git paw init` and
+# `git paw start`. Resolving it relative to this file's own location works from
+# either installed directory.
 # ---------------------------------------------------------------------------
 
 PAW_SCRIPT_NAME="broker.sh"

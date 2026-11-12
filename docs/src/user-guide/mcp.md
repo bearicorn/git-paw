@@ -423,7 +423,7 @@ publishing the same message `sweep.sh verified` / `feedback-gate` does.
 | `publish_feedback` *(root session only)* | `{ agent, gate?, errors }` | `{ published: true }` — `agent.feedback` to `agent` from `supervisor`; with `gate`, each error is tagged `[<gate>] ` |
 
 There is no inbox or poll tool: an agent reads its broker inbox with
-`.git-paw/scripts/broker.sh poll`, whichever form its boot block uses.
+`.git-paw/skills/coordination/scripts/broker.sh poll`, whichever form its boot block uses.
 
 Three properties are structural, not incidental:
 

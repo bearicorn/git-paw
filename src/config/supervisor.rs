@@ -253,7 +253,7 @@ pub struct SupervisorConfig {
     ///
     /// An agent is flagged `no-progress` when BOTH its completed-task-checkbox
     /// count AND its branch commit count stay unchanged for at least this many
-    /// seconds. Consumed only by `.git-paw/scripts/sweep.sh` (which reads it
+    /// seconds. Consumed only by `.git-paw/skills/orchestrator/scripts/sweep.sh` (which reads it
     /// from `[supervisor]` config); when the field is absent the helper falls
     /// back to its documented default (~1500s / 25 min), longer than the
     /// stuck-on-prompt heartbeat threshold because real edits take minutes.
@@ -265,7 +265,7 @@ pub struct SupervisorConfig {
     /// When an agent's pane shows a `/clear to save <N>k tokens` hint whose `N`
     /// meets or exceeds this value, the detector proactively flags the agent
     /// `context-bloat` so the supervisor can pre-empt the eventual freeze.
-    /// Consumed only by `.git-paw/scripts/sweep.sh`; when absent the helper
+    /// Consumed only by `.git-paw/skills/orchestrator/scripts/sweep.sh`; when absent the helper
     /// falls back to its documented default (~250, matching the observed
     /// v0.8.0 freeze point).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +277,7 @@ pub struct SupervisorConfig {
     /// the blocker is flagged `blocked-on-supervisor` once it has waited longer
     /// than this window, forcing the supervisor (or the unattended drive loop)
     /// to answer rather than leaving the agent stalled. Consumed only by
-    /// `.git-paw/scripts/sweep.sh`; when absent the helper falls back to its
+    /// `.git-paw/skills/orchestrator/scripts/sweep.sh`; when absent the helper falls back to its
     /// documented default (~900s / 15 min).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_on_supervisor_window_seconds: Option<u64>,
@@ -514,7 +514,7 @@ pub struct CorrectionConfig {
     /// suppress the flag, set it to or above `max_cycles`).
     #[serde(deserialize_with = "deserialize_escalate_after_cycles")]
     pub escalate_after_cycles: u32,
-    /// Gate names `.git-paw/scripts/sweep.sh feedback-gate` may stamp as a
+    /// Gate names `.git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate` may stamp as a
     /// `[<gate>]` prefix on an `agent.feedback` error line; only a tag naming
     /// one of these counts as a failing gate verdict that starts a correction
     /// cycle. Matching is case-insensitive.
