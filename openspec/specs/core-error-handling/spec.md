@@ -147,7 +147,7 @@ The following variants SHALL exist:
 - **THEN** the message SHALL mention the skill name `"nonexistent"` and indicate no embedded default exists
 
 #### Scenario: UserOverrideRead is actionable
-- **GIVEN** `SkillError::UserOverrideRead { path: "/home/user/.config/git-paw/agent-skills/coordination.md", .. }`
+- **GIVEN** `SkillError::UserOverrideRead { path: "/home/user/.config/git-paw/agent-skills/coordination/SKILL.md", .. }`
 - **WHEN** formatted with `Display`
 - **THEN** the message SHALL include the file path and suggest checking permissions
 
