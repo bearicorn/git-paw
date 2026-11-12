@@ -470,7 +470,14 @@ without restarting.
 
 Offered only to a server started in the repository's main working tree (as git
 reports it, so a `--separate-git-dir` checkout counts); a server in an agent's
-worktree does not list them, and a by-name call returns an MCP-level error.
+worktree does not list them, and a by-name call returns an MCP-level error. A
+server whose environment carries `GIT_PAW_DELEGATE` — one started inside a
+`git paw delegate` run — is never a root session, wherever it runs: it loads no
+authority credential, lists none of the lifecycle, verdict or repository-write
+tools (even with `allow_repo_writes = true`), and a by-name call returns an
+error saying the tool is unavailable inside a delegate run. There is no MCP
+tool that runs a delegate: an orchestrator delegates by running
+`git paw delegate` from its own shell (see [Agent Profiles](agent-profiles.md)).
 Each does exactly what the equivalent `git paw` command does, in-process, and
 returns structured JSON with the command's output lines and warnings.
 

@@ -180,3 +180,20 @@ fn the_specs_example_lists_every_specs_type_value() {
         );
     }
 }
+
+/// Scenario: The configuration reference documents every profile key.
+#[test]
+fn reference_documents_every_profile_key() {
+    let doc = reference();
+    let sec = section(&doc, "## Agent profiles");
+    let mut needles: Vec<String> = git_paw::config::PROFILE_KEYS
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect();
+    needles.push("[profiles.<name>]".to_string());
+    let refs: Vec<&str> = needles.iter().map(String::as_str).collect();
+    let missing = missing_from(&sec, &refs);
+    assert!(missing.is_empty(), "## Agent profiles misses {missing:?}");
+    let default = section(&doc, "### `default_profile`");
+    assert!(default.contains("default_cli"), "{default}");
+}

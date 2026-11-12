@@ -270,3 +270,84 @@ fn worker_role_skill_ignores_coordination() {
     p.skill = Some("reviewer".into());
     assert_eq!(p.worker_role_skill(), Some("reviewer"));
 }
+
+/// Scenario "The template shows profile examples".
+#[test]
+fn the_template_shows_profile_examples() {
+    let template = super::super::generate_default_config();
+    assert!(
+        template.contains("\n# default_profile = "),
+        "commented default_profile"
+    );
+    assert!(template.contains("# [profiles.routine]\n# kind = \"worker\""));
+    for role in [
+        "explorer",
+        "spec-auditor",
+        "doc-auditor",
+        "security-auditor",
+    ] {
+        let stanza = template
+            .split("# [profiles.")
+            .find(|s| s.contains(&format!("# skill = \"{role}\"")))
+            .unwrap_or_else(|| panic!("no delegate stanza for {role}"));
+        assert!(stanza.contains("# kind = \"delegate\""), "{stanza}");
+        assert!(stanza.contains("# description = \""), "{stanza}");
+        assert!(
+            stanza.contains("# cli = \"") && stanza.contains("# args = \""),
+            "{stanza}"
+        );
+    }
+}
+
+/// Scenario "The examples are inert and agnostic".
+#[test]
+fn the_examples_are_inert_and_agnostic() {
+    let template = super::super::generate_default_config();
+    let cfg: PawConfig = toml::from_str(&template).expect("template loads");
+    assert!(cfg.profiles.is_empty());
+    assert!(cfg.default_profile.is_none());
+    let mut stanzas: Vec<&str> = template
+        .split("# [profiles.")
+        .skip(1)
+        .map(|s| s.split("\n\n").next().unwrap_or(s))
+        .collect();
+    let default_line = template
+        .lines()
+        .find(|l| l.starts_with("# default_profile"))
+        .expect("default_profile line");
+    stanzas.push(default_line);
+    for stanza in stanzas {
+        let lower = stanza.to_lowercase();
+        for token in [
+            "claude", "codex", "gemini", "cursor", "aider", "qwen", "agy", "opus", "sonnet",
+            "haiku", "gpt", "cargo", "npm", "just ", "make ", "pytest",
+        ] {
+            assert!(
+                !lower.contains(token),
+                "a profile stanza names `{token}`: {stanza}"
+            );
+        }
+    }
+}
+
+/// `PROFILE_KEYS` is exactly the key set an entry carries: a fully populated
+/// entry serializes every one of them and nothing else.
+#[test]
+fn profile_keys_match_the_parser() {
+    let cfg = load(
+        "[profiles.x]\nkind = \"delegate\"\ndescription = \"d\"\ncli = \"c\"\nargs = \"a\"\n\
+         skill = \"explorer\"\napproval = \"auto\"\ntimeout_seconds = 5\n",
+    )
+    .expect("loads");
+    let value = toml::Value::try_from(cfg.profile("x").expect("x")).expect("serialize");
+    let mut keys: Vec<&str> = value
+        .as_table()
+        .expect("table")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut expected = PROFILE_KEYS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected);
+}

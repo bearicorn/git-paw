@@ -171,6 +171,27 @@ impl LedgerLine {
     }
 }
 
+/// The ledger file of the repository at `repo_root`.
+#[must_use]
+pub fn ledger_path(repo_root: &Path) -> std::path::PathBuf {
+    repo_root
+        .join(".git-paw")
+        .join("logs")
+        .join("delegates")
+        .join("runs.jsonl")
+}
+
+/// Every readable line of the repository's run ledger, in order. A missing
+/// ledger, or a line that does not parse, contributes nothing.
+#[must_use]
+pub fn read_ledger(repo_root: &Path) -> Vec<LedgerLine> {
+    std::fs::read_to_string(ledger_path(repo_root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 /// One active run as its record under `.git-paw/logs/delegates/active/`
 /// holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

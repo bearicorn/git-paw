@@ -17,6 +17,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ApprovalLevel;
 
+/// Every key a `[profiles.<name>]` entry accepts, in documentation order.
+pub const PROFILE_KEYS: [&str; 7] = [
+    "kind",
+    "description",
+    "cli",
+    "args",
+    "skill",
+    "approval",
+    "timeout_seconds",
+];
+
 /// Default delegate run time limit, in seconds.
 pub const DEFAULT_DELEGATE_TIMEOUT_SECONDS: u64 = 600;
 

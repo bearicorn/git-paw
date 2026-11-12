@@ -48,23 +48,23 @@
 
 ## 8. Usage attribution
 
-- [ ] 8.1 `git paw status --json` `usage_by_profile` (workers by recorded profile; delegate ledger runs since session creation via their CLI session ids and `CliProfile::usage(session_id, repo_root)`); `usage_total` unchanged; tests in `tests/status_json_usage.rs` "Worker and delegate usage are grouped by profile" (incl. `usage_total` unchanged), "Runs before the session are excluded", "No profiles yields an empty object"
-- [ ] 8.2 Drive-loop exit summary per-profile lines in `src/supervisor/drive/budget.rs::render_section` (existing CLI lines, totals and budget comparison unchanged); tests "Profiles appear in the usage section", "No profile leaves the usage section unchanged"
+- [x] 8.1 `git paw status --json` `usage_by_profile` (workers by recorded profile; delegate ledger runs since session creation via their CLI session ids and `CliProfile::usage(session_id, repo_root)`); `usage_total` unchanged; tests in `tests/status_json_usage.rs` "Worker and delegate usage are grouped by profile" (incl. `usage_total` unchanged), "Runs before the session are excluded", "No profiles yields an empty object"
+- [x] 8.2 Drive-loop exit summary per-profile lines in `src/supervisor/drive/budget.rs::render_section` (existing CLI lines, totals and budget comparison unchanged); tests "Profiles appear in the usage section", "No profile leaves the usage section unchanged"
 
 ## 9. Init template
 
-- [ ] 9.1 `config::generate_default_config`: commented `default_profile`, one worker profile, one delegate profile per bundled role, placeholder `cli` / `args`; tests "The template shows profile examples", "The examples are inert and agnostic"
+- [x] 9.1 `config::generate_default_config`: commented `default_profile`, one worker profile, one delegate profile per bundled role, placeholder `cli` / `args`; tests "The template shows profile examples", "The examples are inert and agnostic"
 
 ## 10. Docs
 
-- [ ] 10.1 New `docs/src/user-guide/agent-profiles.md` (worker and delegate profiles, selection order, delegate bounds and privileges with the D7 limits, bundled role skills, usage attribution) + `SUMMARY.md`
-- [ ] 10.2 `docs/src/configuration/README.md`: `[profiles.<name>]` keys and `default_profile`; test "The configuration reference documents every profile key"
-- [ ] 10.3 `docs/src/cli-reference.md`: `--profile` on start / add, `git paw delegate`; `README.md` CLI table and a profiles bullet
-- [ ] 10.4 Orchestrator workflow guide (`quick-start-orchestrator.md` / `user-guide/supervisor.md`) and `user-guide/tiered-model-workflow.md`: worker profiles per tier replace per-model `[clis.*]` shims; delegating gates and exploration; `user-guide/spec-driven-launch.md` (`paw_profile`); `user-guide/mcp.md` (a delegate's MCP server is never root; delegation goes through the command); `user-guide/security-posture.md` (what a delegate can do, the marker refusals including `__send`, operator isolation for delegates); `user-guide/sandbox.md` and `user-guide/doctor.md` (per-profile level in the sandbox check); `user-guide/skill-templates.md` (role skills, bundled delegate roles)
+- [x] 10.1 New `docs/src/user-guide/agent-profiles.md` (worker and delegate profiles, selection order, delegate bounds and privileges with the D7 limits, bundled role skills, usage attribution) + `SUMMARY.md`
+- [x] 10.2 `docs/src/configuration/README.md`: `[profiles.<name>]` keys and `default_profile`; test "The configuration reference documents every profile key"
+- [x] 10.3 `docs/src/cli-reference.md`: `--profile` on start / add, `git paw delegate`; `README.md` CLI table and a profiles bullet
+- [x] 10.4 Orchestrator workflow guide (`quick-start-orchestrator.md` / `user-guide/supervisor.md`) and `user-guide/tiered-model-workflow.md`: worker profiles per tier replace per-model `[clis.*]` shims; delegating gates and exploration; `user-guide/spec-driven-launch.md` (`paw_profile`); `user-guide/mcp.md` (a delegate's MCP server is never root; delegation goes through the command); `user-guide/security-posture.md` (what a delegate can do, the marker refusals including `__send`, operator isolation for delegates); `user-guide/sandbox.md` and `user-guide/doctor.md` (per-profile level in the sandbox check); `user-guide/skill-templates.md` (role skills, bundled delegate roles)
 
 ## 11. Gates
 
-- [ ] 11.1 Every scenario in this change maps to a named test
-- [ ] 11.2 Security review with `security-and-safety-review` (process spawning, root-level execution, env marker limits) and export-agnosticism review of the four packages, the framing asset and the init examples
-- [ ] 11.3 `just check` (exit code read directly, not through a pipe), `just deny`, `mdbook build docs/` green; full suite vs merge-base green
+- [x] 11.1 Every scenario in this change maps to a named test
+- [x] 11.2 Security review with `security-and-safety-review` (process spawning, root-level execution, env marker limits) and export-agnosticism review of the four packages, the framing asset and the init examples
+- [x] 11.3 `just check` (exit code read directly, not through a pipe), `just deny`, `mdbook build docs/` green; full suite vs merge-base green
 - [ ] 11.4 At archive, confirm `openspec/specs/cli-agent-profiles/spec.md` carries its `## Purpose`, and add a `cli-agent-profiles` index line to `docs/src/specifications/README.md` in the same commit (the page is hand-maintained; `tests/spec_purpose_backfilled.rs` and `tests/specifications_page_lists_every_capability.rs` fail without it)

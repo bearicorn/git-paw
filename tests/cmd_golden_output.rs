@@ -289,7 +289,7 @@ fn golden_status_of_a_live_session() {
          \"worktrees\":[{\"branch\":\"feat/alpha\",\"cli\":\"sleep\",\"profile\":null,\
          \"worktree_path\":\"{SANDBOX}/wt-feat-alpha\",\"cli_session_id\":null,\"usage\":null}],\
          \"usage_total\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_tokens\":0,\
-         \"cache_write_tokens\":0,\"tokens\":0,\"unknown_workers\":1}}\n",
+         \"cache_write_tokens\":0,\"tokens\":0,\"unknown_workers\":1},\"usage_by_profile\":{}}\n",
         "",
         &[],
     );

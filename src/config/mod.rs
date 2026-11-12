@@ -31,7 +31,9 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
-pub use profiles::{DEFAULT_DELEGATE_TIMEOUT_SECONDS, ProfileEntry, ProfileKind, ProfileName};
+pub use profiles::{
+    DEFAULT_DELEGATE_TIMEOUT_SECONDS, PROFILE_KEYS, ProfileEntry, ProfileKind, ProfileName,
+};
 pub use prompt_profile::{
     CliPromptProfile, CliPromptProfileOverride, CompiledPromptProfile, InvalidPattern,
     claude_prompt_profile, resolve_prompt_profile,
@@ -1104,6 +1106,10 @@ pub fn generate_default_config() -> String {
 # Omit to show the full picker with no default.
 # default_cli = ""
 
+# Pre-select a worker profile ([profiles.<name>] below) in the interactive
+# picker, ahead of default_cli; also the fallback when no picker is shown.
+# default_profile = "routine"
+
 # Enable tmux mouse mode for sessions (default: true).
 # mouse = true
 
@@ -1357,7 +1363,7 @@ worktree_placement = "child"
 # display_name = "My Agent"
 #
 # Arguments appended to every launch of this CLI, before the approval flags.
-# For per-worker models, give each worker profile its own [clis.*] entry.
+# For per-worker models, give each worker profile ([profiles.*]) its own args.
 # Put permission flags in approval_args, not here.
 # args = "--model sonnet"
 #
@@ -1380,6 +1386,49 @@ worktree_placement = "child"
 # Sandbox mode: "wrapper" or "native". Unset means no sandbox.
 # sandbox = "wrapper"
 # sandbox_args = "--sandbox workspace-write"
+
+# Agent profiles: what an agent is for. A worker profile launches a coding
+# agent (pane, branch, worktree) with its CLI plus the profile's own args,
+# approval level and optional role skill; select it with --profile, a spec's
+# paw_profile, the picker, or default_profile. A delegate profile runs one
+# headless agent at the repository root through `git paw delegate <name>`
+# (approval "manual" unless set; "full-auto" is refused; timeout_seconds
+# defaults to 600) and prints its standard output as the result.
+# [profiles.routine]
+# kind = "worker"
+# description = "Routine implementation"
+# cli = "my-agent"
+# args = "--model <model>"
+# approval = "auto"
+# skill = "<role-skill>"
+#
+# [profiles.explorer]
+# kind = "delegate"
+# description = "Read-only codebase sweep that returns a map"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "explorer"
+#
+# [profiles.spec-audit]
+# kind = "delegate"
+# description = "Runs the spec audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "spec-auditor"
+#
+# [profiles.doc-audit]
+# kind = "delegate"
+# description = "Runs the doc audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "doc-auditor"
+#
+# [profiles.security-audit]
+# kind = "delegate"
+# description = "Runs the security audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "security-auditor"
 
 # Named presets for quick launches.
 # [presets.my-preset]

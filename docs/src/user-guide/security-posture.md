@@ -588,6 +588,40 @@ The MCP server's spec-authoring tools (`create_spec`, `write_spec_artifact`) are
 
 **The limit.** The switch is a file in the repository, so anything that can edit the root's `.git-paw/config.toml` can turn it on. That includes an unsandboxed worker writing outside its worktree, or a merged branch that carries the key. The change shows up in the diff a human reviews and in the server's startup log line, and the [sandbox](./sandbox.md) confines a worker's writes to its worktree. Against an unsandboxed rogue worker, though, the switch is no defence, as with [broker verdict authority](#broker-verdict-authority). Likewise, a local process that can already write inside the change directory could swap a directory that was just checked for a symbolic link before the write lands. That is out of scope for the same reason: it already has write access.
 
+## Delegate runs
+
+`git paw delegate <name>` runs a delegate profile's CLI once, headless, at the
+repository's main working tree (see [Agent Profiles](agent-profiles.md)). It is
+an agent with execution power started on another agent's request, outside
+every worktree, with no pane anyone watches. What bounds it:
+
+- **Its approval level.** `manual` unless the profile sets `auto`; git-paw
+  passes no permission-widening flag at `manual`, so the CLI's own
+  non-interactive mode decides what may run. `full-auto` is refused at config
+  load, so an orchestrator cannot launder full execution power through a
+  delegate. Nothing relays or answers a delegate's permission prompts.
+- **Where it may start.** Only from the main working tree (a worker in a linked
+  worktree cannot use a delegate to reach outside it), never inside another
+  delegate run, at most four `manual` runs at once and an `auto` run alone,
+  for at most `timeout_seconds` before its whole process group is killed.
+- **Operator isolation.** The run gets its CLI's operator isolation (unless
+  `[clis.<name>] inherit_operator_config = true`). That matters more than for
+  a worker: a delegate runs in the main checkout, whose auto memory is your
+  own.
+- **The marker refusals.** The run carries `GIT_PAW_DELEGATE=<name>` and no
+  `GIT_PAW_BROKER_URL`. Under the marker `git paw __authority` prints no
+  credential, `git paw __send` refuses (exit 3) before touching any pane, the
+  bundled `broker.sh` and `sweep.sh` refuse every subcommand before reaching
+  the broker, and an MCP server started inside the run is never a root
+  session.
+
+**The limit.** The marker refusals are defence in depth. A delegate allowed to
+run shell commands could unset the variable, or run public commands such as
+`git paw stop` or raw `tmux`. The boundary is the approval level plus, where
+configured, the CLI's declared sandbox (`[clis.<name>].sandbox`, see the
+[sandbox guide](./sandbox.md)) — and because the run happens at the
+repository root, a `git paw setup-cli` grant applied there reaches it too.
+
 ## The bottom line
 
 - Treat every agent as capable of running arbitrary code as you.

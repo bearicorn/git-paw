@@ -89,6 +89,7 @@ fn status_json(
         "tmux_running": tmux_running,
         "worktrees": worktrees,
         "usage_total": usage_total,
+        "usage_by_profile": usage_by_profile(ctx, existing, usage),
     });
     if let Some(wave) = wave
         && let Some(map) = obj.as_object_mut()
@@ -96,6 +97,92 @@ fn status_json(
         map.insert("wave".to_string(), serde_json::json!(wave));
     }
     obj
+}
+
+/// One profile's share of `usage_by_profile`.
+#[derive(Default)]
+struct ProfileUsage {
+    kind: &'static str,
+    workers: usize,
+    delegate_runs: usize,
+    known: Vec<UsageTotals>,
+    unknown: usize,
+}
+
+impl ProfileUsage {
+    fn add(&mut self, report: &UsageReport) {
+        match report.known() {
+            Some(t) => self.known.push(*t),
+            None => self.unknown += 1,
+        }
+    }
+}
+
+/// `usage_by_profile`: workers grouped by their recorded profile, and the
+/// delegate runs of the run ledger that started at or after the session's
+/// creation, resolved through each run's CLI usage facet at the repository
+/// root. Workers without a profile do not appear; `usage_total` is
+/// unaffected.
+fn usage_by_profile(
+    ctx: &CommandContext,
+    existing: &session::Session,
+    worker_usage: &[UsageReport],
+) -> serde_json::Value {
+    let config = ctx.config().ok();
+    let kind_of = |name: &str, fallback: &'static str| {
+        config
+            .and_then(|c| c.profile(name))
+            .map_or(fallback, |p| p.kind.as_str())
+    };
+    let mut by: std::collections::BTreeMap<String, ProfileUsage> =
+        std::collections::BTreeMap::new();
+    for (entry, report) in existing.worktrees.iter().zip(worker_usage) {
+        let Some(profile) = &entry.profile else {
+            continue;
+        };
+        let acc = by.entry(profile.clone()).or_default();
+        acc.kind = kind_of(profile, "worker");
+        acc.workers += 1;
+        acc.add(report);
+    }
+    let since = existing
+        .created_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let clis = config.map(|c| c.clis.clone()).unwrap_or_default();
+    for run in crate::delegate::read_ledger(&existing.repo_path) {
+        if run.started_at < since {
+            continue;
+        }
+        let report = CliProfile::resolve(&run.cli, &clis)
+            .usage(run.session_id.as_deref(), &existing.repo_path);
+        let acc = by.entry(run.profile.clone()).or_default();
+        acc.kind = kind_of(&run.profile, "delegate");
+        acc.delegate_runs += 1;
+        acc.add(&report);
+    }
+    let map: serde_json::Map<String, serde_json::Value> = by
+        .into_iter()
+        .map(|(name, acc)| {
+            let usage = if acc.known.is_empty() {
+                serde_json::Value::Null
+            } else {
+                usage_json(&UsageTotals::sum(&acc.known))
+            };
+            (
+                name,
+                serde_json::json!({
+                    "kind": acc.kind,
+                    "workers": acc.workers,
+                    "delegate_runs": acc.delegate_runs,
+                    "usage": usage,
+                    "unknown": acc.unknown,
+                }),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(map)
 }
 
 /// Scripts parse this output: keep the key names and order stable.
