@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-13
+
+### Features
+
+- *(agents,config)* Keep worker safety on when a cli inherits the operator's config
+- *(config,cli,supervisor)* Add worker and delegate agent profiles
+- *(skills,supervisor)* Move the audit gates into orchestrator package references
+- *(skills,agents)* Render per-cli coordination fragments for each agent's cli family
+- *(skills,init,cli)* Install skill packages under .git-paw/skills and move helper grants to them
+- *(agents)* Launch claude workers without prompt suggestions
+- *(agents,config)* Launch claude-family workers without the operator's personal config
+
+### Bug Fixes
+
+- *(skills)* Resolve skill overrides from the repository, the user, then embedded
+
+### Refactor
+
+- *(skills)* Ship bundled skills as agentskills.io packages behind one registry
+
+### Documentation
+
+- *(specs)* Fold the v0.19.0 run findings into the v0.20.0 proposals
+- *(specs)* Add the v0.20.0 change proposals
+
+### Testing
+
+- *(tmux)* Wait for the live-session fixture panes to run their command
 ## [0.19.0] - 2026-11-11
 
 ### Features
@@ -46,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI/CD
 
+- Build the aarch64-apple-darwin release on macos-15
 - Ignore the rmcp advisory in cargo-audit as deny.toml already does
 - Run the macos test job on macos-15
 ## [0.18.0] - 2026-10-29
@@ -518,6 +547,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.20.0]: https://github.com/bearicorn/git-paw/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/bearicorn/git-paw/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/bearicorn/git-paw/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/bearicorn/git-paw/compare/v0.16.0...v0.17.0
