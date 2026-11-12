@@ -371,11 +371,18 @@ pub struct ResolvedPackage {
 
 /// The values a package is rendered with for one install location: an agent
 /// worktree (the agent's branch and the session's broker URL) or the
-/// repository root (the current branch and the configured broker URL).
+/// repository root (the orchestrator's reserved id and the configured broker
+/// URL).
 #[derive(Debug, Clone, Copy)]
 pub struct RenderInputs<'a> {
-    /// The branch whose slug renders into `{{BRANCH_ID}}`.
+    /// The branch whose slug renders into `{{BRANCH_ID}}`; ignored for the
+    /// repository root ([`Self::root`]).
     pub branch: &'a str,
+    /// Whether this is the repository-root install, which renders
+    /// `{{BRANCH_ID}}` as the orchestrator's reserved id
+    /// ([`crate::surface::SUPERVISOR_AGENT_ID`]) rather than a branch slug, so
+    /// a branch switch never makes the root skills stale.
+    pub root: bool,
     /// The broker URL rendered into `{{GIT_PAW_BROKER_URL}}`.
     pub broker_url: &'a str,
     /// The project name rendered into `{{PROJECT_NAME}}`.
@@ -402,6 +409,15 @@ pub struct RenderedFile {
 /// agent's managed block — for `inputs`.
 #[must_use]
 pub fn render_package_body(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> String {
+    if inputs.root {
+        return render_for_supervisor(
+            &resolved.template,
+            inputs.broker_url,
+            inputs.project,
+            &inputs.gates,
+            inputs.backends,
+        );
+    }
     render(
         &resolved.template,
         inputs.branch,
@@ -443,16 +459,10 @@ pub fn render_package(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> 
             resource_paths: None,
             origin_path: None,
         };
+        let resolved = ResolvedPackage { package, template };
         files.push(RenderedFile {
             path: reference.path.to_string(),
-            content: render(
-                &template,
-                inputs.branch,
-                inputs.broker_url,
-                inputs.project,
-                &inputs.gates,
-                inputs.backends,
-            ),
+            content: render_package_body(&resolved, inputs),
             executable: false,
         });
     }
@@ -2029,6 +2039,7 @@ mod tests {
     fn test_render_inputs() -> RenderInputs<'static> {
         RenderInputs {
             branch: "feat/x",
+            root: false,
             broker_url: "http://127.0.0.1:9119",
             project: "proj",
             gates: GateCommands::default(),

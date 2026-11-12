@@ -295,6 +295,15 @@ Read these before applying the item:
   the same file when you answer "don't ask again"; a write that lands between
   git-paw's re-read and its rename would be lost. git-paw detects the change
   and stops rather than clobbering it.
+- **Re-run setup soon after upgrading.** Until you run `--undo` then
+  `--allowlist`, an allowlist applied by v0.19.0 or earlier carries only the
+  old `Edit(**/.git-paw/scripts/**)` deny rule. If you answer "don't ask
+  again" to a prompt for a package-path helper in that window, the CLI saves
+  a grant for `.git-paw/skills/…` that no deny rule protects, so an agent in
+  an edit-accepting mode could rewrite that helper and have the grant run it.
+  Re-apply the item (which adds `Edit(**/.git-paw/skills/**)`) before
+  approving package-path prompts durably, and review any grant you saved
+  meanwhile.
 - **Durable grants on the old path keep working.** A "don't ask again" rule
   or a hand-written rule for `.git-paw/scripts/…` still grants the
   compatibility copy, which still runs. The re-applied item keeps

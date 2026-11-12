@@ -10,11 +10,15 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report ✗ for `sweep.sh` with a remedy to run `git paw init`
 
+Test: `doctor::tests::bundled_script_check_grades_each_on_disk_state`, `tests/doctor_e2e.rs::a_missing_package_helper_fails_naming_init`
+
 #### Scenario: A bundled script is stale
 
 - **GIVEN** a package helper exists but its content differs from the running binary's embedded version
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report a non-✓ status with a remedy to run `git paw init`
+
+Test: `doctor::tests::bundled_script_check_grades_each_on_disk_state`
 
 #### Scenario: A package's SKILL.md is missing
 
@@ -22,12 +26,16 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report ✗ for the `coordination` package with a remedy to run `git paw init`
 
+Test: `doctor::tests::a_missing_package_skill_md_fails_naming_the_package`
+
 #### Scenario: A missing compatibility copy is a warning
 
 - **GIVEN** every package is installed and intact but `.git-paw/scripts/broker.sh` is missing
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report ⚠ for the compatibility copy
 - **AND** SHALL NOT report ✗
+
+Test: `doctor::tests::a_missing_compatibility_copy_is_a_warning`
 
 #### Scenario: A root skill rendered before a config change is stale
 
@@ -37,6 +45,8 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - **THEN** the Bundled-scripts group SHALL report ⚠ for the `orchestrator` package as stale with a remedy naming `git paw start` or `git paw init`
 - **AND** `.git-paw/skills/orchestrator/SKILL.md` SHALL be byte-identical afterwards
 
+Test: `doctor::tests::a_stale_rendered_root_skill_warns_naming_start_or_init`, `tests/doctor_e2e.rs::a_root_skill_rendered_before_a_config_change_is_stale`
+
 #### Scenario: An uninitialised repository is reported once
 
 - **GIVEN** a git repository where `git paw init` never ran, so there is no `.git-paw/config.toml`
@@ -44,11 +54,15 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - **THEN** the Bundled-scripts group SHALL report exactly one package line, ⚠, stating the repository is not initialised with the remedy `git paw init`
 - **AND** SHALL report no ✗ for a package, helper or compatibility copy
 
+Test: `doctor::tests::an_uninitialised_repository_is_reported_once`, `tests/doctor_e2e.rs::an_uninitialised_repository_is_reported_once`
+
 #### Scenario: No Python 3 interpreter on PATH
 
 - **GIVEN** neither `python3` nor a version-3 `python` is on PATH
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report ⚠ for the Python 3 interpreter with a remedy to install Python 3 (the bundled helper scripts require it)
+
+Test: `doctor::tests::missing_python3_warns_rather_than_fails`
 
 ### Requirement: Doctor reports CLI setup state
 
@@ -58,7 +72,7 @@ The command SHALL verify, for every package in the bundled package registry, tha
 - ✓ when every applied item's recorded entries are present and unchanged and every entry the running binary would plan is present in the target file;
 - ⚠ when a recorded entry is missing or changed, with a remedy naming `git paw setup-cli <CLI> --undo` or re-applying the item;
 - ⚠ when the applied entries differ from the entries the running binary would plan — an entry it would plan is absent from the target file, or the record holds an entry it no longer plans — with a remedy naming `git paw setup-cli <CLI> --undo` followed by re-applying the item;
-- ⚠ when an allowlist item is applied and a helper script at a path an applied allow entry names — its package path, or the compatibility path `.git-paw/scripts/` for entries applied before the package move — in the main checkout or in a worktree of the current session differs from the copy the binary bundles, naming that helper's path, because the CLI would run the modified helper without a prompt, with a remedy to restore the helper (`git paw init` for the main checkout, restarting the session for a worktree) or undo the item.
+- ⚠ when an allowlist item is applied and a helper script at a path an allow entry in the target file or the record names — its package path, or the compatibility path `.git-paw/scripts/` for entries applied before the package move — or any other bundled script in that helper's directory (such as the shared `_paw_common.sh` preamble it sources), in the main checkout or in a worktree of the current session, differs from the copy the binary bundles, naming that script's path, because the CLI would run the modified script without a prompt, with a remedy to restore the helper (`git paw init` for the main checkout, restarting the session for a worktree) or undo the item.
 
 Entries applied by an earlier version for the pre-package `.git-paw/scripts/` paths differ from the entries the running binary plans, so they SHALL be reported as out of date under the rule above. Doctor and every other command SHALL leave them in place: only the user, by running `git paw setup-cli <CLI> --undo` and then re-applying the item, replaces them.
 
@@ -132,12 +146,22 @@ Test: `cli_setup::doctor::tests::a_hand_deletion_is_caught_when_every_planned_en
 
 Test: `cli_setup::doctor::tests::a_modified_granted_helper_warns_naming_its_path`
 
+#### Scenario: A modified preamble beside a granted helper is reported
+
+- **GIVEN** the allowlist item applied and a `.git-paw/skills/coordination/scripts/_paw_common.sh` that differs from the bundled copy
+- **WHEN** `git paw doctor` runs
+- **THEN** the setup check SHALL be ⚠ naming that preamble's path
+
+Test: `cli_setup::doctor::tests::a_tampered_preamble_beside_a_granted_helper_is_checked`, `cli_setup::doctor::tests::helper_paths_follow_the_applied_allow_entries`
+
 #### Scenario: Entries applied before the package move are out of date
 
 - **GIVEN** a setup record, written by an earlier version, whose applied allowlist entries name `.git-paw/scripts/` paths, all present and unchanged
 - **WHEN** `git paw doctor` runs
 - **THEN** the setup check SHALL be ⚠ with a remedy naming `git paw setup-cli claude --undo` followed by re-applying `--allowlist`
 - **AND** the settings file and the setup record SHALL be byte-identical afterwards
+
+Test: `cli_setup::doctor::tests::entries_applied_before_the_package_move_are_out_of_date`, `tests/doctor_e2e.rs::entries_applied_before_the_package_move_are_out_of_date`
 
 #### Scenario: The setup check is read-only and never fails doctor
 
@@ -210,6 +234,8 @@ Test: `cli_setup::doctor::tests::a_wide_helper_grant_is_listed`
 - **GIVEN** `permissions.allow` holds `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh *)`
 - **WHEN** `git paw doctor` runs
 - **THEN** the advisory check SHALL be ⚠ listing `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh *)` with the helper path unabbreviated
+
+Test: `cli_setup::doctor::tests::a_wide_grant_at_the_package_path_is_listed_whole`, `cli_setup::doctor::tests::a_long_non_helper_word_is_still_cut`
 
 #### Scenario: The advisory never edits the file
 

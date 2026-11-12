@@ -11,6 +11,8 @@ The system SHALL ensure the repo's `.gitignore` lists the git-paw runtime/scratc
 - **WHEN** init completes
 - **THEN** `.gitignore` SHALL contain `.git-paw/tmp/`
 
+Test: `init::tests::repo_local_tmp_added_to_gitignore_and_not_duplicated`
+
 #### Scenario: Gitignore includes the worktrees directory after init
 
 - **GIVEN** `git paw init` is run in a repo without `.git-paw/worktrees/` in
@@ -18,11 +20,15 @@ The system SHALL ensure the repo's `.gitignore` lists the git-paw runtime/scratc
 - **WHEN** init completes
 - **THEN** `.gitignore` SHALL contain `.git-paw/worktrees/`
 
+Test: `init::tests::worktrees_dir_added_to_gitignore_and_not_duplicated`
+
 #### Scenario: Gitignore includes session-summary.md after init
 
 - **GIVEN** `git paw init` is run in a repo without `.git-paw/session-summary.md` in `.gitignore`
 - **WHEN** init completes
 - **THEN** `.gitignore` SHALL contain `.git-paw/session-summary.md`
+
+Test: `init::tests::session_summary_added_alongside_logs`
 
 #### Scenario: Gitignore not duplicated on repeated init
 
@@ -31,8 +37,12 @@ The system SHALL ensure the repo's `.gitignore` lists the git-paw runtime/scratc
 - **WHEN** `git paw init` is run again
 - **THEN** each managed entry SHALL appear exactly once in `.gitignore`
 
+Test: `init::tests::idempotent_gitignore`
+
 #### Scenario: Runtime state is not staged by git add .git-paw/
 
 - **GIVEN** a repository where `git paw init` ran and a session wrote `.git-paw/sessions/<name>.json`, `.git-paw/scripts/sweep.sh`, `.git-paw/AGENTS.local.md` and `.git-paw/.sweep-progress`
 - **WHEN** `git add .git-paw/` is run
 - **THEN** the index SHALL hold `.git-paw/config.toml` and no other path under `.git-paw/`
+
+Test: `tests/cli_init_installs_packages.rs::runtime_state_is_not_staged_by_git_add`

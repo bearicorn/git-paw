@@ -270,6 +270,7 @@ pub(crate) fn attach_agent(
     let broker_url = ctx.broker_config.url();
     let render_inputs = crate::skills::RenderInputs {
         branch,
+        root: false,
         broker_url: &broker_url,
         project: ctx.project,
         gates: *ctx.gate_commands,

@@ -278,3 +278,49 @@ fn a_gate_command_configured_after_init_reaches_the_root_skill() {
     assert!(line.contains("make test"), "{line}");
     assert!(!line.contains("(not configured)"), "{line}");
 }
+
+// skill-packages / Scenario: Installing packages leaves setup grants
+// untouched — across `git paw init` and a `git paw start` that provisions a
+// worktree, the main checkout's settings file and the setup record are
+// byte-identical.
+#[test]
+#[serial]
+fn installing_packages_leaves_setup_grants_untouched() {
+    if !tmux_available() {
+        return;
+    }
+    let tr = setup_test_repo();
+    let env = tmux_test_env();
+    let repo = unique_repo(&tr, "grants");
+    write_config(&repo, "");
+    let settings = repo.join(".claude/settings.local.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        r#"{"permissions":{"allow":["Bash(.git-paw/scripts/broker.sh *)"],"deny":["Edit(**/.git-paw/scripts/**)"]}}"#,
+    )
+    .unwrap();
+    let record = repo.join(".git/git-paw/cli-setup.json");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+    let before = (fs::read(&settings).unwrap(), fs::read(&record).unwrap());
+
+    let (ok, out) = paw(&repo, &env, &["init"]);
+    assert!(ok, "init failed:\n{out}");
+    bare_start(&repo, &env);
+
+    let worktree_skill = fs::read_dir(repo.join(".git-paw/worktrees"))
+        .expect("a worktree was provisioned")
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.path()
+                .join(".git-paw/skills/coordination/SKILL.md")
+                .is_file()
+        });
+    assert!(worktree_skill, "start provisioned the worktree's packages");
+    assert_eq!(
+        (fs::read(&settings).unwrap(), fs::read(&record).unwrap()),
+        before,
+        "the settings file and the setup record must be byte-identical"
+    );
+}

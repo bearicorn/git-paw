@@ -338,6 +338,7 @@ pub fn start(
         let broker_url = broker_config.url();
         let render_inputs = crate::skills::RenderInputs {
             branch,
+            root: false,
             broker_url: &broker_url,
             project: &project,
             gates: crate::skills::GateCommands::default(),
@@ -845,6 +846,7 @@ fn launch_spec_session(
         let broker_url = broker_config.url();
         let render_inputs = crate::skills::RenderInputs {
             branch,
+            root: false,
             broker_url: &broker_url,
             project,
             gates: config

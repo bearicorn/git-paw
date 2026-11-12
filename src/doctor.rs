@@ -1140,8 +1140,11 @@ fn placement_word(placement: WorktreePlacement) -> &'static str {
     }
 }
 
-/// Bundled-script checks: each helper present, executable, and matching the
-/// running binary's embedded copy, plus the Python 3 interpreter they need.
+/// Bundled-scripts checks: each root package's `SKILL.md` present and current
+/// with the config, each package helper present, executable and matching the
+/// running binary's embedded copy (✗/✗/⚠), the compatibility copies (⚠
+/// only), one "not initialised" line when there is no config, and the Python 3
+/// interpreter the helpers need.
 #[must_use]
 pub fn check_bundled_scripts(probe: &BundledScriptsProbe) -> Vec<CheckResult> {
     const REINSTALL: &str = "run `git paw init` to (re)install the bundled skill packages";
@@ -2149,9 +2152,10 @@ fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
     // relative path resolves against whichever of them a session runs in.
     let mut roots = vec![repo_root.to_path_buf()];
     roots.extend(session_worktree_roots(repo_root));
-    // The allow entries applied: every recorded one, and every planned one
-    // the target file holds (an entry the user already had is not recorded).
-    let planned = crate::cli_setup::facts::planned_allow_entries();
+    // The allow entries that can run a helper without a prompt: every
+    // recorded one, and every allow value the target file holds — planned or
+    // not, so a durable grant the CLI saved ("don't ask again") or the user
+    // wrote is drift-checked too.
     let mut applied_allow: Vec<String> = entries
         .iter()
         .filter(|e| e.kind == record::EntryKind::Allow)
@@ -2171,9 +2175,7 @@ fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
             .flatten()
             .filter_map(serde_json::Value::as_str)
         {
-            if planned.iter().any(|p| p == value) {
-                applied_allow.push(value.to_string());
-            }
+            applied_allow.push(value.to_string());
         }
     }
     let helpers = setup_doctor::helper_paths(&roots, &applied_allow)

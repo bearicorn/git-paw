@@ -291,6 +291,7 @@ fn an_overrides_script_is_not_installed() {
     .expect("selection resolves");
     let inputs = git_paw::skills::RenderInputs {
         branch: "feat/x",
+        root: false,
         broker_url: "http://127.0.0.1:9119",
         project: "proj",
         gates: git_paw::skills::GateCommands::default(),

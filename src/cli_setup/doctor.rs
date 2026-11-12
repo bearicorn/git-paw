@@ -860,19 +860,25 @@ fn render_from_helper(spec: &str, helper_index: usize) -> String {
     format!("{COMMAND_TOOL}({inner})")
 }
 
-/// Returns the helper paths a granted invocation would run, for the drift
-/// check: under each root, every path an applied allow entry names — the
-/// package path `.git-paw/skills/<package>/scripts/<helper>`, or the
-/// compatibility path `.git-paw/scripts/<helper>` for an entry applied before
-/// the package move. A value that names no bundled helper adds nothing.
+/// Returns the helper scripts a granted invocation would run, for the drift
+/// check: under each root, every bundled script in the directory an applied
+/// allow entry names — a package's `.git-paw/skills/<package>/scripts/`, or
+/// the compatibility directory `.git-paw/scripts/` for an entry applied
+/// before the package move. The whole directory, not only the named helper:
+/// the helper sources the shared `_paw_common.sh` beside it, so a tampered
+/// preamble runs without a prompt too. A value that names no bundled helper
+/// adds nothing.
 #[must_use]
 pub fn helper_paths(roots: &[PathBuf], applied_allow: &[String]) -> Vec<PathBuf> {
     let mut relative: Vec<String> = Vec::new();
     for value in applied_allow {
-        if let Some(path) = granted_helper_path(value)
-            && !relative.contains(&path)
-        {
-            relative.push(path);
+        let Some(path) = granted_helper_path(value) else {
+            continue;
+        };
+        for script in sibling_scripts(&path) {
+            if !relative.contains(&script) {
+                relative.push(script);
+            }
         }
     }
     roots
@@ -890,6 +896,28 @@ fn granted_helper_path(value: &str) -> Option<String> {
         .take_while(|c| !matches!(c, ' ' | ':' | '*' | ')'))
         .collect();
     is_helper_path(&path).then_some(path)
+}
+
+/// Every bundled script installed beside the granted helper at `path`: the
+/// package's scripts for a package path, every bundled script for the
+/// compatibility directory.
+fn sibling_scripts(path: &str) -> Vec<String> {
+    if path.starts_with(&format!("{HELPER_DIR}/")) {
+        return crate::init::bundled_scripts()
+            .into_iter()
+            .map(|(name, _)| format!("{HELPER_DIR}/{name}"))
+            .collect();
+    }
+    crate::skills::bundled_packages()
+        .iter()
+        .find(|p| p.helper_paths().any(|h| h == path))
+        .map(|p| {
+            p.scripts
+                .iter()
+                .map(|f| format!("{}/{}", p.install_dir(), f.path))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether `word` names a bundled helper by its package invocation path or by
@@ -1278,22 +1306,51 @@ mod tests {
             &[
                 "Bash(.git-paw/skills/coordination/scripts/broker.sh *)".to_string(),
                 "Bash(.git-paw/scripts/sweep.sh status *)".to_string(),
-                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh status *)".to_string(),
                 "Bash(make test *)".to_string(),
                 "Bash(.git-paw/skills/x/scripts/evil.sh *)".to_string(),
             ],
         );
+        let rel: Vec<String> = paths
+            .iter()
+            .filter(|p| p.starts_with("/repo"))
+            .map(|p| p.strip_prefix("/repo").unwrap().display().to_string())
+            .collect();
         assert_eq!(
-            paths,
+            rel,
             [
-                "/repo/.git-paw/skills/coordination/scripts/broker.sh",
-                "/repo/.git-paw/scripts/sweep.sh",
-                "/repo/.git-paw/skills/orchestrator/scripts/sweep.sh",
-                "/wt/.git-paw/skills/coordination/scripts/broker.sh",
-                "/wt/.git-paw/scripts/sweep.sh",
-                "/wt/.git-paw/skills/orchestrator/scripts/sweep.sh",
+                ".git-paw/skills/coordination/scripts/_paw_common.sh",
+                ".git-paw/skills/coordination/scripts/broker.sh",
+                ".git-paw/scripts/_paw_common.sh",
+                ".git-paw/scripts/sweep.sh",
+                ".git-paw/scripts/broker.sh",
+                ".git-paw/scripts/docs-fetch.sh",
             ]
-            .map(PathBuf::from)
+        );
+        assert_eq!(paths.len(), 2 * rel.len(), "every root is walked");
+    }
+
+    // The shared preamble a granted helper sources is drift-checked too: a
+    // tampered `_paw_common.sh` beside a granted `broker.sh` runs unprompted.
+    #[test]
+    fn a_tampered_preamble_beside_a_granted_helper_is_checked() {
+        let paths = helper_paths(
+            &[PathBuf::from("/repo")],
+            &["Bash(.git-paw/skills/coordination/scripts/broker.sh *)".to_string()],
+        );
+        let preamble = PathBuf::from("/repo/.git-paw/skills/coordination/scripts/_paw_common.sh");
+        assert!(paths.contains(&preamble), "{paths:?}");
+
+        let mut probe = applied_probe();
+        probe.helpers.push(HelperState {
+            path: preamble,
+            matches_bundled: false,
+        });
+        let c = only(&check_cli_setup(&probe), "claude setup");
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(
+            c.detail.contains("coordination/scripts/_paw_common.sh"),
+            "{}",
+            c.detail
         );
     }
 
@@ -1734,6 +1791,30 @@ mod tests {
                 "{rule}"
             );
         }
+    }
+
+    // Grant residue at the package path is caught like the compatibility
+    // path (the check matches the helper by its file name).
+    #[test]
+    fn residue_at_the_package_path_is_reported() {
+        for rule in [
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)",
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)",
+            "Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh get *)",
+        ] {
+            let c = only(
+                &check_grant_residue(&residue(&[rule])),
+                "project CLI grant residue",
+            );
+            assert_eq!(c.status, CheckStatus::Warn, "{rule}: {}", c.detail);
+        }
+        let own = only(
+            &check_grant_residue(&residue(&[
+                "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
+            ])),
+            "project CLI grant residue",
+        );
+        assert_eq!(own.status, CheckStatus::Ok, "{}", own.detail);
     }
 
     #[test]

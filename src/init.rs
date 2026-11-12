@@ -44,9 +44,9 @@ const GITIGNORE_ENTRIES: &[&str] = &[
 /// order, each file name once (the shared `_paw_common.sh` preamble every
 /// helper-shipping package lists is installed once, first).
 ///
-/// Exposed so diagnostics (`git paw doctor`) can compare the copies on disk
-/// under `.git-paw/scripts/` against the running binary's embedded versions
-/// without duplicating the embedded set.
+/// These are also the compatibility copies under `.git-paw/scripts/`.
+/// Exposed so diagnostics (`git paw doctor`) and the setup grant table can
+/// compare against the running binary's embedded set without duplicating it.
 #[must_use]
 pub fn bundled_scripts() -> Vec<(&'static str, &'static str)> {
     let mut scripts: Vec<(&'static str, &'static str)> = Vec::new();
@@ -233,8 +233,9 @@ pub fn refresh_root_scripts(
 }
 
 /// Renders every registered bundled package for the repository root, from
-/// session-independent inputs: the current branch (the `supervisor` id when
-/// none resolves), the configured broker URL, the project name, the
+/// session-independent inputs: the orchestrator's reserved agent id (never
+/// the current branch, so a branch switch leaves the root skills current),
+/// the configured broker URL, the project name, the
 /// `[supervisor]` gate commands and the configured spec format. Pure apart
 /// from resolving overrides and the current branch: writes nothing, so
 /// `git paw doctor` can compare the installed root files with it.
@@ -257,12 +258,11 @@ pub fn render_root_packages(
         .into_iter()
         .collect();
     let supervisor = config.supervisor.clone().unwrap_or_default();
-    let branch = git::current_branch(repo_root)
-        .unwrap_or_else(|_| crate::surface::SUPERVISOR_AGENT_ID.to_string());
     let broker_url = config.broker.url();
     let project = git::project_name(repo_root);
     let inputs = crate::skills::RenderInputs {
-        branch: &branch,
+        branch: crate::surface::SUPERVISOR_AGENT_ID,
+        root: true,
         broker_url: &broker_url,
         project: &project,
         gates: supervisor.gate_commands(),
@@ -1873,6 +1873,7 @@ test_command = "just check"
     fn render_inputs() -> crate::skills::RenderInputs<'static> {
         crate::skills::RenderInputs {
             branch: "feat/x",
+            root: false,
             broker_url: "http://127.0.0.1:9119",
             project: "proj",
             gates: crate::skills::GateCommands::default(),
@@ -2229,6 +2230,43 @@ test_command = "just check"
                 .unwrap();
             assert_eq!(mtime, old, "{rel} was rewritten");
         }
+    }
+
+    // The root packages render the orchestrator's reserved id, never the
+    // current branch: a branch switch leaves them current, and the root
+    // coordination skill never names a branch as its agent.
+    #[test]
+    fn root_packages_render_the_supervisor_id_whatever_the_branch() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q", "-b", "feat/one"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let config = config::PawConfig::default();
+        let render = |root: &Path| {
+            render_root_packages(root, &config)
+                .unwrap()
+                .into_iter()
+                .find(|(p, _)| p.name == "coordination")
+                .map(|(_, files)| files[0].content.clone())
+                .unwrap()
+        };
+        let first = render(dir.path());
+        assert!(first.contains("--agent supervisor "), "{first}");
+        assert!(!first.contains("feat-one"), "{first}");
+        assert!(
+            std::process::Command::new("git")
+                .args(["checkout", "-q", "-b", "feat/two"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(render(dir.path()), first, "a branch switch changes nothing");
     }
 
     // skill-packages / Scenario: A gate command configured after init reaches

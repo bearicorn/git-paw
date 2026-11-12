@@ -93,6 +93,8 @@ Test: `cli_setup::facts::tests::allow_entries_are_exactly_the_grant_table, cli_s
 - **WHEN** the allowlist item is planned for `claude`
 - **THEN** its `permissions.allow` entries SHALL include `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)`
 
+Test: `cli_setup::facts::tests::the_read_only_events_subcommand_is_granted`
+
 #### Scenario: Keystroke and verdict subcommands are never allowed
 
 - **WHEN** the allowlist item is planned for `claude`
@@ -121,6 +123,8 @@ Test: `cli_setup::facts::tests::every_allow_entry_is_a_path_scoped_bundled_helpe
 
 - **WHEN** the allowlist item is planned for `claude`
 - **THEN** no `permissions.allow` entry SHALL begin `Bash(.git-paw/scripts/`
+
+Test: `cli_setup::facts::tests::the_compatibility_path_is_never_allowed`
 
 #### Scenario: The grant table covers every helper and subcommand
 
@@ -291,11 +295,15 @@ Test: `cli_setup::undo::tests::protection_is_kept_while_an_edited_helper_grant_r
 - **THEN** those entries and their protection rules SHALL be removed
 - **AND** no other entry in the file SHALL change
 
+Test: `cli_setup::undo::tests::entries_recorded_before_the_package_move_are_undone`, `tests/doctor_e2e.rs::entries_applied_before_the_package_move_are_out_of_date`
+
 #### Scenario: Package-path entries are undone
 
 - **GIVEN** recorded allowlist entries naming `.git-paw/skills/<package>/scripts/` paths and both deny rules, all unchanged
 - **WHEN** `git paw setup-cli claude --undo --yes` is run
 - **THEN** the allow, ask and deny entries git-paw recorded SHALL be removed
+
+Test: `cli_setup::undo::tests::package_path_entries_are_undone`, `cli_setup::undo::tests::protection_is_kept_while_a_package_path_grant_remains`
 
 #### Scenario: Another CLI's entries are untouched
 

@@ -243,7 +243,8 @@ matches the binary's again, so the cross-process approval exclusion spans a work
 `PROJECT_ROOT` keeps meaning "the current checkout", which `broker.sh` needs to derive the agent id
 from the worktree branch. Resolution depends on git, not on where the script lives, so it holds for
 the package path and the compatibility copy alike. `--path-format` needs git ≥ 2.31; on an older
-git the helper resolves the relative common dir against `PROJECT_ROOT` itself.
+git the helper resolves the relative common dir against the current directory (`$(pwd)`), which is
+what git prints it relative to.
 
 ## Risks / Trade-offs
 

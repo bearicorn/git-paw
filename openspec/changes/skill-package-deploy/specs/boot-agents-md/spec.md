@@ -11,14 +11,20 @@ The system SHALL include in an agent worktree's managed git-paw block a `## Skil
 - **THEN** it SHALL contain a `## Skills` section with one entry naming `coordination`, `.git-paw/skills/coordination/SKILL.md` and `.git-paw/skills/coordination/scripts/broker.sh`
 - **AND** that section SHALL appear before the inlined coordination skill content and before `<!-- git-paw:end -->`
 
+Test: `agents::tests::index_lists_the_coordination_package`
+
 #### Scenario: Index follows the selection
 
 - **GIVEN** a session with the broker enabled and `docs_base_url` configured
 - **WHEN** an agent's managed block is generated
 - **THEN** the `## Skills` index SHALL list `coordination` and `docs-fetch`, in that order
 
+Test: `agents::tests::index_follows_the_selection`, `tests/worktree_helper_provisioning.rs::supervisor_launch_provisions_broker_helper_into_each_worktree`
+
 #### Scenario: No packages, no index
 
 - **GIVEN** a session with the broker disabled and `docs_base_url` unset
 - **WHEN** an agent's managed block is generated
 - **THEN** it SHALL NOT contain a `## Skills` section
+
+Test: `agents::tests::no_packages_no_index`

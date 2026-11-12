@@ -191,8 +191,8 @@ either holds one of exactly three things:
 | Residue | Example | Why it matters |
 |---|---|---|
 | A `permissions.allow` entry granting `curl` with any arguments | `Bash(curl *)`, `Bash(curl:*)`, `Bash(curl*)` | an unrestricted network client |
-| A `permissions.allow` entry naming a helper script with a keystroke or verdict subcommand | `Bash(.git-paw/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/scripts/sweep.sh *)` | it lets an agent session approve its own permission prompts, or publish a supervisor verdict, without a prompt |
-| A `permissions.allow` entry naming the pass-through fetch subcommand | `Bash(.git-paw/scripts/docs-fetch.sh get *)` | it passes an arbitrary URL through, so a session can read any file it names or send repository content to any host |
+| A `permissions.allow` entry naming a helper script with a keystroke or verdict subcommand | `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)` | it lets an agent session approve its own permission prompts, or publish a supervisor verdict, without a prompt |
+| A `permissions.allow` entry naming the pass-through fetch subcommand | `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh get *)`, `Bash(.git-paw/scripts/docs-fetch.sh get *)` | it passes an arbitrary URL through, so a session can read any file it names or send repository content to any host |
 | A `permissions.allow` entry naming any other subcommand the grant table withholds | `Bash(.git-paw/scripts/sweep.sh classify *)` | a helper subcommand the grant table deliberately withholds from the allowlist item |
 | A top-level `allowed_bash_prefixes` key | — | the inert seed git-paw wrote before v0.16.0; it grants nothing in the current CLI and is pure leftover |
 
@@ -201,8 +201,9 @@ reaches, and a rule reaching several — a whole-script wildcard reaches all of
 them — is reported by the gravest.
 
 The helper rules are matched by the helper's name wherever it appears in the
-specifier, so a relative, absolute or interpreter-prefixed path is caught
-alike. A wildcard is matched in or across the subcommand position: both
+specifier, so the package path (`.git-paw/skills/<package>/scripts/…`), the
+compatibility path (`.git-paw/scripts/…`), an absolute or an
+interpreter-prefixed path are caught alike. A wildcard is matched in or across the subcommand position: both
 `Bash(.git-paw/scripts/sweep.sh *)` and `Bash(.git-paw/scripts/sweep.sh ap*)`
 reach `approve`. Two things are deliberately **not** residue: a specific loopback rule
 such as `Bash(curl -s http://127.0.0.1:9119/status)`, which names one
