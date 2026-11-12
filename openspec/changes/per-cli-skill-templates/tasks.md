@@ -27,5 +27,5 @@
 
 ## 6. Gates
 
-- [ ] 6.1 Every scenario maps to a named test
+- [x] 6.1 Every scenario maps to a named test
 - [ ] 6.2 `just check` (exit code read directly), `just deny`, `mdbook build docs/` green; full suite vs merge-base green
