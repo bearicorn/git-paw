@@ -172,13 +172,11 @@ launch command SHALL be unchanged. Two `[clis.*]` entries MAY name the same `com
 
 ### Requirement: Every worker launch path builds its command through one builder
 
-Every worker launch path SHALL build the pane command with one builder — bare start, spec-driven
-start, supervised start, `git paw add`, session recovery, and the launch-readiness relaunch alike —
-in this order: the family's operator-isolation environment as an `env NAME=value …` prefix (absent
-when the family declares none or the entry sets `inherit_operator_config`), the executable, the
-CLI's `args`, the operator-isolation arguments, the native sandbox arguments, the approval flags
-resolved for the effective approval level, then the session-id arguments for a fresh launch or the resume arguments
-for a recovery with a recorded session id. An empty part SHALL contribute no separator.
+Every worker launch path SHALL build the pane command with one builder (bare, spec-driven and
+supervised start, `git paw add`, recovery and the readiness relaunch), in this order: the
+operator-isolation `env NAME=value …` prefix, the executable, the CLI's `args`, the isolation
+arguments, native sandbox arguments, approval flags, then session-id or resume arguments. An
+empty part SHALL contribute no separator.
 
 #### Scenario: Start and add build identical commands
 
