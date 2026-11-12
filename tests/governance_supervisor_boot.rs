@@ -17,7 +17,13 @@
 use std::path::{Path, PathBuf};
 
 use git_paw::config::GovernanceConfig;
-use git_paw::skills::{render, resolve, supervisor_boot_context};
+use git_paw::skills::{render, supervisor_boot_context};
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 /// Assemble the supervisor pane's full boot-prompt body the way
 /// `cmd_supervisor` does: the rendered skill handed to

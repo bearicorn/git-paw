@@ -89,6 +89,7 @@ fn paw(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, args: &[&str]) -> std::
     c.current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(args)
         .timeout(Duration::from_secs(40))
         .output()

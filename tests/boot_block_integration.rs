@@ -179,7 +179,8 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env("PATH", &path_env)
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut start_cmd);
     let start_out = start_cmd
         .args(["start", "--cli", "paw-boot-sink", "--branches", "feat/x"])

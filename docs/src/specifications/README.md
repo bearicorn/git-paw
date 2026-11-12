@@ -182,6 +182,6 @@ have no user-guide chapter: the spec itself is their documentation.
 
 ### skill-
 
-- [`skill-agent`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-agent/spec.md) — defines the embedded coordination and supervisor skill templates git-paw injects, their resolution order (user override then embedded default), and the placeholder-rendering contract.
+- [`skill-agent`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-agent/spec.md) — defines the embedded coordination and supervisor skill templates git-paw injects, their resolution order (repository override in the main working tree, then user override, then embedded default), and the placeholder-rendering contract.
 - [`skill-packages`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-packages/spec.md) — packages each bundled skill as an agentskills.io directory with the scripts, references and assets it owns, behind one compiled registry that every consumer reads; overrides change skill text, never the helpers git-paw installs.
 - [`skill-standardized`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-standardized/spec.md) — supports the agentskills.io standardized skill format (a `SKILL.md` directory): auto-detecting, loading, and schema-validating it with actionable errors.

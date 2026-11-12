@@ -201,6 +201,7 @@ fn with_root_session(cmd: &mut StdCommand, repo: &Path) -> TempDir {
         .to_path_buf();
     cmd.env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env(
             "PATH",
             format!(

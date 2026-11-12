@@ -146,6 +146,7 @@ impl Fixture {
             ])
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .env(CHILD_REPO, &self.root)
             .env(CHILD_SESSION, &self.session)
             .env("GIT_PAW_ALLOW_LIVE_SESSION", "1");

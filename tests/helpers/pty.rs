@@ -49,6 +49,7 @@ pub fn create_detached_session(name: &str, home: &Path) {
     let status = Command::new("tmux")
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "new-session",
             "-d",

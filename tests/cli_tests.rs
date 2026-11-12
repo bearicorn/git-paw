@@ -130,6 +130,7 @@ fn stop_runs_without_error() {
     cmd()
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("stop")
         .assert()
         .success();
@@ -141,6 +142,7 @@ fn status_runs_without_error() {
     cmd()
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("status")
         .assert()
         .success();
@@ -152,6 +154,7 @@ fn list_clis_runs_without_error() {
     cmd()
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("list-clis")
         .assert()
         .success();
@@ -324,6 +327,7 @@ fn test_purge_no_unmerged_runs_without_warning() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .output()
         .expect("run purge");
@@ -373,6 +377,7 @@ fn test_purge_succeeds_with_force_flag() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .output()
         .expect("run purge");
@@ -402,6 +407,7 @@ fn test_purge_force_flag_works() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .output()
         .expect("run purge");
@@ -437,7 +443,7 @@ fn test_purge_cancel_preserves_worktrees() {
     let output = cmd()
         .current_dir(tr.path())
         .env("HOME", home.path())
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         .arg("purge") // no --force
         .output()
         .expect("run purge");

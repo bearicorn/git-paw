@@ -120,6 +120,7 @@ fn status_reports_stale_for_active_receipt_with_dead_tmux() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["status", "--json"])
         .output()
         .expect("status --json");
@@ -139,6 +140,7 @@ fn status_reports_stale_for_active_receipt_with_dead_tmux() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("status")
         .output()
         .expect("status");
@@ -188,6 +190,7 @@ fn start_with_stale_receipt_emits_notice_and_purges() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--no-supervisor"])
         .output()
         .expect("start");
@@ -236,6 +239,7 @@ fn purge_stale_removes_stale_receipt_only() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale"])
         .output()
         .expect("purge --stale");
@@ -277,6 +281,7 @@ fn purge_stale_with_nothing_stale_exits_zero() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale"])
         .output()
         .expect("purge --stale");
@@ -322,6 +327,7 @@ fn purge_stale_with_force_is_well_defined() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale", "--force"])
         .output()
         .expect("purge --stale --force");
@@ -373,6 +379,7 @@ fn purge_stale_default_scope_leaves_other_repo_stale_session_intact() {
         .current_dir(repo_a.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale"])
         .output()
         .expect("purge --stale");
@@ -416,6 +423,7 @@ fn purge_stale_all_repos_sweeps_every_repository() {
         .current_dir(repo_a.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale", "--all-repos"])
         .output()
         .expect("purge --stale --all-repos");
@@ -444,6 +452,7 @@ fn purge_all_repos_without_stale_is_rejected_by_the_binary() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--all-repos"])
         .output()
         .expect("purge --all-repos");
@@ -492,6 +501,7 @@ fn purge_stale_never_purges_a_live_session_in_the_current_repository() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale"])
         .output()
         .expect("purge --stale");
@@ -556,6 +566,7 @@ fn purge_stale_all_repos_never_purges_a_live_session_in_another_repository() {
         .current_dir(repo_a.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--stale", "--all-repos"])
         .output()
         .expect("purge --stale --all-repos");

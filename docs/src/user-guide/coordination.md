@@ -952,9 +952,10 @@ cue for the supervisor (not the agent) to run `/opsx:verify` and `/opsx:archive`
 
 This is a paw-specific rule for the bundled coordination skill. Single-agent
 workflows that self-verify can override the rule via the standard skill
-resolution chain (a user override at
-`<config_dir>/git-paw/agent-skills/coordination.md` wins over the bundled
-default).
+resolution order: a repository override at `.agents/skills/coordination/SKILL.md`
+in the main working tree wins, then a user override at
+`<config_dir>/git-paw/agent-skills/coordination/SKILL.md`, then the bundled
+default (see [Skill Templates → Skill Resolution](skill-templates.md#skill-resolution)).
 
 ## Identifier Forms — Branch vs `agent_id`
 

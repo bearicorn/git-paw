@@ -26,6 +26,7 @@ fn dry_run(repo: &Path, cli: &str) -> std::process::Output {
         .current_dir(repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", cli, "--branches", "feat-a", "--dry-run"])
         .output()
         .expect("run start --dry-run")
@@ -87,6 +88,7 @@ fn an_ambiguous_shim_fails_the_dry_run_and_doctor() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["doctor", "--json"])
         .output()
         .expect("run doctor");
@@ -159,6 +161,7 @@ fn a_native_sandbox_disabled_by_full_auto_refuses_the_launch_with_nothing_create
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "codex", "--branches", "feat-a"])
         .output()
         .expect("run start");

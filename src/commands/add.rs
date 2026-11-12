@@ -248,10 +248,11 @@ pub fn add(
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
     let coordination_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
+        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", &repo_root)?;
     // Gated on explicit `docs_base_url` (see supervisor) so an added agent
     // is byte-identical to a start-time one.
-    let docs_fetch_template = crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch")?;
+    let docs_fetch_template =
+        crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch", &repo_root)?;
     let session_backends: Vec<crate::specs::SpecBackendKind> = spec_entry
         .as_ref()
         .map(|s| vec![s.backend])

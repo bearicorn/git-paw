@@ -1,5 +1,6 @@
-//! Convention enforcement for the `core-ci-hygiene` requirement *Tests
-//! invoking git paw subcommands SHALL override HOME and `XDG_DATA_HOME`*.
+//! Convention enforcement for the `core-ci-hygiene` requirements *Tests
+//! invoking git paw subcommands SHALL override HOME and `XDG_DATA_HOME`* and
+//! *Binary tests also remove `XDG_CONFIG_HOME`*.
 //!
 //! The requirement was previously enforced by a one-time manual audit. It
 //! regressed twice — `tests/default_branch_fallback_integration.rs` and
@@ -50,15 +51,24 @@
 //!   all — the `.args([` scan alone never sees this shape.
 //!
 //! A test's own body counts as having the override if it contains at least
-//! one `.env("HOME", …)` and one of `.env_remove("XDG_DATA_HOME")` or
-//! `.env("XDG_DATA_HOME", …)`. The second form — explicitly pointing
+//! one `.env("HOME", …)`, one of `.env_remove("XDG_DATA_HOME")` or
+//! `.env("XDG_DATA_HOME", …)`, and one of `.env_remove("XDG_CONFIG_HOME")` or
+//! `.env("XDG_CONFIG_HOME", …)` (so a user skill override under the
+//! developer's real config directory can never reach the binary). The second form — explicitly pointing
 //! `XDG_DATA_HOME` at a path under the same tempdir as `HOME`, as
 //! `unattended_drive_e2e.rs`'s `spawn_unattended` helper does — is an
 //! equivalent isolation to removal: it guarantees the subprocess's data dir
 //! resolves inside the tempdir regardless of the ambient environment, which
 //! `env_remove` alone does not (it only restores the HOME-derived fallback,
 //! which is what the *absence* of `XDG_DATA_HOME` already means in the
-//! developer's real shell, but is not a logical requirement).
+//! developer's real shell, but is not a logical requirement). The same two
+//! forms are accepted for `XDG_CONFIG_HOME`.
+//!
+//! Separately, **every** top-level function in `tests/` whose body sets
+//! `HOME` and isolates `XDG_DATA_HOME` must also isolate `XDG_CONFIG_HOME`,
+//! whatever subcommand it runs ([`scan_config_home`]): the config directory
+//! carries user skill overrides, which change rendered skill text for any
+//! subcommand that resolves a skill (`init`, `doctor`, `mcp`, …).
 //!
 //! ## Documented exception
 //!
@@ -100,9 +110,46 @@ const EXEMPTION_MARKER: &str = "git-paw-test: real-home-required";
 /// helper function (the caller is responsible for scoping `body` to the
 /// relevant span).
 fn has_override_pattern(body: &str) -> bool {
-    body.contains(".env(\"HOME\"")
-        && (body.contains("env_remove(\"XDG_DATA_HOME\")")
-            || body.contains(".env(\"XDG_DATA_HOME\""))
+    body.contains(".env(\"HOME\"") && isolates_data_home(body) && isolates_config_home(body)
+}
+
+/// `true` if `body` removes `XDG_DATA_HOME` or points it at a chosen path.
+fn isolates_data_home(body: &str) -> bool {
+    body.contains("env_remove(\"XDG_DATA_HOME\")") || body.contains(".env(\"XDG_DATA_HOME\"")
+}
+
+/// `true` if `body` removes `XDG_CONFIG_HOME` or points it at a chosen path.
+fn isolates_config_home(body: &str) -> bool {
+    body.contains("env_remove(\"XDG_CONFIG_HOME\")") || body.contains(".env(\"XDG_CONFIG_HOME\"")
+}
+
+/// Flags every top-level function of a test file whose body sets `HOME` and
+/// isolates `XDG_DATA_HOME` but leaves `XDG_CONFIG_HOME` to the ambient
+/// environment, naming the file and the function. Honours the documented
+/// exception marker.
+fn scan_config_home(filename: &str, body: &str) -> Vec<String> {
+    if body.contains(EXEMPTION_MARKER) {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    function_spans(&lines)
+        .into_iter()
+        .filter(|span| {
+            let text = span_text(&lines, span.fn_line, span.body_end);
+            text.contains(".env(\"HOME\"")
+                && isolates_data_home(&text)
+                && !isolates_config_home(&text)
+        })
+        .map(|span| {
+            format!(
+                "{filename}:{}: fn `{}` — sets HOME and isolates XDG_DATA_HOME but not \
+                 XDG_CONFIG_HOME (add `.env_remove(\"XDG_CONFIG_HOME\")`, or the \
+                 `{EXEMPTION_MARKER}` exception comment)",
+                span.fn_line + 1,
+                span.name
+            )
+        })
+        .collect()
 }
 
 /// Extracts the first string literal inside a `.args([` … `])` call starting
@@ -506,6 +553,60 @@ fn test_files() -> Vec<(String, String)> {
     out
 }
 
+/// `core-ci-hygiene` / *Binary tests also remove `XDG_CONFIG_HOME`*: no test
+/// file isolates `HOME`/`XDG_DATA_HOME` while leaving `XDG_CONFIG_HOME` to
+/// the developer's environment.
+#[test]
+fn every_home_override_also_removes_xdg_config_home() {
+    let hits: Vec<String> = test_files()
+        .iter()
+        .flat_map(|(filename, body)| scan_config_home(filename, body))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "binary tests must also remove XDG_CONFIG_HOME (core-ci-hygiene: \"Binary tests \
+         also remove XDG_CONFIG_HOME\"):\n{}",
+        hits.join("\n")
+    );
+}
+
+/// Scenario "A test file that keeps `XDG_CONFIG_HOME` fails the suite".
+#[test]
+fn detector_flags_a_file_that_keeps_xdg_config_home() {
+    let synthetic = "\
+fn cmd() -> assert_cmd::Command {
+    assert_cmd::Command::cargo_bin(\"git-paw\").unwrap()
+}
+
+#[test]
+fn inits_with_data_home_only() {
+    let fake_home = tempfile::TempDir::new().unwrap();
+    let _ = cmd()
+        .env(\"HOME\", fake_home.path())
+        .env_remove(\"XDG_DATA_HOME\")
+        .args([\"init\"])
+        .output()
+        .unwrap();
+}
+";
+    let hits = scan_config_home("synthetic_keeps_config.rs", synthetic);
+    assert!(
+        hits.iter().any(|h| h.contains("synthetic_keeps_config.rs")),
+        "the detector must flag the file and name it; got: {hits:?}"
+    );
+    // Session-subcommand tests need the full triple too.
+    let session = synthetic.replace("[\"init\"]", "[\"start\"]");
+    assert!(!scan("synthetic_keeps_config.rs", &session, &HashSet::new()).is_empty());
+
+    let fixed = synthetic.replace(
+        ".env_remove(\"XDG_DATA_HOME\")",
+        ".env_remove(\"XDG_DATA_HOME\")\n        .env_remove(\"XDG_CONFIG_HOME\")",
+    );
+    assert!(scan_config_home("synthetic_fixed.rs", &fixed).is_empty());
+    let exempt = format!("// {EXEMPTION_MARKER}: reads the real config dir\n{synthetic}");
+    assert!(scan_config_home("synthetic_exempt.rs", &exempt).is_empty());
+}
+
 #[test]
 fn every_session_touching_subcommand_test_overrides_home_and_xdg() {
     let cross_file_helpers = collect_cross_file_helpers();
@@ -587,6 +688,7 @@ fn starts_with_override() {
     let _ = cmd()
         .env(\"HOME\", fake_home.path())
         .env_remove(\"XDG_DATA_HOME\")
+        .env_remove(\"XDG_CONFIG_HOME\")
         .args([\"start\", \"--cli\", \"sh\", \"--branches\", \"feat/x\"])
         .output()
         .unwrap();
@@ -617,6 +719,7 @@ fn existing_compliant_test() {
     let _ = cmd()
         .env(\"HOME\", fake_home.path())
         .env_remove(\"XDG_DATA_HOME\")
+        .env_remove(\"XDG_CONFIG_HOME\")
         .args([\"start\", \"--cli\", \"sh\", \"--branches\", \"feat/x\"])
         .output()
         .unwrap();

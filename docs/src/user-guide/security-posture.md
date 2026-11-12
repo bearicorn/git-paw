@@ -268,6 +268,28 @@ additionally lists the broad allow rules already in that file, so you can see
 what earlier "don't ask again" answers left behind — it reports them and never
 edits them.
 
+### Skill overrides change instructions, not permissions
+
+A [skill override](skill-templates.md#skill-resolution) — the repository's
+`.agents/skills/<name>/` in the main working tree, or your own
+`<config_dir>/git-paw/agent-skills/<name>/` — replaces a bundled skill's
+**text** only. No script, reference or asset from an override is installed,
+and the `setup-cli` grant names only git-paw's installed helpers, never an
+override directory. Override text can tell an agent to run a command, but
+git-paw approves no prompt, so that command runs only if the agent CLI's own
+permission system lets it — the same standing as the repository's `AGENTS.md`.
+
+The `cli-setup` skill, whose rules govern writing these settings, is **not
+overridable**: it always resolves from the binary, so neither a cloned
+repository's `.agents/skills/cli-setup/` nor a stale personal copy can rewrite
+its consent rules. `git paw doctor` warns when such a directory exists.
+
+A linked worktree's `.agents/skills/` is never read, so an agent cannot
+rewrite the skills git-paw re-injects into it. An agent's write into the main
+working tree's or your user override directory is a permission prompt like any
+other — unless the agent CLI runs in a full-bypass mode, which raises no prompt
+at all; then the [sandbox](#sandboxed-full-auto-workers) is the containment.
+
 ### Self-approval residue
 
 One shape of leftover grant deserves naming on its own, because it undoes the

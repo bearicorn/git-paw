@@ -236,7 +236,7 @@ fn spawn_start(
     command
         .current_dir(repo)
         .env("HOME", home)
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         .env("PATH", path)
         // Override the suite-wide short readiness timeout (set by
         // `TmuxTestEnv::apply`) for tests that need the gate to genuinely
@@ -409,6 +409,7 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
         .args(["start", "--from-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(40))
@@ -544,6 +545,7 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
         .args(["start", "--from-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(40))
@@ -653,6 +655,7 @@ command = "{cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
         .args(["start", "--from-specs", "--cli", cli])
         .timeout(Duration::from_secs(60))
@@ -729,7 +732,7 @@ command = "{probe_cli}"
         .current_dir(&repo)
         .env("PATH", &test_path)
         .env("HOME", home.path())
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         // Deliberately short: a backend with no entry point must not wait at
         // all, so even an 800 ms budget cannot be reached by this launch.
         .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "800")
@@ -824,6 +827,7 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--cli",
@@ -917,6 +921,7 @@ approval_args = {{ "auto" = "{SENTINEL_FLAG}" }}
         .current_dir(&repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -977,6 +982,7 @@ approval_args = {{ "auto" = "{SENTINEL_FLAG}" }}
         .current_dir(&repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "echo", "--branches", "feat/x"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -1081,6 +1087,7 @@ command = "echo"
         .current_dir(&repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -1182,6 +1189,7 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(15))
         .output()
@@ -1415,7 +1423,7 @@ command = "{dialog_cli}"
         .current_dir(&repo)
         .env("PATH", &test_path)
         .env("HOME", home.path())
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         // Override the suite-wide compressed timeout: a custom CLI's pane
         // can transiently look like a bare shell during startup (shell
         // init overhead) before the gate relaunches into it and the stub's
@@ -1505,7 +1513,7 @@ command = "{dialog_cli}"
         .current_dir(&repo)
         .env("PATH", &test_path)
         .env("HOME", home.path())
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         // See the spec-driven dialog test above for why this needs a
         // generous override rather than the suite-wide compressed default.
         .env("GIT_PAW_READINESS_TIMEOUT_MS", "3000")
@@ -1611,6 +1619,7 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "10000")
         .args(["start", "--from-all-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(60))
@@ -1805,7 +1814,7 @@ command = "{selfkill_cli}"
         .current_dir(&repo)
         .env("PATH", &test_path)
         .env("HOME", home.path())
-        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME")
         // The pane this stub kills can never be captured again, so it can
         // never read idle — correctly, since a capture that fails is not
         // evidence of idleness. The launch therefore waits out the whole

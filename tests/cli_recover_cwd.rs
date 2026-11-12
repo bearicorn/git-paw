@@ -214,7 +214,8 @@ fn recovered_agent_panes_use_each_agents_worktree_cwd() {
     start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut start_cmd);
     let start_output = start_cmd
         .args(["start"])

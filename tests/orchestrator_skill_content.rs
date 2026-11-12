@@ -9,8 +9,14 @@
 //! roster read when needed, the unattended merge rule, and the re-addressed
 //! permission doctrine.
 
-use git_paw::skills::{GateCommands, render_for_supervisor, resolve};
+use git_paw::skills::{GateCommands, render_for_supervisor};
 use git_paw::specs::SpecBackendKind;
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 /// The raw orchestrator template, frontmatter included.
 fn template() -> String {

@@ -162,6 +162,7 @@ fn start_in_a_second_repository_is_refused_before_any_pane_launches() {
         .current_dir(repo_b.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -234,6 +235,7 @@ fn a_dry_run_prints_its_plan_even_when_the_port_is_held() {
         .current_dir(repo_b.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()))
         .args([
             "start",
@@ -290,6 +292,7 @@ fn start_refuses_before_the_branch_and_cli_pickers() {
         .current_dir(repo_b.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -360,6 +363,7 @@ fn recovery_probes_the_port_the_agents_will_be_given() {
         .current_dir(repo_b.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -431,6 +435,7 @@ fn the_recovered_dashboard_writes_the_re_stamped_log_not_the_old_one() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -561,6 +566,7 @@ fn a_failed_resume_leaves_the_session_paused_with_the_log_path_re_stamped() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -638,6 +644,7 @@ fn recovering_a_session_without_a_broker_gets_no_log_path() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -691,6 +698,7 @@ fn start_records_a_per_session_broker_log_path() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -761,6 +769,7 @@ fn recovery_re_stamps_a_shared_broker_log_path() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", format!("{}:{inherited}", stub.path().display()));
     tmux_env.apply_assert(&mut start);
     let output = start
@@ -871,6 +880,7 @@ fn purge_force_deletes_only_its_own_sessions_broker_log() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .timeout(Duration::from_secs(30))
         .output()
@@ -920,6 +930,7 @@ fn purge_force_honours_an_old_format_shared_broker_log_path() {
         .current_dir(repo.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .timeout(Duration::from_secs(30))
         .output()
@@ -979,6 +990,7 @@ fn status_reports_a_port_held_by_another_repository() {
         .current_dir(repo_b.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["status"])
         .timeout(Duration::from_secs(30))
         .output()

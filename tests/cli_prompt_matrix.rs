@@ -165,6 +165,7 @@ fn start_all_flags_bypass_all_pickers() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--branches",
@@ -206,6 +207,7 @@ fn start_supervisor_flag_enters_supervisor_mode() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--branches",
@@ -361,6 +363,7 @@ fn purge_force_bypasses_confirmation() {
         .expect("binary")
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .current_dir(repo.path())
         .assert()
@@ -408,6 +411,7 @@ fn from_all_specs_launches_every_spec_without_picker() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -439,6 +443,7 @@ fn from_all_specs_unconfigured_spec_format_errors() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs with no specs config");

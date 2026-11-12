@@ -308,6 +308,50 @@ pub(crate) fn find_worktree_for_branch_with(
     Ok(None)
 }
 
+/// Parses `git worktree list --porcelain` output into the main working tree's
+/// path: the first `worktree` entry. Pure.
+///
+/// Returns `None` when the listing is empty or garbled (its first line is not
+/// a `worktree <path>` record) or when the first entry is `bare` (the
+/// repository has no main working tree).
+#[must_use]
+pub fn parse_main_worktree(porcelain: &str) -> Option<PathBuf> {
+    let mut lines = porcelain.lines();
+    let path = lines.next()?.strip_prefix("worktree ")?;
+    if path.is_empty() {
+        return None;
+    }
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if line == "bare" {
+            return None;
+        }
+    }
+    Some(PathBuf::from(path))
+}
+
+/// Returns the main working tree of the repository containing `path`, or
+/// `None` when it cannot be determined (not a repository, a bare repository,
+/// git failed or printed something unparseable).
+#[must_use]
+pub fn main_worktree_root(path: &Path) -> Option<PathBuf> {
+    main_worktree_root_with(&RealCommandRunner, path)
+}
+
+/// [`main_worktree_root`] over an injected [`CommandRunner`].
+pub(crate) fn main_worktree_root_with(runner: &dyn CommandRunner, path: &Path) -> Option<PathBuf> {
+    let cwd = path.to_string_lossy();
+    let out = runner
+        .run("git", &["-C", &cwd, "worktree", "list", "--porcelain"])
+        .ok()?;
+    if !out.success {
+        return None;
+    }
+    parse_main_worktree(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// Prefix of the [`PawError::WorktreeError`] that
 /// [`rebase_branch_onto_default_with`] returns when the rebase fails. Callers
 /// that react to that failure match on this constant, so rewording it cannot
@@ -2231,6 +2275,57 @@ mod tests {
                 assert_eq!(program, "git", "{label}: must invoke git");
                 assert_eq!(argv, expected, "{label}: argv mismatch");
             }
+        }
+
+        #[test]
+        fn main_worktree_root_is_the_first_non_bare_worktree_entry() {
+            use std::path::PathBuf;
+            let cases: &[(&str, &str, Option<&str>)] = &[
+                (
+                    "main only",
+                    "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n",
+                    Some("/repo"),
+                ),
+                (
+                    "listing from a linked worktree still names main first",
+                    "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+                     worktree /repo/.git-paw/worktrees/feat-x\nHEAD def\n\
+                     branch refs/heads/feat/x\n\n",
+                    Some("/repo"),
+                ),
+                (
+                    "bare repository has no main working tree",
+                    "worktree /srv/repo.git\nbare\n\n\
+                     worktree /srv/wt\nHEAD abc\nbranch refs/heads/main\n\n",
+                    None,
+                ),
+                ("empty", "", None),
+                ("garbled", "fatal: something\nworktree /repo\n", None),
+                ("empty path", "worktree \n", None),
+            ];
+            for (label, porcelain, expected) in cases {
+                assert_eq!(
+                    super::super::parse_main_worktree(porcelain),
+                    expected.map(PathBuf::from),
+                    "{label}"
+                );
+                let fake = FakeCommandRunner::succeeding(porcelain);
+                assert_eq!(
+                    super::super::main_worktree_root_with(&fake, Path::new("/repo/sub")),
+                    expected.map(PathBuf::from),
+                    "{label} (through the runner)"
+                );
+            }
+            let failing = FakeCommandRunner::failing("fatal: not a git repository");
+            assert_eq!(
+                super::super::main_worktree_root_with(&failing, Path::new("/tmp")),
+                None
+            );
+            let unspawnable = unspawnable();
+            assert_eq!(
+                super::super::main_worktree_root_with(&unspawnable, Path::new("/tmp")),
+                None
+            );
         }
 
         #[test]

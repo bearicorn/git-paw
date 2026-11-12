@@ -66,6 +66,7 @@ fn start_session(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, branches: &st
         .current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--branches", branches])
         .timeout(Duration::from_secs(40))
         .output()
@@ -251,6 +252,7 @@ fn adding_a_worktree_after_setup_extends_nothing() {
         .current_dir(&repo)
         .env("HOME", &home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["add", "feat/beta"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -338,6 +340,7 @@ fn recovering_a_stopped_session_writes_no_setup_entries() {
         .current_dir(&repo)
         .env("HOME", &home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["stop"])
         .timeout(Duration::from_secs(40))
         .output();

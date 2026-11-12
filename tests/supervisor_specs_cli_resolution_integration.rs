@@ -96,6 +96,7 @@ fn supervisor_specs_honours_default_spec_cli_not_the_agent_cli_fallback() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --supervisor --from-all-specs --dry-run");
@@ -129,6 +130,7 @@ fn supervisor_specs_paw_cli_still_wins_over_default_spec_cli() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --supervisor --from-all-specs --dry-run");
@@ -158,6 +160,7 @@ fn supervisor_specs_cli_flag_still_overrides_everything() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",

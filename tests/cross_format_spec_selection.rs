@@ -75,6 +75,7 @@ fn from_all_specs_dry_run_lists_every_discovered_spec() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -102,6 +103,7 @@ fn from_specs_alias_produces_identical_dry_run_plan_to_canonical() {
         .current_dir(tr_canon.path())
         .env("HOME", home_canon.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("canonical dry-run");
@@ -112,6 +114,7 @@ fn from_specs_alias_produces_identical_dry_run_plan_to_canonical() {
         .current_dir(tr_alias.path())
         .env("HOME", home_alias.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("alias dry-run");
@@ -140,6 +143,7 @@ fn from_specs_alias_emits_no_deprecation_warning_on_stderr() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("alias dry-run");
@@ -174,6 +178,7 @@ fn specs_single_name_narrows_dry_run_to_one_spec() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--specs", "add-auth", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --specs add-auth --dry-run");
@@ -203,6 +208,7 @@ fn specs_comma_separated_narrows_dry_run_to_listed_specs() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--specs",
@@ -236,6 +242,7 @@ fn specs_unknown_name_errors_with_candidates_listed() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--specs",
@@ -276,6 +283,7 @@ fn bare_specs_in_non_tty_environment_exits_with_actionable_error() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run bare --specs in non-TTY env");
@@ -308,6 +316,7 @@ fn from_all_specs_and_specs_together_are_rejected_at_parse_time() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--from-all-specs",

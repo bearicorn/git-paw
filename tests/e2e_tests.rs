@@ -36,7 +36,9 @@ fn cmd() -> Command {
 /// subprocess.
 fn cmd_iso(fake_home: &Path, tmux_env: &helpers::TmuxTestEnv) -> Command {
     let mut c = cmd();
-    c.env("HOME", fake_home).env_remove("XDG_DATA_HOME");
+    c.env("HOME", fake_home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut c);
     c
 }
@@ -142,6 +144,7 @@ fn preset_not_found_returns_error() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .failure()
@@ -278,6 +281,7 @@ fn purge_with_no_session() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .assert()
         .success()
@@ -400,6 +404,7 @@ fn from_specs_no_specs_config_returns_error() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .failure()
@@ -437,6 +442,7 @@ fn from_specs_dry_run_with_valid_specs_shows_plan() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -468,6 +474,7 @@ fn from_specs_empty_specs_dir_prints_no_pending() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()
@@ -865,6 +872,7 @@ fn error_exit_code_is_1_for_preset_not_found() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .code(1)
@@ -970,6 +978,7 @@ fn from_specs_markdown_format_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -1011,6 +1020,7 @@ fn from_specs_skips_done_markdown_specs() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()
@@ -1523,6 +1533,7 @@ fn a_bare_start_past_the_agent_cap_is_refused_before_any_worktree_exists() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "cat", "--branches", &branches.join(",")])
         .output()
         .expect("run start");

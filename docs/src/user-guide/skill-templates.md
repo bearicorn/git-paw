@@ -4,7 +4,10 @@ git-paw uses standardized agent skills following the [agentskills.io specificati
 
 ## Standard Location
 
-Skills are loaded from `.agents/skills/` in your project directory. git-paw walks up the directory tree from the current working directory to find this location.
+A repository's own skills live in `.agents/skills/` at the root of its main
+checkout. git-paw reads that directory in the **main working tree** only — see
+[Skill Resolution](#skill-resolution) for the full order and the user-level
+override directory.
 
 ```bash
 my-project/
@@ -22,8 +25,11 @@ my-project/
 
 ## Bundled skills
 
-git-paw embeds four skills, each overridable by a `.agents/skills/<name>/SKILL.md`
-of your own:
+git-paw embeds four skills. Every one except `cli-setup` can be overridden by a
+`.agents/skills/<name>/SKILL.md` in your repository or a
+`<config_dir>/git-paw/agent-skills/<name>/SKILL.md` of your own (see
+[Skill Resolution](#skill-resolution)); a repository override with one of these
+names replaces the bundled skill:
 
 | Skill | What it carries |
 |---|---|
@@ -202,18 +208,69 @@ mkdir -p .agents/skills/my-skill/references
 
 ## Skill Resolution
 
-git-paw searches for skills in this order:
+git-paw looks a skill up at three levels, and the first match wins:
 
-1. `.agents/skills/<name>/SKILL.md` (walking up directory tree from current directory)
-2. Embedded defaults (compiled into git-paw binary)
+1. **Repository** — `<main>/.agents/skills/<name>/SKILL.md`, where `<main>` is
+   the repository's **main working tree** (the checkout `git worktree list`
+   names first).
+2. **User** — `<config_dir>/git-paw/agent-skills/<name>/SKILL.md`, where
+   `<config_dir>` is your platform config directory:
 
-The first match wins. If no skill is found, resolution fails with an error.
+   | Platform | `<config_dir>` |
+   |---|---|
+   | Linux | `$XDG_CONFIG_HOME` if set (and absolute), else `~/.config` |
+   | macOS | `~/Library/Application Support` |
+
+3. **Embedded** — the default compiled into the git-paw binary.
+
+A team can pin a skill for one repository while each person keeps a personal
+default for every other repository; the more specific level wins, as with
+git's local over global config.
+
+No other location is read: not your current directory or any directory above
+the repository, not the `.agents/skills/` of a linked worktree (every agent
+worktree is one), and not the installed copies under `.git-paw/skills/`. A
+repository with no main working tree (a bare repository) skips the repository
+level. The result does not depend on where you run `git paw`.
+
+Overrides use the **directory form** only: a directory `<name>/` holding a
+`SKILL.md` with `name` and `description` frontmatter. A directory without a
+`SKILL.md` is not an override and falls through to the next level; a flat
+`<name>.md` file (the v0.3 form) is not read.
+
+An override that exists but cannot be loaded — unreadable, not UTF-8, or with
+invalid frontmatter — is a **hard error**: `git paw start`, `add` and the
+other launch paths fail naming it, rather than silently using a lower level.
+`git paw doctor` reports it under `skill sources`.
 
 `supervisor` is an alias of `orchestrator`: both names resolve to the same
-skill, and an override directory under either name applies to both. When
-`.agents/skills/orchestrator/` and `.agents/skills/supervisor/` both exist, the
-`orchestrator` one wins, so an override written under the old name keeps
-working until you rename it.
+skill, and an override directory under either name applies to both. At one
+level, an `orchestrator/` directory wins over a `supervisor/` one, so an
+override written under the old name keeps working until you rename it; a
+higher level wins whichever of the two names it uses.
+
+The bundled names a repository override replaces are `coordination`,
+`orchestrator` (and `supervisor`) and `docs-fetch`. If your repository already
+uses one of these directory names under `.agents/skills/` for another tool,
+git-paw will render it; `git paw doctor` shows which level each bundled skill
+resolves from.
+
+### What an override cannot do
+
+- **Ship files.** An override replaces the skill's text only. Its `scripts/`,
+  `references/` and `assets/` are ignored; git-paw installs only the bundled
+  helpers.
+- **Change a permission decision.** git-paw approves no prompt, so override
+  text that tells an agent to run a command runs it only if the agent CLI's
+  own permission system lets it. An override changes instructions, as
+  `AGENTS.md` does.
+- **Replace `cli-setup`.** The `cli-setup` skill carries the consent rules for
+  writing an agent CLI's permission settings, so it always resolves from the
+  embedded copy. An override directory for it, at either level, is ignored —
+  not even validated — and `git paw doctor` warns that it is.
+- **Come from a worktree.** A linked worktree's `.agents/skills/` and the
+  installed `.git-paw/skills/` are never read, so an agent cannot rewrite the
+  skills git-paw gives it.
 
 ## Exported skills
 
@@ -277,10 +334,11 @@ See the [agentskills.io specification](https://agentskills.io/skill-creation/qui
 
 If you're upgrading from git-paw v0.2.x or earlier:
 
-1. Move skills from `~/.config/git-paw/agent-skills/` to `.agents/skills/`
-2. Convert single `.md` files to directory structure with SKILL.md
-3. Add required YAML frontmatter to each skill
-4. Organize related resources into subdirectories
+1. Move each flat `<name>.md` override into `<name>/SKILL.md` — under
+   `<config_dir>/git-paw/agent-skills/` for a personal override, or under the
+   repository's `.agents/skills/` for a team one
+2. Add the required YAML frontmatter (`name`, `description`) to each skill
+3. Organize related resources into subdirectories
 
 The new standardized format improves interoperability and enables skill sharing across different AI systems that support the agentskills.io standard.
 

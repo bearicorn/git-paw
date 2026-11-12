@@ -153,6 +153,7 @@ fn attended_session_sends_no_approval_keystroke() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--branches", "a"])
         .timeout(Duration::from_secs(30))
         .output()

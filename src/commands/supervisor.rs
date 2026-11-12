@@ -683,13 +683,14 @@ pub fn supervisor(
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
     let coordination_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
+        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", repo_root)?;
 
     // Resolve the docs-fetch skill once, gated on an explicitly-configured
     // `docs_base_url`. Left unset (the default points at git-paw's own site),
     // the skill is not injected — a consumer only gets it once they have
     // pointed git-paw at their own docs, keeping the exported skill agnostic.
-    let docs_fetch_template = crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch")?;
+    let docs_fetch_template =
+        crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch", repo_root)?;
 
     // Peer branches for the inter-agent rules block. Held as a slice rather
     // than a pre-rendered string: `build_inter_agent_rules` interpolates each
@@ -1123,7 +1124,7 @@ fn write_orchestrator_context(
     crate::init::export_skills(repo_root, config)?;
     // The skill teaches the helpers' subcommands, so the helpers must match it.
     crate::init::refresh_root_scripts(repo_root)?;
-    let template = crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL)?;
+    let template = crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL, repo_root)?;
     let assignment = crate::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),
         cli: orchestrator_cli.to_string(),

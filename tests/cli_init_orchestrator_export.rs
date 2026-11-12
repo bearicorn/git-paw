@@ -13,9 +13,15 @@ use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use git_paw::skills::{resolve, validate_skill_dir};
+use git_paw::skills::validate_skill_dir;
 use serial_test::serial;
 use tempfile::TempDir;
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 const ORCHESTRATOR_MD: &str = ".git-paw/skills/orchestrator/SKILL.md";
 const CLI_SETUP_MD: &str = ".git-paw/skills/cli-setup/SKILL.md";
@@ -55,6 +61,7 @@ fn paw(root: &Path, home: &Path, args: &[&str]) -> (bool, String) {
         .current_dir(root)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(args)
         .timeout(Duration::from_secs(20))
         .output()

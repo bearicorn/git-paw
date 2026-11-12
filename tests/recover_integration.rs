@@ -227,7 +227,8 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut start_cmd);
     let _start_output = start_cmd.args(["start"]).output().expect("run start");
 
@@ -407,7 +408,8 @@ fn recovery_rebuilds_a_tiled_bare_session_as_a_grid() {
     start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME");
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut start_cmd);
     let _ = start_cmd.args(["start"]).output().expect("run start");
 

@@ -54,6 +54,8 @@ fn run_git(dir: &Path, args: &[&str]) {
 
 /// A line-delimited JSON-RPC client driving the spawned MCP server.
 struct McpClient {
+    /// The server's isolated `HOME` when [`McpClient::spawn`] made one.
+    _home: Option<tempfile::TempDir>,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -63,9 +65,30 @@ struct McpClient {
 }
 
 impl McpClient {
+    /// Spawns `git paw mcp --repo <repo>` with a fresh tempdir `HOME` and
+    /// `XDG_DATA_HOME` / `XDG_CONFIG_HOME` removed, so no user skill override
+    /// on the developer's machine reaches the server.
     fn spawn(repo: &Path) -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let client = Self::spawn_with(repo, home.path(), |_| {});
+        Self {
+            _home: Some(home),
+            ..client
+        }
+    }
+
+    /// Spawns `git paw mcp --repo <repo>` with `HOME` at `home` and the XDG
+    /// overrides removed; `customize` adjusts the command before the
+    /// isolation is applied (e.g. a current directory or an ambient env var
+    /// the isolation must defeat).
+    fn spawn_with(repo: &Path, home: &Path, customize: impl FnOnce(&mut Command)) -> Self {
         let bin = env!("CARGO_BIN_EXE_git-paw");
-        let mut child = Command::new(bin)
+        let mut command = Command::new(bin);
+        customize(&mut command);
+        let mut child = command
+            .env("HOME", home)
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .args(["mcp", "--repo", repo.to_str().unwrap()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -75,6 +98,7 @@ impl McpClient {
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
+            _home: None,
             child,
             stdin,
             stdout,
@@ -415,7 +439,11 @@ fn invalid_spec_type_exits_nonzero_with_clear_message() {
     .unwrap();
 
     let bin = env!("CARGO_BIN_EXE_git-paw");
+    let home = tempfile::tempdir().unwrap();
     let output = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["mcp", "--repo", repo.to_str().unwrap()])
         .stdin(Stdio::null())
         .output()
@@ -535,7 +563,11 @@ fn non_git_repo_exits_nonzero_with_clear_message() {
     std::fs::create_dir(&not_repo).unwrap();
 
     let bin = env!("CARGO_BIN_EXE_git-paw");
+    let home = tempfile::tempdir().unwrap();
     let output = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["mcp", "--repo", not_repo.to_str().unwrap()])
         .stdin(Stdio::null())
         .output()
@@ -893,4 +925,205 @@ fn get_session_status_reports_a_stalled_wave() {
         .wave
         .expect("a reachable broker must report its wave");
     assert!(wave.stalled, "got {wave:?}");
+}
+
+// ---------------------------------------------------------------------------
+// mcp-server: "get_skill reports the source the production resolver chose".
+// ---------------------------------------------------------------------------
+
+/// The user skill-override directory `git-paw` reads for a process whose
+/// `HOME` is `home` and whose `XDG_CONFIG_HOME` is unset.
+fn user_skills_dir(home: &Path) -> std::path::PathBuf {
+    let config = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        home.join(".config")
+    };
+    config.join("git-paw").join("agent-skills")
+}
+
+/// Writes `<level_dir>/<name>/SKILL.md` with valid frontmatter and `body`.
+fn write_skill(level_dir: &Path, name: &str, body: &str) {
+    let dir = level_dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: override\n---\n\n{body}"),
+    )
+    .unwrap();
+}
+
+/// Calls `get_skill(name)` and returns `(source, content)`.
+fn get_skill(client: &mut McpClient, name: &str) -> (String, String) {
+    let resp = client.call_tool("get_skill", json!({ "name": name }));
+    let field = |f: &str| {
+        resp.pointer(&format!("/structuredContent/skill/{f}"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("get_skill({name}) has no {f}: {resp}"))
+            .to_string()
+    };
+    (field("source"), field("content"))
+}
+
+/// A repository with one commit, under a fresh tempdir.
+fn repo_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("proj");
+    std::fs::create_dir(&repo).unwrap();
+    git_init_with_commit(&repo);
+    (tmp, repo)
+}
+
+/// Every file under `dir`, recursively, with its length.
+fn snapshot(dir: &Path) -> Vec<(std::path::PathBuf, u64)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push((path.clone(), entry.metadata().unwrap().len()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn get_skill_reports_a_user_override_as_user_override() {
+    let (_tmp, repo) = repo_fixture();
+    let home = tempfile::tempdir().unwrap();
+    write_skill(
+        &user_skills_dir(home.path()),
+        "coordination",
+        "USER-OVERRIDE-MARKER",
+    );
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |_| {});
+    client.initialize();
+    let (source, content) = get_skill(&mut client, "coordination");
+    assert_eq!(source, "user_override");
+    assert!(content.contains("USER-OVERRIDE-MARKER"), "{content}");
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}
+
+#[test]
+fn get_skill_with_repo_reads_that_repositorys_override_from_an_outside_cwd() {
+    let (tmp, repo) = repo_fixture();
+    write_skill(
+        &repo.join(".agents").join("skills"),
+        "coordination",
+        "REPO-OVERRIDE-MARKER",
+    );
+    let outside = tmp.path().join("elsewhere");
+    std::fs::create_dir(&outside).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |c| {
+        c.current_dir(&outside);
+    });
+    client.initialize();
+    let (source, content) = get_skill(&mut client, "coordination");
+    assert_eq!(source, "standard");
+    assert!(content.contains("REPO-OVERRIDE-MARKER"), "{content}");
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}
+
+#[test]
+fn get_skill_in_a_linked_worktree_ignores_the_worktrees_override() {
+    let (tmp, repo) = repo_fixture();
+    let linked = tmp.path().join("linked");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/x",
+            linked.to_str().unwrap(),
+        ],
+    );
+    write_skill(
+        &linked.join(".agents").join("skills"),
+        "coordination",
+        "WORKTREE-ONLY-MARKER",
+    );
+    let home = tempfile::tempdir().unwrap();
+
+    let mut client = McpClient::spawn_with(&linked, home.path(), |_| {});
+    client.initialize();
+    let (source, content) = get_skill(&mut client, "coordination");
+    assert_eq!(source, "embedded");
+    assert!(!content.contains("WORKTREE-ONLY-MARKER"));
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}
+
+#[test]
+fn get_skill_with_no_override_reports_embedded_and_writes_nothing() {
+    let (tmp, repo) = repo_fixture();
+    let home = tempfile::tempdir().unwrap();
+    let before = (snapshot(tmp.path()), snapshot(home.path()));
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |_| {});
+    client.initialize();
+    let (source, _) = get_skill(&mut client, "coordination");
+    assert_eq!(source, "embedded");
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+
+    assert_eq!(before, (snapshot(tmp.path()), snapshot(home.path())));
+}
+
+/// skill-agent / *The cli-setup skill is not overridable*: served embedded
+/// with a repository override (and a user override) present.
+#[test]
+fn get_skill_serves_cli_setup_embedded_despite_overrides() {
+    let (_tmp, repo) = repo_fixture();
+    write_skill(
+        &repo.join(".agents").join("skills"),
+        "cli-setup",
+        "REPO-CLI-SETUP-MARKER",
+    );
+    let home = tempfile::tempdir().unwrap();
+    write_skill(
+        &user_skills_dir(home.path()),
+        "cli-setup",
+        "USER-CLI-SETUP-MARKER",
+    );
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |_| {});
+    client.initialize();
+    let (source, content) = get_skill(&mut client, "cli-setup");
+    assert_eq!(source, "embedded");
+    assert!(!content.contains("CLI-SETUP-MARKER"));
+    assert!(content.contains("git paw setup-cli"));
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}
+
+/// core-ci-hygiene / *Binary tests also remove `XDG_CONFIG_HOME`*, scenario "A
+/// real user override does not change a binary test's output": an ambient
+/// `XDG_CONFIG_HOME` holding a coordination override is defeated by the
+/// standard isolation.
+#[test]
+fn an_ambient_xdg_config_home_override_does_not_reach_a_binary_test() {
+    let (_tmp, repo) = repo_fixture();
+    let ambient = tempfile::tempdir().unwrap();
+    write_skill(
+        &ambient.path().join("git-paw").join("agent-skills"),
+        "coordination",
+        "AMBIENT-OVERRIDE-MARKER",
+    );
+    let home = tempfile::tempdir().unwrap();
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |c| {
+        c.env("XDG_CONFIG_HOME", ambient.path());
+    });
+    client.initialize();
+    let (source, content) = get_skill(&mut client, "coordination");
+    assert_eq!(source, "embedded");
+    assert!(!content.contains("AMBIENT-OVERRIDE-MARKER"));
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
 }

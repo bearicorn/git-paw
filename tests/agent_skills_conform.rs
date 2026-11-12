@@ -12,9 +12,10 @@ use std::path::Path;
 
 #[test]
 fn repo_agent_skills_conform_to_agentskills_standard() {
-    // `resolve()` walks up from the process cwd to find `.agents/skills/<name>`.
-    // Pin it to the crate root so the guard checks *this repo's* skills.
-    std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).expect("chdir to crate root");
+    let roots = git_paw::skills::SkillRoots {
+        repo_root: Some(Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()),
+        user_config_dir: None,
+    };
 
     let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(".agents")
@@ -42,7 +43,7 @@ fn repo_agent_skills_conform_to_agentskills_standard() {
         );
 
         // Dogfood the real loader + validator (required frontmatter, etc.).
-        let template = git_paw::skills::resolve(&folder)
+        let template = git_paw::skills::resolve_from(&folder, &roots)
             .unwrap_or_else(|e| panic!("{folder}: skill resolver rejected the skill: {e}"));
         let meta = template.metadata.as_ref().unwrap_or_else(|| {
             panic!("{folder}: not loaded as a standardized skill (no frontmatter metadata)")

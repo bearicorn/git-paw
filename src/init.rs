@@ -347,7 +347,7 @@ pub fn export_skills(
     let supervisor = config.supervisor.clone().unwrap_or_default();
     let mut rendered = Vec::new();
     for package in root_only_packages() {
-        let template = crate::skills::resolve(package.name).map_err(skill_err)?;
+        let template = crate::skills::resolve(package.name, repo_root).map_err(skill_err)?;
         let content = if package.name == crate::skills::ORCHESTRATOR_SKILL {
             crate::skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
         } else {

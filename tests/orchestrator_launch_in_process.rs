@@ -52,6 +52,7 @@ fn in_process_launch_announces_both_paths_through_the_sink() {
         ])
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env(CHILD_REPO, tr.path())
         .env("GIT_PAW_ALLOW_LIVE_SESSION", "1");
     let out = cmd.output().expect("run child test");

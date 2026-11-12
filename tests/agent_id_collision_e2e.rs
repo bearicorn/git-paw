@@ -137,6 +137,7 @@ fn bare_start_refuses_branches_that_derive_one_agent_id() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "cat", "--branches", "feat/a_b,feat/a-b"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -175,6 +176,7 @@ fn supervised_start_refuses_branches_that_derive_one_agent_id() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--branches", "feat/a_b,feat/a-b"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -221,6 +223,7 @@ fn spec_driven_start_refuses_branches_that_derive_one_agent_id() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--from-specs",
@@ -283,6 +286,7 @@ fn broker_disabled_launches_colliding_branches_as_before() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "cat", "--branches", "hotfix,agent-hotfix"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -305,6 +309,7 @@ fn broker_disabled_launches_colliding_branches_as_before() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["stop", "--force"])
         .timeout(Duration::from_secs(30))
         .output();
@@ -330,6 +335,7 @@ fn add_refuses_a_branch_colliding_with_a_live_agent() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--branches", "feat/x"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -356,6 +362,7 @@ fn add_refuses_a_branch_colliding_with_a_live_agent() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["add", "feat-x"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -390,6 +397,7 @@ fn add_refuses_a_branch_colliding_with_a_live_agent() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["stop", "--force"])
         .timeout(Duration::from_secs(30))
         .output();

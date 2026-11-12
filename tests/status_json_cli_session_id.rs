@@ -113,6 +113,7 @@ fn status_json_exposes_assigned_cli_session_id() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["status", "--json"])
         .output()
         .expect("status --json");
@@ -145,6 +146,7 @@ fn status_json_shows_null_for_unassigned_cli_session_id() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["status", "--json"])
         .output()
         .expect("status --json");
@@ -183,6 +185,7 @@ fn human_status_output_does_not_mention_cli_session_id() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .arg("status")
         .output()
         .expect("status");

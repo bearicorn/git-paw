@@ -201,6 +201,7 @@ fn paw(
         .env("CLAUDE_CODE_PLUGIN_DIRS", OPERATOR_PLUGIN_DIRS)
         .env("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true")
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(args)
         .timeout(Duration::from_secs(60))
         .output()

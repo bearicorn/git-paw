@@ -817,3 +817,75 @@ fn pane_listings_name_the_agent_window_not_the_bare_session() {
         offenders.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// skill-agent: "Production callers resolve skills through the real search
+// roots".
+// ---------------------------------------------------------------------------
+
+/// Whether the production code of `path` bypasses `skills::resolve`: it names
+/// `resolve_from` or constructs a `SkillRoots` outside `#[cfg(test)]`. Only
+/// `src/skills.rs`, which defines both, may; a test-only module file
+/// (`*tests.rs`, compiled under `#[cfg(test)]`) is test code.
+fn bypasses_skill_resolution(path: &str, contents: &str) -> bool {
+    if std::path::Path::new(path) == std::path::Path::new("src").join("skills.rs")
+        || path.ends_with("tests.rs")
+    {
+        return false;
+    }
+    let bypass = regex::Regex::new(r"\bresolve_from\b|\bSkillRoots\s*\{").unwrap();
+    production_code(contents)
+        .lines()
+        .any(|line| bypass.is_match(line.split("//").next().unwrap_or("")))
+}
+
+/// Scenario "A bypass of the production entry point fails the suite".
+#[test]
+fn skills_resolve_from_is_reserved_for_the_skills_module_and_tests() {
+    let cases: &[(&str, &str, bool)] = &[
+        (
+            "src/commands/start.rs",
+            "fn f() { skills::resolve_from(\"x\", &roots); }\n",
+            true,
+        ),
+        (
+            "src/init.rs",
+            "fn f() { let r = SkillRoots { repo_root: None, user_config_dir: None }; }\n",
+            true,
+        ),
+        (
+            "src/init.rs",
+            "fn f() { skills::resolve(\"x\", root); }\n#[cfg(test)]\nmod tests {\n    fn t() { resolve_from(\"x\", &SkillRoots { repo_root: None, user_config_dir: None }); }\n}\n",
+            false,
+        ),
+        (
+            "src/doctor.rs",
+            "// resolve_from is not for production\nfn f() {}\n",
+            false,
+        ),
+        ("src/skills.rs", "pub fn resolve_from() {}\n", false),
+        (
+            "src/specs/backend_pin_tests.rs",
+            "fn t() { resolve_from(\"x\", &r); }\n",
+            false,
+        ),
+    ];
+    for (path, contents, expected) in cases {
+        assert_eq!(
+            bypasses_skill_resolution(path, contents),
+            *expected,
+            "{path}: {contents}"
+        );
+    }
+
+    let offenders: Vec<String> = source_files()
+        .into_iter()
+        .filter(|(path, body)| bypasses_skill_resolution(path, body))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "production code must resolve skills through skills::resolve(name, repo_root), \
+         not resolve_from / SkillRoots: {offenders:?}"
+    );
+}
