@@ -284,6 +284,13 @@ overridable**: it always resolves from the binary, so neither a cloned
 repository's `.agents/skills/cli-setup/` nor a stale personal copy can rewrite
 its consent rules. `git paw doctor` warns when such a directory exists.
 
+An override's `SKILL.md` must resolve, through any symlink, inside its own
+override directory (and the repository's `.agents/skills/` inside the
+repository), so a merged `SKILL.md -> ~/.aws/credentials` symlink is refused
+with an error rather than copied into every agent's instructions and served by
+`get_skill`; a path-shaped skill name (`../x`) never reaches an override
+directory at all.
+
 A linked worktree's `.agents/skills/` is never read, so an agent cannot
 rewrite the skills git-paw re-injects into it. An agent's write into the main
 working tree's or your user override directory is a permission prompt like any

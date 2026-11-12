@@ -38,6 +38,9 @@ fn init_non_tty_bypasses_prompts_and_writes_commented_template() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();
@@ -74,6 +77,9 @@ fn init_non_tty_is_idempotent() {
         Command::cargo_bin("git-paw")
             .expect("binary")
             .arg("init")
+            .env("HOME", tempfile::tempdir().unwrap().path())
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .current_dir(repo.path())
             .assert()
             .success();
@@ -107,6 +113,9 @@ fn init_non_tty_migrates_supervisor_as_opt_out() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();
@@ -322,6 +331,9 @@ fn stop_does_not_prompt() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();

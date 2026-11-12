@@ -377,6 +377,21 @@ pub enum SkillError {
         source: std::io::Error,
     },
 
+    /// An override's `SKILL.md` resolves, through a symlink, outside its
+    /// override directory (or a repository override directory outside the
+    /// repository).
+    #[error(
+        "skill override '{}' resolves to '{}', outside its override directory — replace the symlink with a regular file or remove the override",
+        path.display(),
+        resolved.display()
+    )]
+    OverrideOutsideLevel {
+        /// The override `SKILL.md` as found.
+        path: PathBuf,
+        /// Where it resolves.
+        resolved: PathBuf,
+    },
+
     /// User override skill file cannot be read.
     #[error("cannot read user override skill file at '{}' — check file permissions", path.display())]
     UserOverrideRead {
@@ -493,9 +508,15 @@ pub fn resolve(skill_name: &str, repo_root: &Path) -> Result<SkillTemplate, Skil
 /// The real search roots for `repo_root`: its main working tree and the
 /// user configuration directory.
 fn production_roots(repo_root: &Path) -> SkillRoots {
+    roots_for(repo_root, crate::dirs::config_dir())
+}
+
+/// The search roots for `repo_root` (normalized to its main working tree)
+/// with `user_config_dir` as the user level.
+fn roots_for(repo_root: &Path, user_config_dir: Option<PathBuf>) -> SkillRoots {
     SkillRoots {
         repo_root: crate::git::main_worktree_root(repo_root),
-        user_config_dir: crate::dirs::config_dir(),
+        user_config_dir,
     }
 }
 
@@ -518,12 +539,16 @@ fn production_roots(repo_root: &Path) -> SkillRoots {
 pub fn resolve_from(skill_name: &str, roots: &SkillRoots) -> Result<SkillTemplate, SkillError> {
     if is_overridable(skill_name) && is_safe_skill_name(skill_name) {
         let levels = [
-            (roots.repo_skills_dir(), Source::AgentsStandard),
-            (roots.user_skills_dir(), Source::User),
+            (
+                roots.repo_skills_dir(),
+                roots.repo_root.as_deref(),
+                Source::AgentsStandard,
+            ),
+            (roots.user_skills_dir(), None, Source::User),
         ];
-        for (dir, source) in levels {
+        for (dir, boundary, source) in levels {
             if let Some(dir) = dir
-                && let Some(skill) = try_load_override(skill_name, &dir, source)?
+                && let Some(skill) = try_load_override(skill_name, &dir, boundary, source)?
             {
                 return Ok(skill);
             }
@@ -583,21 +608,60 @@ fn is_safe_skill_name(skill_name: &str) -> bool {
 
 /// Loads the override for `skill_name` from one level's skills directory,
 /// trying every alias candidate in precedence order.
+///
+/// `boundary` (the repository root, for the repository level) is a directory
+/// the level directory itself must resolve inside.
 fn try_load_override(
     skill_name: &str,
     level_dir: &Path,
+    boundary: Option<&Path>,
     source: Source,
 ) -> Result<Option<SkillTemplate>, SkillError> {
     let canonical = skill_name_candidates(skill_name)[0];
     for candidate in skill_name_candidates(skill_name) {
         let skill_dir = level_dir.join(candidate);
         match skill_dir.join("SKILL.md").try_exists() {
-            Ok(true) => return load_skill_from_directory(&skill_dir, canonical, source),
+            Ok(true) => {
+                confine_override(&skill_dir, level_dir, boundary, source)?;
+                return load_skill_from_directory(&skill_dir, canonical, source);
+            }
             Ok(false) => {}
             Err(e) => return Err(override_read_error(&skill_dir, source, e)),
         }
     }
     Ok(None)
+}
+
+/// Refuses an override whose `SKILL.md` resolves, through a symlink, outside
+/// its level directory — or, at the repository level, whose level directory
+/// resolves outside the repository — so a committed symlink cannot pull an
+/// arbitrary file (a credentials file, say) into agent instructions.
+fn confine_override(
+    skill_dir: &Path,
+    level_dir: &Path,
+    boundary: Option<&Path>,
+    source: Source,
+) -> Result<(), SkillError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let canon = |p: &Path| {
+        p.canonicalize()
+            .map_err(|e| override_read_error(skill_dir, source, e))
+    };
+    let resolved = canon(&skill_md)?;
+    let level = canon(level_dir)?;
+    let inside_level = resolved.starts_with(&level);
+    let level_inside_boundary = match boundary {
+        Some(root) => level.starts_with(canon(root)?),
+        None => true,
+    };
+    if inside_level && level_inside_boundary {
+        Ok(())
+    } else {
+        Err(SkillError::OverrideOutsideLevel {
+            path: skill_md,
+            resolved,
+        })
+    }
 }
 
 /// The embedded default for `skill_name` (alias-resolved).
@@ -8103,10 +8167,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "worktree-only override",
         );
 
-        // The linked worktree's override is ignored, from either root.
+        // The linked worktree's override is ignored, from either root. The
+        // roots are derived exactly as `resolve` derives them, with no user
+        // level so the developer's own overrides cannot interfere.
         for root in [&linked, &main] {
-            let tmpl = resolve("coordination", root).unwrap();
-            assert_ne!(tmpl.source, Source::AgentsStandard, "{}", root.display());
+            let tmpl = resolve_from("coordination", &roots_for(root, None)).unwrap();
+            assert_eq!(tmpl.source, Source::Embedded, "{}", root.display());
             assert!(!tmpl.content.contains("worktree-only override"));
         }
 
@@ -8117,7 +8183,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "coordination",
             "main override",
         );
-        let tmpl = resolve("coordination", &linked).unwrap();
+        let tmpl = resolve_from("coordination", &roots_for(&linked, None)).unwrap();
         assert_eq!(tmpl.source, Source::AgentsStandard);
         assert!(tmpl.content.contains("main override"));
     }
@@ -8130,8 +8196,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "coordination",
             "not a repository",
         );
-        let tmpl = resolve("coordination", tmp.path()).unwrap();
-        assert_ne!(tmpl.source, Source::AgentsStandard);
+        let tmpl = resolve_from("coordination", &roots_for(tmp.path(), None)).unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
     }
 
     #[test]
@@ -8170,5 +8236,94 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             .join(CLI_SETUP_SKILL);
         std::fs::create_dir_all(&user).unwrap();
         assert_eq!(ignored_override_dirs_from(&levels.roots), vec![repo, user]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_override_resolving_outside_its_level_is_a_hard_error() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let secret = levels
+            .roots
+            .repo_root
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("secret");
+        std::fs::write(
+            &secret,
+            "---\nname: coordination\ndescription: x\n---\n\nSECRET",
+        )
+        .unwrap();
+
+        // Repository level: SKILL.md -> a file outside `.agents/skills/`.
+        let dir = levels.roots.repo_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&secret, dir.join("SKILL.md")).unwrap();
+        levels.user("coordination", "valid user override");
+        let err = levels.resolve("coordination").expect_err("escape refused");
+        assert!(
+            matches!(err, SkillError::OverrideOutsideLevel { ref path, .. } if *path == dir.join("SKILL.md")),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&dir.join("SKILL.md").display().to_string()),
+            "{err}"
+        );
+
+        // User level: the same escape is refused too.
+        std::fs::remove_dir_all(levels.roots.repo_skills_dir().unwrap()).unwrap();
+        let user_md = levels
+            .roots
+            .user_skills_dir()
+            .unwrap()
+            .join("coordination/SKILL.md");
+        std::fs::remove_file(&user_md).unwrap();
+        symlink(&secret, &user_md).unwrap();
+        assert!(matches!(
+            levels.resolve("coordination"),
+            Err(SkillError::OverrideOutsideLevel { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_override_directory_symlinked_outside_the_repository_is_refused() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let outside = levels
+            .roots
+            .repo_root
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("outside");
+        write_skill(&outside.join("skills"), "coordination", "OUTSIDE");
+        symlink(
+            &outside,
+            levels.roots.repo_root.as_ref().unwrap().join(".agents"),
+        )
+        .unwrap();
+        assert!(matches!(
+            levels.resolve("coordination"),
+            Err(SkillError::OverrideOutsideLevel { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_stays_inside_its_level_is_followed() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let shared = levels.repo("shared", "SHARED BODY");
+        let dir = levels.roots.repo_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&shared, dir.join("SKILL.md")).unwrap();
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert!(tmpl.content.contains("SHARED BODY"));
     }
 }

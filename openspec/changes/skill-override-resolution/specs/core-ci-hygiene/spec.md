@@ -2,7 +2,7 @@
 
 ### Requirement: Binary tests also remove XDG_CONFIG_HOME
 
-Every `assert_cmd` builder in `tests/` that invokes the compiled binary SHALL also remove `XDG_CONFIG_HOME` with `env_remove("XDG_CONFIG_HOME")`, alongside the `HOME` and `XDG_DATA_HOME` overrides, so a user skill override under the developer's real config directory can never reach a test. The standing convention-enforcement test SHALL check it, with the same documented-exception rule.
+Every function in `tests/` that overrides `HOME` and isolates `XDG_DATA_HOME` for the compiled binary SHALL also remove `XDG_CONFIG_HOME` (`env_remove("XDG_CONFIG_HOME")`) or redirect it into the same temporary directory (`env("XDG_CONFIG_HOME", …)`), so a user skill override under the developer's real config directory can never reach a test. Tests that run `git paw init`, which renders the bundled skills, SHALL apply the full `HOME`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME` override like the session-touching subcommands. The standing convention-enforcement test SHALL check both, with the same documented-exception rule.
 
 #### Scenario: A test file that keeps XDG_CONFIG_HOME fails the suite
 
@@ -17,3 +17,10 @@ Every `assert_cmd` builder in `tests/` that invokes the compiled binary SHALL al
 - **GIVEN** `XDG_CONFIG_HOME` pointing at a directory holding `git-paw/agent-skills/coordination/SKILL.md`
 - **WHEN** a binary test that asserts the coordination skill text runs
 - **THEN** it SHALL see the embedded text, not the override
+
+#### Scenario: A test running git paw init with the real HOME fails the suite
+
+- **GIVEN** a test in `tests/` whose builder rooted at the compiled binary passes `init` (as `.args(["init", …])` or `.arg("init")`) without overriding `HOME`
+- **AND** no comment documenting that it requires the real home directory
+- **WHEN** the suite runs
+- **THEN** the convention-enforcement test SHALL fail naming the file and the test

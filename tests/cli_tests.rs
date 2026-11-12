@@ -107,6 +107,9 @@ fn no_args_behaves_like_start() {
     let start = cmd()
         .current_dir(tmp.path())
         .arg("start")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure();
 
@@ -171,6 +174,9 @@ fn start_from_non_git_dir() {
     cmd()
         .current_dir(tmp.path())
         .arg("start")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));

@@ -128,6 +128,9 @@ fn setup() -> Fixture {
     let init_out = cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .timeout(Duration::from_secs(10))
         .output()
         .expect("git paw init");

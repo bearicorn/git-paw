@@ -15,7 +15,9 @@
 //! A `git paw` subcommand needs the override only when it can read or write
 //! the real sessions directory (`crate::session::sessions_dir()`, which
 //! resolves from `HOME`/`XDG_DATA_HOME`). That is: `start`, `stop`, `pause`,
-//! `recover`, `add`, `remove`, `attach`, `supervisor`, `purge`, and `status`.
+//! `recover`, `add`, `remove`, `attach`, `supervisor`, `purge`, and `status`
+//! — plus `init`, which renders the bundled skills and so reads the user skill
+//! overrides under the config directory.
 //! `approvals` is deliberately excluded — passing `--session <NAME>` (the
 //! pattern every `approvals` test uses) short-circuits
 //! `session::find_session_for_repo` entirely, so the subcommand never
@@ -41,9 +43,12 @@
 //! such as `e2e_tests.rs`'s `cmd_iso` or `pty::create_detached_session`)
 //! whose own body does.
 //!
-//! Two invocation shapes are recognised:
+//! Three invocation shapes are recognised:
 //! - An `assert_cmd::Command` chain ending in `.args([…])`, rooted at
 //!   `cmd()` / `Command::cargo_bin("git-paw")` / a tracked local variable.
+//! - The same chain passing the subcommand as `.arg("<subcommand>")`, when
+//!   its root is positively the binary (a helper script's own subcommand is
+//!   passed the same way).
 //! - A PTY/tmux-driven launch: the binary path comes from
 //!   `env!("CARGO_BIN_EXE_git-paw")` and is interpolated into a shell-command
 //!   string (e.g. `format!("cd '{}' && '{bin}' start --dry-run", …)`) sent
@@ -100,6 +105,7 @@ const SESSION_SUBCOMMANDS: &[&str] = &[
     "supervisor",
     "purge",
     "status",
+    "init",
 ];
 
 /// Opt-out marker for a file that genuinely needs the real `HOME`.
@@ -473,6 +479,32 @@ fn scan(filename: &str, body: &str, cross_file_helpers: &HashSet<String>) -> Vec
                     line_idx + 1,
                     span.name
                 ));
+            }
+        }
+
+        // The single-argument `.arg("<subcommand>")` form.
+        for (line_idx, line) in lines
+            .iter()
+            .enumerate()
+            .take(span.body_end + 1)
+            .skip(span.fn_line)
+        {
+            for literal in SESSION_SUBCOMMANDS {
+                // Unlike `.args([`, only a chain positively rooted at the
+                // binary counts: `.arg("status")` is also how a helper
+                // script's own subcommand is passed (`bash sweep.sh status`).
+                if line.contains(&format!(".arg(\"{literal}\")"))
+                    && chain_is_git_paw_rooted(&lines, line_idx, &vars) == Some(true)
+                {
+                    hits.push(format!(
+                        "{filename}:{}: fn `{}` — `.arg(\"{literal}\")` invokes a git paw \
+                         subcommand that reads user state, but neither this test nor a helper \
+                         it calls applies the HOME/XDG override (and no \
+                         `{EXEMPTION_MARKER}` exception comment)",
+                        line_idx + 1,
+                        span.name
+                    ));
+                }
             }
         }
 
@@ -886,5 +918,39 @@ fn no_file_claims_the_real_home_exception_today() {
     assert!(
         offenders.is_empty(),
         "no test file should need the real-HOME exception today; found it in: {offenders:?}"
+    );
+}
+
+/// The single-argument `.arg("init")` form is caught too; a helper script's
+/// `.arg("status")` is not.
+#[test]
+fn detector_flags_the_single_arg_form_but_not_a_helper_scripts_subcommand() {
+    let synthetic = "\
+fn cmd() -> assert_cmd::Command {
+    assert_cmd::Command::cargo_bin(\"git-paw\").unwrap()
+}
+
+#[test]
+fn inits_with_the_real_home() {
+    cmd().current_dir(\"/tmp/r\").arg(\"init\").assert().success();
+}
+
+#[test]
+fn runs_sweep_status() {
+    let out = script_cmd::bash()
+        .arg(&sweep)
+        .arg(\"status\")
+        .output()
+        .unwrap();
+}
+";
+    let hits = scan("synthetic_single_arg.rs", synthetic, &HashSet::new());
+    assert!(
+        hits.iter().any(|h| h.contains("inits_with_the_real_home")),
+        "{hits:?}"
+    );
+    assert!(
+        !hits.iter().any(|h| h.contains("runs_sweep_status")),
+        "{hits:?}"
     );
 }

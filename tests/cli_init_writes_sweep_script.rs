@@ -40,6 +40,9 @@ fn init_writes_executable_sweep_script() {
     let output = cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .timeout(Duration::from_secs(10))
         .output()
         .expect("run git paw init");
@@ -86,6 +89,9 @@ fn init_creates_and_gitignores_repo_local_tmp() {
     let output = cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .timeout(Duration::from_secs(10))
         .output()
         .expect("run git paw init");
@@ -119,6 +125,9 @@ fn init_overwrites_existing_sweep_script() {
     let output = cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .timeout(Duration::from_secs(10))
         .output()
         .expect("run git paw init");

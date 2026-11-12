@@ -234,9 +234,17 @@ repository with no main working tree (a bare repository) skips the repository
 level. The result does not depend on where you run `git paw`.
 
 Overrides use the **directory form** only: a directory `<name>/` holding a
-`SKILL.md` with `name` and `description` frontmatter. A directory without a
-`SKILL.md` is not an override and falls through to the next level; a flat
-`<name>.md` file (the v0.3 form) is not read.
+`SKILL.md` (with `name` and `description` frontmatter, when it has any — see
+[Validation](#validation)). A directory without a `SKILL.md` is not an
+override and falls through to the next level; a flat `<name>.md` file (the
+v0.3 form) is not read.
+
+An override's `SKILL.md` may be a symlink, but it must resolve inside its own
+level directory (`.agents/skills/` or `agent-skills/`), and a repository's
+`.agents/skills/` must itself resolve inside the repository. One that resolves
+anywhere else — a committed `SKILL.md -> ~/.aws/credentials`, say — is a hard
+error naming the override, never read. A skill name that is a path (`../x`,
+`a/b`) is never looked up in an override directory.
 
 An override that exists but cannot be loaded — unreadable, not UTF-8, or with
 invalid frontmatter — is a **hard error**: `git paw start`, `add` and the
@@ -287,14 +295,17 @@ standardized layout:
 Each opens with `name` / `description` frontmatter whose `name` equals its
 directory name, so a skill-aware agent CLI can load the directory directly.
 `.git-paw/skills/` is gitignored and binary-managed: a re-run overwrites it,
-and an override under `.agents/skills/` is what the export renders from. See
+and the export renders from the same [resolution](#skill-resolution) as a
+launch: a repository or user override of `orchestrator` replaces the bundled
+text, while `cli-setup` is always the embedded copy. See
 [Supervisor → Driving the session from your own agent](supervisor.md#driving-the-session-from-your-own-agent).
 
 ## Validation
 
 Skills are validated against the agentskills.io specification:
 
-- Required `name` and `description` fields must be present
+- Frontmatter is optional; when present, it must carry non-empty `name` and
+  `description` fields
 - Frontmatter must parse within the supported subset (below)
 - Skill directory must contain SKILL.md file
 - Clear error messages for validation failures

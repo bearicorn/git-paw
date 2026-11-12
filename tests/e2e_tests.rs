@@ -162,6 +162,9 @@ fn stop_with_no_session() {
     cmd()
         .current_dir(tr.path())
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("No active session"));
@@ -299,6 +302,9 @@ fn status_with_no_session() {
     cmd()
         .current_dir(tr.path())
         .arg("status")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("No session"));
@@ -315,6 +321,9 @@ fn stop_from_non_git_dir_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -327,6 +336,9 @@ fn status_from_non_git_dir_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("status")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -343,6 +355,9 @@ fn init_creates_git_paw_dir() {
     cmd()
         .current_dir(tr.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(
@@ -367,6 +382,9 @@ fn init_outside_git_repo_fails() {
     cmd()
         .current_dir(tmp.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not a git repository"));
@@ -376,11 +394,21 @@ fn init_outside_git_repo_fails() {
 fn init_is_idempotent() {
     let tr = setup_test_repo();
 
-    cmd().current_dir(tr.path()).arg("init").assert().success();
+    cmd()
+        .current_dir(tr.path())
+        .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .success();
 
     cmd()
         .current_dir(tr.path())
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success()
         .stdout(predicate::str::contains("Already initialized"));
@@ -858,6 +886,9 @@ fn error_exit_code_is_1_for_not_a_git_repo() {
     cmd()
         .current_dir(tmp.path())
         .arg("start")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .code(1)
         .stderr(predicate::str::contains("Not a git repository"));

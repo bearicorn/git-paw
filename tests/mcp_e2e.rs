@@ -1127,3 +1127,26 @@ fn an_ambient_xdg_config_home_override_does_not_reach_a_binary_test() {
     assert!(!content.contains("AMBIENT-OVERRIDE-MARKER"));
     client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
 }
+
+/// skill-agent scenario "A path-shaped skill name never reads outside the
+/// override directories": `get_skill` answers `skill: null`.
+#[test]
+fn get_skill_with_a_path_shaped_name_reads_nothing_outside_the_override_dirs() {
+    let (_tmp, repo) = repo_fixture();
+    // `<repo>/.agents/skills/../x/SKILL.md` is `<repo>/.agents/x/SKILL.md`.
+    write_skill(&repo.join(".agents"), "x", "ESCAPED-MARKER");
+    let home = tempfile::tempdir().unwrap();
+
+    let mut client = McpClient::spawn_with(&repo, home.path(), |_| {});
+    client.initialize();
+    for name in ["../x", "..", "a/b"] {
+        let resp = client.call_tool("get_skill", json!({ "name": name }));
+        assert_eq!(
+            resp.pointer("/structuredContent/skill"),
+            Some(&json!(null)),
+            "{name}: {resp}"
+        );
+        assert!(!resp.to_string().contains("ESCAPED-MARKER"), "{resp}");
+    }
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
+}

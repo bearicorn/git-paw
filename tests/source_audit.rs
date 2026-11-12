@@ -824,7 +824,8 @@ fn pane_listings_name_the_agent_window_not_the_bare_session() {
 // ---------------------------------------------------------------------------
 
 /// Whether the production code of `path` bypasses `skills::resolve`: it names
-/// `resolve_from` or constructs a `SkillRoots` outside `#[cfg(test)]`. Only
+/// `resolve_from` or `SkillRoots` (constructing one in any form, or importing
+/// it) outside `#[cfg(test)]`. Only
 /// `src/skills.rs`, which defines both, may; a test-only module file
 /// (`*tests.rs`, compiled under `#[cfg(test)]`) is test code.
 fn bypasses_skill_resolution(path: &str, contents: &str) -> bool {
@@ -833,7 +834,7 @@ fn bypasses_skill_resolution(path: &str, contents: &str) -> bool {
     {
         return false;
     }
-    let bypass = regex::Regex::new(r"\bresolve_from\b|\bSkillRoots\s*\{").unwrap();
+    let bypass = regex::Regex::new(r"\bresolve_from\b|\bSkillRoots\b").unwrap();
     production_code(contents)
         .lines()
         .any(|line| bypass.is_match(line.split("//").next().unwrap_or("")))
@@ -863,6 +864,12 @@ fn skills_resolve_from_is_reserved_for_the_skills_module_and_tests() {
             "// resolve_from is not for production\nfn f() {}\n",
             false,
         ),
+        (
+            "src/mcp/tools/project.rs",
+            "fn f() { let r = skills::SkillRoots::default(); }\n",
+            true,
+        ),
+        ("src/init.rs", "use crate::skills::SkillRoots;\n", true),
         ("src/skills.rs", "pub fn resolve_from() {}\n", false),
         (
             "src/specs/backend_pin_tests.rs",
