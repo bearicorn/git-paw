@@ -122,6 +122,10 @@ impl SpecBackend for OpenSpecBackend {
                 .iter()
                 .find(|(k, _)| k == "paw_cli")
                 .map(|(_, v)| v.clone());
+            let profile = frontmatter
+                .iter()
+                .find(|(k, _)| k == "paw_profile")
+                .map(|(_, v)| v.clone());
 
             let owned_files = extract_owned_files(&tasks_content);
 
@@ -154,6 +158,7 @@ impl SpecBackend for OpenSpecBackend {
                 backend: SpecBackendKind::OpenSpec,
                 branch: String::new(), // Filled in by scan_specs.
                 cli,
+                profile,
                 prompt,
                 owned_files,
             });
@@ -446,6 +451,22 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0], ("paw_cli".to_string(), "gemini".to_string()));
         assert_eq!(body, "Body here");
+    }
+
+    /// `paw_profile` is read next to `paw_cli` (`cli-resolution`).
+    #[test]
+    fn scan_reads_paw_profile_next_to_paw_cli() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let change = tmp.path().join("add-x");
+        std::fs::create_dir_all(&change).unwrap();
+        std::fs::write(
+            change.join("tasks.md"),
+            "---\npaw_profile: routine\n---\n- [ ] 1.1 do it\n",
+        )
+        .unwrap();
+        let specs = OpenSpecBackend.scan(tmp.path()).unwrap();
+        assert_eq!(specs[0].profile.as_deref(), Some("routine"));
+        assert_eq!(specs[0].cli, None);
     }
 
     #[test]

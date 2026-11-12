@@ -420,6 +420,8 @@ the bundled [`broker.sh` helper](coordination.md#broker-helper) does — this is
 the [MCP tool form of the boot block](coordination.md#mcp-tool-form) for a CLI
 that speaks MCP — plus two verdict tools for a root session only, each
 publishing the same message `sweep.sh verified` / `feedback-gate` does.
+A server started inside a `git paw delegate` run (`GIT_PAW_DELEGATE` set)
+registers none of these six tools: a delegate's result is its standard output.
 
 | Tool | Input | Result |
 |------|-------|--------|
@@ -470,7 +472,16 @@ without restarting.
 
 Offered only to a server started in the repository's main working tree (as git
 reports it, so a `--separate-git-dir` checkout counts); a server in an agent's
-worktree does not list them, and a by-name call returns an MCP-level error.
+worktree does not list them, and a by-name call returns an MCP-level error. A
+server whose environment carries `GIT_PAW_DELEGATE` — one started inside a
+`git paw delegate` run — is never a root session, wherever it runs: it loads no
+authority credential, lists none of the lifecycle, verdict or repository-write
+tools (even with `allow_repo_writes = true`) and none of the agent publish
+tools (`publish_status`, `publish_artifact`, `publish_blocked`,
+`publish_question`), and a by-name call to any of them returns an error saying
+the tool is unavailable inside a delegate run. The read-only tools stay. There is no MCP
+tool that runs a delegate: an orchestrator delegates by running
+`git paw delegate` from its own shell (see [Agent Profiles](agent-profiles.md)).
 Each does exactly what the equivalent `git paw` command does, in-process, and
 returns structured JSON with the command's output lines and warnings.
 

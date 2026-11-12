@@ -194,3 +194,57 @@ fn a_native_sandbox_full_auto_would_disable_fails_doctor() {
     );
     assert!(!repo.doctor(&[]).status.success(), "a ✗ fails doctor");
 }
+
+/// Scenario "A full-auto worker profile on an unsandboxed CLI warns"
+/// (agent profiles): the session level is `manual`, the profile's own level
+/// is `full-auto`, so the profile's row warns — and nothing fails.
+#[test]
+fn a_full_auto_worker_profile_on_an_unsandboxed_cli_warns() {
+    let repo = Repo::with_config(
+        "[supervisor]\nagent_approval = \"manual\"\n\n\
+         [profiles.trusted]\nkind = \"worker\"\ndescription = \"Trusted\"\n\
+         cli = \"claude\"\napproval = \"full-auto\"\n",
+    );
+    let rows = repo.sandbox_mode_rows();
+    let row = rows
+        .iter()
+        .find(|r| r["name"] == "sandbox mode: claude (profile trusted)")
+        .unwrap_or_else(|| panic!("no profile row in {rows:?}"));
+    assert_eq!(row["status"], "warn", "{row}");
+    assert!(
+        row["remedy"]
+            .as_str()
+            .is_some_and(|r| r.contains("sandbox guide")),
+        "{row}"
+    );
+    assert!(rows.iter().all(|r| r["status"] != "fail"), "{rows:?}");
+}
+
+/// Scenario "A spec's profile resolves to its CLI": the spec-worker check
+/// reports the profile's CLI for a spec whose `paw_profile` names it.
+#[test]
+fn a_specs_profile_resolves_to_its_cli() {
+    let repo = Repo::with_config(
+        "default_spec_cli = \"alpha\"\n\n[specs]\ntype = \"markdown\"\ndir = \"specs\"\n\n\
+         [profiles.routine]\nkind = \"worker\"\ndescription = \"Routine\"\ncli = \"beta\"\n",
+    );
+    std::fs::create_dir_all(repo.root.join("specs")).expect("specs dir");
+    std::fs::write(
+        repo.root.join("specs/add-x.md"),
+        "---\npaw_status: pending\npaw_profile: routine\n---\nbody\n",
+    )
+    .expect("write spec");
+    let out = repo.doctor(&["--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let row = doc["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["name"] == "spec-worker CLI")
+        .cloned()
+        .expect("spec-worker CLI row");
+    assert!(
+        row["detail"].as_str().is_some_and(|d| d.contains("beta")),
+        "{row}"
+    );
+}

@@ -1136,3 +1136,66 @@ fn the_resolved_value_carries_the_full_auto_warning() {
     assert_eq!(profile.id(), "claude");
     assert_eq!(warned.len(), 1);
 }
+
+/// The delegate args denylist, per family: every known bypass form is
+/// caught (both `flag value` and `flag=value`, quoted, any case of a bypass
+/// value), and ordinary arguments pass.
+#[test]
+fn delegate_args_denylist_catches_every_known_bypass() {
+    let denied: &[(CliFamily, &str)] = &[
+        (CliFamily::Claude, "--permission-mode bypassPermissions"),
+        (CliFamily::Claude, "--permission-mode=plan"),
+        (CliFamily::Claude, "--permission-mode \"acceptEdits\""),
+        (CliFamily::Claude, "--allowedTools Bash"),
+        (CliFamily::Claude, "--allowed-tools=Bash"),
+        (CliFamily::Claude, "--settings /tmp/s.json"),
+        (CliFamily::Claude, "--dangerously-skip-permissions"),
+        (CliFamily::Claude, "--allow-dangerously-skip-permissions"),
+        (CliFamily::Claude, "--model x BYPASSPERMISSIONS"),
+        (CliFamily::Codex, "--sandbox read-only"),
+        (CliFamily::Codex, "-s danger-full-access"),
+        (CliFamily::Codex, "--sandbox=workspace-write"),
+        (CliFamily::Codex, "--full-auto"),
+        (CliFamily::Codex, "--yolo"),
+        (CliFamily::Codex, "-a never"),
+        (CliFamily::Codex, "--ask-for-approval=on-request"),
+        (CliFamily::Codex, "-c sandbox_mode=read-only"),
+        (CliFamily::Codex, "-c 'approval_policy=\"never\"'"),
+        (
+            CliFamily::Codex,
+            "--config sandbox_workspace_write.network_access=true",
+        ),
+        (CliFamily::Codex, "-c=SANDBOX_MODE=x"),
+        (CliFamily::Codex, "-c model_reasoning=danger-full-access"),
+        (CliFamily::Qwen, "-y"),
+        (CliFamily::Qwen, "--yolo"),
+        (CliFamily::Qwen, "--approval-mode yolo"),
+        (CliFamily::Qwen, "--approval-mode=auto-edit"),
+        (CliFamily::Codex, "-sdanger-full-access"),
+        (CliFamily::Codex, "-sread-only"),
+        (CliFamily::Codex, "-anever"),
+        (CliFamily::Codex, "-csandbox_mode=x"),
+        (CliFamily::Codex, "-c=approval_policy=never"),
+        (CliFamily::Qwen, "-yfoo"),
+    ];
+    for (family, args) in denied {
+        assert!(
+            CliProfile::for_family(*family).widening_arg(args).is_some(),
+            "{family}: `{args}` must be denied"
+        );
+    }
+    let allowed: &[(CliFamily, &str)] = &[
+        (CliFamily::Claude, "--model small --effort high"),
+        (CliFamily::Codex, "-c model=o3 --model x"),
+        (CliFamily::Codex, "--config model_reasoning_effort=high"),
+        (CliFamily::Codex, "-cmodel=o3"),
+        (CliFamily::Qwen, "--model qwen3"),
+    ];
+    for (family, args) in allowed {
+        assert_eq!(
+            CliProfile::for_family(*family).widening_arg(args),
+            None,
+            "{family}: `{args}` must pass"
+        );
+    }
+}

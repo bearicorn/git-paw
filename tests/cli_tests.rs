@@ -297,6 +297,7 @@ fn make_session_with_worktree(
             branch: branch.to_string(),
             worktree_path: wt.path.clone(),
             cli: "echo".to_string(),
+            profile: None,
             branch_created: wt.branch_created,
             base_branch: None,
             pending_boot_prompt: None,

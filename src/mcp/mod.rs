@@ -130,7 +130,9 @@ impl RepoContext {
     /// directory versus the common one, correct under `--separate-git-dir`).
     /// A check that cannot run counts as a linked worktree, so a failure
     /// never grants the root-only tools. The authority credential is loaded
-    /// for the main working tree only.
+    /// for the main working tree only. A server whose environment carries
+    /// `GIT_PAW_DELEGATE` (inside a delegate run) is never a root session,
+    /// whatever `root` resolves to.
     ///
     /// [`RepoLayout::is_linked_worktree`]: crate::cli_setup::shell::RepoLayout::is_linked_worktree
     #[must_use]
@@ -150,7 +152,10 @@ impl RepoContext {
             crate::config::PawConfig::mcp_server_name,
         );
         let allow_repo_writes = config.is_some_and(|cfg| cfg.mcp.allow_repo_writes);
-        let is_main_worktree = is_main_working_tree(&root);
+        // A server started inside a delegate run is never a root session: no
+        // credential, no lifecycle, verdict or repository-write tools.
+        let is_main_worktree =
+            crate::delegate::current_delegate_run().is_none() && is_main_working_tree(&root);
         let authority = if is_main_worktree {
             session::authority_for_repo(&root)
                 .ok()

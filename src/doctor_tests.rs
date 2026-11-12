@@ -44,6 +44,8 @@ fn worker(cli: &str, declared: Option<&str>) -> WorkerSandboxProbe {
         declared: declared.map(Into::into),
         refusal: None,
         wrapper_agent_binary: None,
+        profile: None,
+        full_auto: None,
     }
 }
 
@@ -1852,4 +1854,88 @@ fn skill_sources_check_table() {
         remedy.contains(&repo_path.display().to_string()),
         "{remedy}"
     );
+}
+
+// -- Agent profiles in the sandbox-mode and spec-CLI checks --------------
+
+fn profile_entry(
+    cli: &str,
+    approval: Option<crate::config::ApprovalLevel>,
+) -> crate::config::ProfileEntry {
+    crate::config::ProfileEntry {
+        kind: crate::config::ProfileKind::Worker,
+        description: "d".into(),
+        cli: cli.into(),
+        args: None,
+        skill: None,
+        approval,
+        timeout_seconds: None,
+    }
+}
+
+/// Scenario "A full-auto worker profile on an unsandboxed CLI warns": the
+/// session level is `manual`, so only the profile's own level warns — never ✗.
+#[test]
+fn a_full_auto_worker_profile_on_an_unsandboxed_cli_warns() {
+    let mut config = PawConfig::default();
+    config.supervisor = Some(crate::config::SupervisorConfig {
+        agent_approval: crate::config::ApprovalLevel::Manual,
+        ..crate::config::SupervisorConfig::default()
+    });
+    config.profiles.insert(
+        crate::config::ProfileName::new("trusted").unwrap(),
+        profile_entry("claude", Some(crate::config::ApprovalLevel::FullAuto)),
+    );
+    let probe = probe_sandbox_mode(&config, &SpecCliProbe::default());
+    assert!(!probe.full_auto);
+    let checks = check_sandbox_mode(&probe);
+    let row = named(&checks, "sandbox mode: claude (profile trusted)");
+    assert_eq!(row.status, CheckStatus::Warn, "{row:?}");
+    assert!(row.detail.contains("claude"), "{row:?}");
+    assert!(
+        row.remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("sandbox guide")),
+        "{row:?}"
+    );
+    assert!(checks.iter().all(|c| c.status != CheckStatus::Fail));
+}
+
+/// A worker profile below full-auto on the same CLI passes at its own level
+/// even when the session-wide level is full-auto.
+#[test]
+fn a_manual_worker_profile_is_evaluated_at_its_own_level() {
+    let checks = check_sandbox_mode(&SandboxModeProbe {
+        full_auto: true,
+        workers: vec![WorkerSandboxProbe {
+            profile: Some("careful".into()),
+            full_auto: Some(false),
+            ..worker("claude", None)
+        }],
+    });
+    assert_eq!(checks[0].status, CheckStatus::Ok, "{checks:?}");
+}
+
+/// Scenario "A spec's profile resolves to its CLI".
+#[test]
+fn a_specs_profile_resolves_to_its_cli() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let specs = tmp.path().join("specs");
+    std::fs::create_dir_all(&specs).unwrap();
+    std::fs::write(
+        specs.join("add-x.md"),
+        "---\npaw_status: pending\npaw_profile: routine\n---\nbody\n",
+    )
+    .unwrap();
+    let mut config = PawConfig::default();
+    config.specs = Some(crate::config::SpecsConfig {
+        spec_type: Some("markdown".into()),
+        dir: Some("specs".into()),
+    });
+    config.profiles.insert(
+        crate::config::ProfileName::new("routine").unwrap(),
+        profile_entry("beta", None),
+    );
+    let probe = probe_spec_cli(&config, tmp.path());
+    assert_eq!(probe.resolved_clis, vec!["beta".to_string()]);
 }

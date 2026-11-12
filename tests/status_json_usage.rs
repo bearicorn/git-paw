@@ -50,6 +50,7 @@ fn entry(branch: &str, cli: &str, worktree: &Path, sid: Option<&str>) -> Worktre
         branch: branch.to_string(),
         worktree_path: worktree.to_path_buf(),
         cli: cli.to_string(),
+        profile: None,
         branch_created: false,
         base_branch: None,
         pending_boot_prompt: None,
@@ -222,5 +223,133 @@ fn human_status_is_byte_identical_with_and_without_usage() {
     assert!(
         !after.contains("usage") && !after.contains("tokens"),
         "got {after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// agent-profiles: `usage_by_profile` (session-state).
+// ---------------------------------------------------------------------------
+
+const SID2: &str = "22222222-3333-4444-5555-666666666666";
+const SID3: &str = "33333333-4444-5555-6666-777777777777";
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// A session with two `routine` workers on `claude` (feat/x, feat/z) and one
+/// plain `aider` worker (feat/y), plus the given ledger lines.
+fn profiled_fixture(tag: &str, ledger: &[serde_json::Value]) -> Fixture {
+    let fx = Fixture::new(tag);
+    let repo_path = canon(fx.repo.path());
+    let mut x = entry("feat/x", "claude", &repo_path.join("wt-x"), Some(SID));
+    x.profile = Some("routine".to_string());
+    let mut z = entry("feat/z", "claude", &repo_path.join("wt-z"), Some(SID2));
+    z.profile = Some("routine".to_string());
+    let y = entry("feat/y", "aider", &repo_path.join("wt-y"), None);
+    let session = Session {
+        session_name: format!("paw-spend-{tag}-doesnotexist"),
+        repo_path: repo_path.clone(),
+        project_name: "usage".to_string(),
+        created_at: SystemTime::now(),
+        status: SessionStatus::Active,
+        worktrees: vec![x, y, z],
+        broker_port: None,
+        broker_bind: None,
+        broker_log_path: None,
+        mode: SessionMode::Bare,
+        dashboard_pane: None,
+        layout: None,
+        broker_authority: None,
+    };
+    git_paw::session::save_session_in(&session, &sessions_dir_for_home(fx.home.path()))
+        .expect("save receipt");
+    let dir = repo_path.join(".git-paw/logs/delegates");
+    fs::create_dir_all(&dir).expect("ledger dir");
+    let lines: Vec<String> = ledger.iter().map(ToString::to_string).collect();
+    fs::write(dir.join("runs.jsonl"), lines.join("\n") + "\n").expect("ledger");
+    fx
+}
+
+/// Writes the usage fixture as session `sid`'s transcript for a CLI run in
+/// `cwd`.
+fn write_transcript_in(fx: &Fixture, cwd: &Path, sid: &str) {
+    let slug: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = fx.claude_config.path().join("projects").join(slug);
+    fs::create_dir_all(&dir).expect("project dir");
+    fs::write(dir.join(format!("{sid}.jsonl")), SESSION_FIXTURE).expect("transcript");
+}
+
+fn run(profile: &str, cli: &str, sid: Option<&str>, started_at: u64) -> serde_json::Value {
+    serde_json::json!({
+        "profile": profile, "cli": cli, "session_id": sid,
+        "started_at": started_at, "duration_seconds": 1.0, "outcome": "ok"
+    })
+}
+
+/// Scenario "Worker and delegate usage are grouped by profile".
+#[test]
+fn worker_and_delegate_usage_are_grouped_by_profile() {
+    let later = unix_now() + 5;
+    let fx = profiled_fixture(
+        "byprofile",
+        &[
+            run("spec-audit", "claude", Some(SID3), later),
+            run("explorer", "aider", None, later),
+        ],
+    );
+    let root = canon(fx.repo.path());
+    write_transcript_in(&fx, &root.join("wt-x"), SID);
+    write_transcript_in(&fx, &root.join("wt-z"), SID2);
+    write_transcript_in(&fx, &root, SID3);
+    let json = fx.status_json();
+    let by = &json["usage_by_profile"];
+
+    assert_eq!(by["routine"]["kind"], "worker", "{by}");
+    assert_eq!(by["routine"]["workers"], 2, "{by}");
+    assert_eq!(by["routine"]["usage"]["output_tokens"], 300, "{by}");
+    assert_eq!(by["routine"]["unknown"], 0, "{by}");
+
+    assert_eq!(by["spec-audit"]["kind"], "delegate", "{by}");
+    assert_eq!(by["spec-audit"]["delegate_runs"], 1, "{by}");
+    assert_eq!(by["spec-audit"]["usage"]["output_tokens"], 150, "{by}");
+
+    assert_eq!(by["explorer"]["delegate_runs"], 1, "{by}");
+    assert_eq!(by["explorer"]["unknown"], 1, "{by}");
+    assert!(by["explorer"]["usage"].is_null(), "{by}");
+
+    // usage_total counts the workers only, as before.
+    assert_eq!(json["usage_total"]["output_tokens"], 300, "{json}");
+    assert_eq!(json["usage_total"]["unknown_workers"], 1, "{json}");
+    assert!(by.get("feat/y").is_none() && by.as_object().unwrap().len() == 3);
+}
+
+/// Scenario "Runs before the session are excluded".
+#[test]
+fn runs_before_the_session_are_excluded() {
+    let fx = profiled_fixture("before", &[run("spec-audit", "claude", Some(SID3), 1)]);
+    let json = fx.status_json();
+    assert!(
+        json["usage_by_profile"].get("spec-audit").is_none(),
+        "{json}"
+    );
+}
+
+/// Scenario "No profiles yields an empty object".
+#[test]
+fn no_profiles_yields_an_empty_object() {
+    let fx = Fixture::new("noprofiles");
+    let json = fx.status_json();
+    assert_eq!(json["usage_by_profile"], serde_json::json!({}), "{json}");
+    assert!(
+        worktree(&json, "feat/x")["profile"].is_null(),
+        "each worktree carries profile null: {json}"
     );
 }

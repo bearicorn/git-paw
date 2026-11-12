@@ -86,7 +86,7 @@ paw_cli: claude
 Add JWT token support to the auth module.
 ```
 
-The `paw_cli` field overrides the CLI for this specific spec. If omitted, the default resolution chain applies (see [CLI Resolution](#cli-resolution) below).
+The `paw_cli` field overrides the CLI for this specific spec; `paw_profile: <name>` instead launches the spec's worker with a worker profile (see [Agent Profiles](agent-profiles.md)). A spec may set one or the other, not both. If neither is set, the default resolution chain applies (see [CLI Resolution](#cli-resolution) below).
 
 Supplementary spec files in `specs/<name>/spec.md` are appended to the prompt with section headers. File ownership can be declared with "Files owned:" or "Owned files:" followed by a markdown list.
 
@@ -149,6 +149,7 @@ Add JWT token support to the auth module.
 | `paw_status` | Yes | Must be `"pending"` to be included. Other values (`"done"`, `"in-progress"`) are ignored. |
 | `paw_branch` | No | Branch name suffix. Falls back to filename stem if absent. |
 | `paw_cli` | No | CLI override for this spec. |
+| `paw_profile` | No | Worker profile for this spec (instead of `paw_cli`). |
 
 Only files with `paw_status: pending` are picked up.
 
@@ -291,11 +292,15 @@ full conversion.
 
 When a spec-mode launch runs, CLIs are resolved in priority order:
 
-1. **`--cli` flag** (highest) — applies to all specs, no prompt
-2. **`paw_cli` in spec** — per-spec override from frontmatter
+1. **`--profile` or `--cli` flag** (highest, mutually exclusive) — applies to all specs, no prompt
+2. **`paw_profile` or `paw_cli` in spec** — per-spec override from frontmatter
 3. **`default_spec_cli` in config** — fills remaining specs without prompt
-4. **`default_cli` in config** — pre-selects in picker for remaining
-5. **Interactive picker** (lowest) — prompts for any unresolved specs
+4. **`default_profile`, else `default_cli`, in config** — pre-selects in picker for remaining
+5. **Interactive picker** (lowest) — prompts for any unresolved specs; it lists worker profiles after the CLIs
+
+A `--profile`, `paw_profile` or `default_profile` naming no profile, or a
+delegate profile, fails the launch with an error naming the value and where it
+came from; so does a spec setting both `paw_profile` and `paw_cli`.
 
 ```bash
 # Override all specs to use claude

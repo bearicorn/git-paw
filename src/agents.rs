@@ -139,6 +139,19 @@ pub struct WorktreeAssignment {
     /// `## Inter-Agent Rules` subsection entirely so non-supervisor sessions
     /// are byte-identical to pre-supervisor output.
     pub inter_agent_rules: Option<String>,
+    /// A worker profile's rendered role skill, written after the
+    /// coordination skill under a heading naming it and listed in the skills
+    /// index. `None`: the block is exactly as it is without a profile.
+    pub role_skill: Option<RoleSkill>,
+}
+
+/// A worker profile's role skill as the managed block carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleSkill {
+    /// The role skill's name (`[profiles.<name>] skill`).
+    pub name: String,
+    /// Its rendered text.
+    pub content: String,
 }
 
 /// Bundled template for [`build_inter_agent_rules`], carrying the
@@ -230,15 +243,32 @@ fn generate_section(assignment: &WorktreeAssignment, for_worker: bool) -> String
         }
     }
 
-    if !assignment.skill_packages.is_empty() {
+    if !assignment.skill_packages.is_empty() || assignment.role_skill.is_some() {
         section.push('\n');
         section.push_str(&skills_index(&assignment.skill_packages));
+        if let Some(role) = &assignment.role_skill {
+            let _ = writeln!(
+                section,
+                "- **{}** — role skill of this worker's profile (inlined below)",
+                role.name
+            );
+        }
     }
 
     if let Some(ref skill) = assignment.skill_content {
         section.push('\n');
         section.push_str(skill);
         if !skill.ends_with('\n') {
+            section.push('\n');
+        }
+    }
+
+    if let Some(role) = &assignment.role_skill {
+        section.push('\n');
+        let _ = writeln!(section, "## Role skill: {}", role.name);
+        section.push('\n');
+        section.push_str(&role.content);
+        if !role.content.ends_with('\n') {
             section.push('\n');
         }
     }
@@ -990,6 +1020,52 @@ pub fn inject_orchestrator_pointer(repo_root: &Path) -> Result<bool, PawError> {
 mod tests {
     use super::*;
 
+    fn assignment_with(role_skill: Option<RoleSkill>) -> WorktreeAssignment {
+        WorktreeAssignment {
+            branch: "feat/a".into(),
+            cli: "claude".into(),
+            spec_content: None,
+            owned_files: None,
+            skill_content: Some("## Coordination\n\nCOORDINATION-BODY\n".into()),
+            role_skill,
+            skill_packages: Vec::new(),
+            inter_agent_rules: None,
+        }
+    }
+
+    /// Spec scenario "Without a role skill the block is unchanged": no role
+    /// heading, no index line, nothing after the coordination skill.
+    #[test]
+    fn without_a_role_skill_the_block_is_unchanged() {
+        let section = generate_worktree_section(&assignment_with(None));
+        assert!(!section.contains("Role skill"), "{section}");
+        assert!(!section.contains("## Skills"), "{section}");
+        let expected = format!(
+            "{START_MARKER}\n\n## git-paw Session Assignment\n\n- **Branch:** `feat/a`\n\
+             - **CLI:** claude\n{WORKER_ROLE_LINE}\n\n## Coordination\n\nCOORDINATION-BODY\n\n\
+             {END_MARKER}\n"
+        );
+        assert_eq!(section, expected);
+    }
+
+    /// The role skill follows the coordination skill under a heading naming
+    /// it, and the skills index lists it.
+    #[test]
+    fn a_role_skill_follows_the_coordination_skill() {
+        let section = generate_worktree_section(&assignment_with(Some(RoleSkill {
+            name: "reviewer".into(),
+            content: "REVIEWER-ROLE\n".into(),
+        })));
+        let coordination = section.find("COORDINATION-BODY").expect("coordination");
+        let heading = section.find("## Role skill: reviewer").expect("heading");
+        let role = section.find("REVIEWER-ROLE").expect("role body");
+        assert!(coordination < heading && heading < role, "{section}");
+        assert!(
+            section.contains("- **reviewer** \u{2014} role skill"),
+            "{section}"
+        );
+    }
+
     /// `core-project-conventions`' "Every static pattern compiles under test":
     /// forces every static regex in this module to compile.
     #[test]
@@ -1012,6 +1088,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: Some("SPEC BODY".to_string()),
             owned_files: Some(vec!["src/lib.rs".to_string()]),
+            role_skill: None,
             skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -1035,6 +1112,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: None,
             owned_files: None,
+            role_skill: None,
             skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -1327,6 +1405,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: spec.map(ToString::to_string),
             owned_files: files.map(|v| v.into_iter().map(ToString::to_string).collect()),
+            role_skill: None,
             skill_content: None,
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -1343,6 +1422,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: spec.map(ToString::to_string),
             owned_files: files.map(|v| v.into_iter().map(ToString::to_string).collect()),
+            role_skill: None,
             skill_content: skill.map(ToString::to_string),
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -2032,6 +2112,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: None,
             owned_files: None,
+            role_skill: None,
             skill_content: Some(
                 "Agent ID: feat-http-broker\nURL: http://127.0.0.1:9119\n".to_string(),
             ),
@@ -2107,6 +2188,7 @@ mod tests {
             cli: baseline.cli.clone(),
             spec_content: baseline.spec_content.clone(),
             owned_files: baseline.owned_files.clone(),
+            role_skill: None,
             skill_content: None,
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -2779,6 +2861,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: None,
             owned_files: None,
+            role_skill: None,
             skill_content: None,
             skill_packages: Vec::new(),
             inter_agent_rules: None,
@@ -2844,6 +2927,7 @@ mod tests {
             cli: "claude".to_string(),
             spec_content: None,
             owned_files: None,
+            role_skill: None,
             skill_content: (!packages.is_empty())
                 .then(|| "## Coordination Skills\n\nINLINED BODY\n".to_string()),
             skill_packages: packages,

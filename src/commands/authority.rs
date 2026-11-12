@@ -19,12 +19,36 @@ use crate::error::PawError;
 /// reusable from library code.
 ///
 /// # Errors
-/// Returns an error when `cwd` is inside a linked worktree (decided as git
+/// Returns an error inside a delegate run (`GIT_PAW_DELEGATE` set), when
+/// `cwd` is inside a linked worktree (decided as git
 /// reports it: the checkout's git directory differs from the common one,
 /// which also holds under `--separate-git-dir`), when `cwd` is not in a
 /// repository, or when no session with a broker credential exists for the
 /// repository.
 pub fn authority(runner: &dyn CommandRunner, cwd: &Path) -> Result<String, PawError> {
+    authority_marked(
+        crate::delegate::current_delegate_run().as_deref(),
+        runner,
+        cwd,
+    )
+}
+
+/// [`authority`] with the delegate-run marker (`GIT_PAW_DELEGATE`) passed
+/// in: inside a delegate run no credential is ever returned, so a delegate's
+/// own tooling cannot publish a verdict through the root-side helpers.
+///
+/// # Errors
+/// As [`authority`], plus a refusal inside a delegate run.
+pub fn authority_marked(
+    delegate_run: Option<&str>,
+    runner: &dyn CommandRunner,
+    cwd: &Path,
+) -> Result<String, PawError> {
+    if let Some(run) = delegate_run {
+        return Err(PawError::SessionError(
+            crate::delegate::refusal_inside_delegate(run, "the broker authority credential"),
+        ));
+    }
     let layout = crate::cli_setup::shell::resolve_layout(runner, cwd)?;
     if layout.is_linked_worktree() {
         return Err(PawError::SessionError(

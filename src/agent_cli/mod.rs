@@ -204,6 +204,27 @@ pub trait CliProvider: Sync {
         &[]
     }
 
+    /// Option values that bypass the CLI's permission prompts or sandbox
+    /// whichever flag (or `key=value` config override) carries them.
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Flags a delegate profile's `args` may never carry, whatever their
+    /// value: every option of this CLI that sets its permission mode, its
+    /// sandbox or its tool grants. Best-effort defence in depth — a profile's
+    /// `args` are operator-trusted configuration.
+    fn delegate_denied_flags(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The CLI's config-override flags (`-c key=value`) and the keys a
+    /// delegate profile's `args` may never override through them (a trailing
+    /// `.*` denies every key under that table).
+    fn denied_config_overrides(&self) -> (&'static [&'static str], &'static [&'static str]) {
+        (&[], &[])
+    }
+
     /// Template assigning a fresh session id at launch (contains
     /// [`crate::config::SESSION_ID_PLACEHOLDER`]), or `None`.
     fn session_id_args(&self) -> Option<&'static str> {
@@ -333,6 +354,19 @@ impl CliProvider for ClaudeProvider {
             ApprovalLevel::Manual => "",
         }
     }
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &["bypassPermissions"]
+    }
+    fn delegate_denied_flags(&self) -> &'static [&'static str] {
+        &[
+            "--permission-mode",
+            "--allowedTools",
+            "--allowed-tools",
+            "--settings",
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+        ]
+    }
     fn session_id_args(&self) -> Option<&'static str> {
         Some("--session-id {{SESSION_ID}}")
     }
@@ -392,6 +426,30 @@ impl CliProvider for CodexProvider {
     fn sandbox_disabling_flags(&self) -> &'static [&'static str] {
         &["--dangerously-bypass-approvals-and-sandbox"]
     }
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &["danger-full-access"]
+    }
+    fn delegate_denied_flags(&self) -> &'static [&'static str] {
+        &[
+            "--sandbox",
+            "-s",
+            "--full-auto",
+            "--yolo",
+            "-a",
+            "--ask-for-approval",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+    }
+    fn denied_config_overrides(&self) -> (&'static [&'static str], &'static [&'static str]) {
+        (
+            &["-c", "--config"],
+            &[
+                "sandbox_mode",
+                "approval_policy",
+                "sandbox_workspace_write.*",
+            ],
+        )
+    }
     fn headless_args(&self) -> Option<&'static str> {
         Some("exec")
     }
@@ -431,6 +489,9 @@ impl CliProvider for QwenProvider {
             ApprovalLevel::FullAuto => "--yolo",
             ApprovalLevel::Auto | ApprovalLevel::Manual => "",
         }
+    }
+    fn delegate_denied_flags(&self) -> &'static [&'static str] {
+        &["-y", "--yolo", "--approval-mode"]
     }
 }
 

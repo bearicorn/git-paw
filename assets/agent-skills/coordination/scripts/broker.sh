@@ -40,6 +40,14 @@
 
 set -u
 
+# A delegate run (GIT_PAW_DELEGATE set, any value) returns its result on its
+# standard output, never as a broker message or a keystroke into a pane. Inside
+# one, every subcommand is refused here, before any broker or pane is reached.
+if [[ -n "${GIT_PAW_DELEGATE+set}" ]]; then
+  echo "broker.sh: refused inside a delegate run (GIT_PAW_DELEGATE=${GIT_PAW_DELEGATE}): a delegate publishes nothing and types into no pane; its result is its standard output" >&2
+  exit 3
+fi
+
 # ---------------------------------------------------------------------------
 # Discovery: project root, paw dir, broker URL, agent id.
 #

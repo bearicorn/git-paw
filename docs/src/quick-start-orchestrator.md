@@ -126,6 +126,33 @@ An orchestrator connected over MCP can write the OpenSpec change it then launche
 
 See [Spec authoring](user-guide/mcp.md#spec-authoring-repository-writes-root-session-only) for the tools' parameters and the confinement rules.
 
+## Delegating Audits and Exploration
+
+The orchestrator can hand its three audit gates and broad read-only
+exploration to **delegate profiles**: one-shot headless agents that return a
+compact verdict or map on standard output, so the raw work stays out of the
+orchestrator's context. Declare them once:
+
+```toml
+[profiles.spec-audit]
+kind = "delegate"
+description = "Runs the spec audit gate"
+cli = "claude"
+skill = "spec-auditor"
+
+[profiles.explorer]
+kind = "delegate"
+description = "Read-only codebase sweep"
+cli = "claude"
+skill = "explorer"
+```
+
+The orchestrator skill lists them with `git paw delegate --list` and runs
+`git paw delegate spec-audit --task "<branch> at <tip>, change <id>"` before
+falling back to its CLI's own subagents or running the gate inline. Delegates
+never publish: the orchestrator still publishes every verdict. See
+[Agent Profiles](user-guide/agent-profiles.md).
+
 ## Skipping Supervisor for One Session
 
 If your project sets `[supervisor] enabled = true` (the recommended setup for active development), every `git paw start` launches in supervisor mode. To skip it for a single session, pass `--no-supervisor`. This suits a quick debug-only run or a one-off branch flip, and you don't need to edit the config:

@@ -513,6 +513,7 @@ fn config_survives_save_and_load() {
     let original = PawConfig {
         default_cli: Some("claude".into()),
         default_spec_cli: None,
+        default_profile: None,
         branch_prefix: None,
         mouse: Some(true),
         clis: HashMap::from([(
@@ -542,6 +543,7 @@ fn config_survives_save_and_load() {
                 cli: "claude".into(),
             },
         )]),
+        profiles: std::collections::BTreeMap::new(),
         specs: None,
         logging: None,
         dashboard: None,

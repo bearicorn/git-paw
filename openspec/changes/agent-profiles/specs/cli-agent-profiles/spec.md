@@ -62,6 +62,29 @@ Configuration loading SHALL fail with an error naming the profile and the key wh
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error naming the profile name
 
+### Requirement: A delegate profile's args cannot widen its permissions
+
+Configuration loading SHALL fail with an error naming the profile and `args` when a delegate profile's `args`, quotes stripped, carry a word its CLI's delegate denylist names: an `auto` or `full-auto` approval flag, a sandbox-disabling flag or a family-denied flag, in any form; a config override of a denied key; or a permission-bypass value, compared case-insensitively. The check is best-effort defence in depth: profile `args` are operator-trusted configuration.
+
+#### Scenario: A delegate's args cannot widen its permissions
+
+- **GIVEN** a delegate profile on each family with `args` naming a denied flag — Claude `--permission-mode bypassPermissions`, Codex `-c sandbox_mode=x`, `-sdanger-full-access` or `--ask-for-approval=never`, Qwen `--approval-mode yolo`
+- **WHEN** each config is loaded
+- **THEN** loading SHALL fail with an error naming `profiles.<name>` and `args`
+- **AND** ordinary arguments such as `--model small` SHALL still load
+
+#### Scenario: Each family's denylist covers its permission, sandbox and tool-grant flags
+
+- **WHEN** the delegate denylist is checked per family
+- **THEN** it SHALL deny, whatever the value and in `flag value`, `flag=value` or attached single-dash form: Codex `--sandbox`/`-s`, `--full-auto`, `--yolo`, `-a`/`--ask-for-approval` and `-c` overrides of `sandbox_mode`, `approval_policy` and `sandbox_workspace_write.*`; Claude `--permission-mode`, `--allowedTools`/`--allowed-tools`, `--settings`, `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`; Qwen `-y`, `--yolo`, `--approval-mode`
+- **AND** it SHALL deny every flag of the CLI's `auto` and `full-auto` approval flags, an `approval_args` override included
+
+#### Scenario: Profile args are operator-trusted configuration
+
+- **GIVEN** a profile's `args`, which the operator writes like `[clis.<name>].args` and whose `config.toml` edits are ask-protected by `git paw setup-cli`
+- **WHEN** the denylist does not name a word in them
+- **THEN** the profile SHALL load, the denylist being defence in depth and not a complete boundary
+
 ### Requirement: Profiles merge by name across configuration files
 
 The global and repository configuration files SHALL merge `[profiles]` by name, a repository entry replacing a global entry of the same name whole, and SHALL merge `default_profile` the way they merge `default_cli`.
@@ -97,7 +120,7 @@ When a worker is launched with a worker profile, the system SHALL resolve the pr
 
 - **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, a worker approval of `manual`, and `[profiles.deep]` with `kind = "worker"`, `cli = "opus"`, `args = "--effort high"`
 - **WHEN** the pane command of a worker launched with `deep` is built for a fresh launch assigned the session id `abc`
-- **THEN** it SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude --model opus --effort high --setting-sources project,local --session-id abc`
+- **THEN** it SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus --effort high --setting-sources project,local --session-id abc`
 
 ### Requirement: A worker profile's approval level applies to its worker only
 
@@ -241,7 +264,14 @@ A delegate's argv SHALL be built from its CLI record with no shell, each part sp
 
 ### Requirement: A delegate runs at the root with a marked, credential-free environment
 
-A delegate SHALL be spawned with: working directory = the repository's main working tree root; the delegate document on stdin; no controlling terminal; and the inherited environment plus `GIT_PAW_DELEGATE=<name>` and its CLI's operator-isolation environment, without `GIT_PAW_BROKER_URL` and without any authority credential. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
+A delegate SHALL be spawned with: working directory = the repository's main working tree root; the delegate document on stdin; its own process group, with no terminal on its standard streams; and the inherited environment plus `GIT_PAW_DELEGATE=<name>` and its CLI's operator-isolation environment, without `GIT_PAW_BROKER_URL` and without any authority credential. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
+
+#### Scenario: An interrupted delegate takes its process group with it
+
+- **GIVEN** a running delegate whose CLI started a child process
+- **WHEN** the `git paw delegate` process receives SIGINT, SIGTERM or SIGHUP
+- **THEN** the delegate's whole process group SHALL be killed and its active-run record removed
+- **AND** `git paw delegate` SHALL exit with 128 plus the signal number (130, 143 or 129)
 
 #### Scenario: Environment marks the run and carries no broker URL or credential
 
@@ -295,7 +325,7 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 
 ### Requirement: Delegate runs are admitted four readers or one writer at a time
 
-Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. A run whose process no longer exists SHALL NOT count as active. Admission SHALL be a pure function of the active runs and the requested level.
+Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Admission SHALL be a pure function of the active runs and the requested level.
 
 #### Scenario: A fifth read-only delegate is refused
 
@@ -315,6 +345,46 @@ Per repository, at most four delegate runs at level `manual` SHALL run at once, 
 - **GIVEN** a recorded active run whose process has exited without cleaning up
 - **WHEN** admission is decided for a new run
 - **THEN** the dead run SHALL NOT count toward the limit
+
+### Requirement: Active-run records bound orphaned delegates
+
+Each active-run record SHALL carry the delegate's process group and deadline (start + `timeout_seconds`) once spawned, written atomically. A run SHALL count as active while its `git paw delegate` process or its process group is alive. Past its deadline, a record whose group is alive SHALL have the group killed at the next admission and then SHALL NOT count; a record whose group could not be killed SHALL keep counting; a record whose group is gone SHALL NOT count.
+
+#### Scenario: An orphaned delegate is bounded by its deadline
+
+- **GIVEN** an active-run record whose `git paw delegate` process has exited but whose delegate process group is alive and whose leader identity is verified
+- **WHEN** admission is decided before the record's deadline
+- **THEN** the run SHALL count as active
+- **AND** when admission is decided after the deadline, its process group SHALL be killed and it SHALL NOT count
+
+#### Scenario: An unkilled overdue record keeps counting
+
+- **GIVEN** an overdue active-run record whose process group is alive but whose leader identity cannot be confirmed
+- **WHEN** admission is decided
+- **THEN** its group SHALL NOT be signalled
+- **AND** the record SHALL be kept and SHALL count as active
+
+### Requirement: Delegate process groups are signalled only after an identity check
+
+A holder pid of `0` or `1`, and any pid or group above `i32::MAX`, SHALL count as dead. A recorded group SHALL be probed or signalled only when it is above 1 and not git-paw's own, and killed only when its leader still leads it, runs the recorded program (first or second argv word) and has the start time recorded at spawn (read with `LC_ALL=C`, `TZ=UTC`). If that start time or the record cannot be written at spawn, the group SHALL be killed and the run SHALL fail.
+
+#### Scenario: Out-of-range ids count as dead
+
+- **GIVEN** active-run records whose holder pid is `0`, `1` or above `i32::MAX`, or whose process group is `0`, `1`, git-paw's own group or above `i32::MAX`
+- **WHEN** admission is decided
+- **THEN** no such holder or group SHALL be probed as alive or signalled
+
+#### Scenario: Leader identity requires the recorded start time
+
+- **GIVEN** an overdue record whose group leader's first or second argv word matches the recorded program but whose start time differs from the one recorded at spawn
+- **WHEN** admission is decided
+- **THEN** the group SHALL NOT be killed
+
+#### Scenario: A delegate whose identity cannot be recorded does not run
+
+- **GIVEN** a spawned delegate whose leader start time cannot be read
+- **WHEN** the run's record is written
+- **THEN** its process group SHALL be killed and the run SHALL fail
 
 ### Requirement: Delegate result
 

@@ -2145,6 +2145,7 @@ mod tests {
                 backend: SpecBackendKind::OpenSpec,
                 branch: format!("feat/{id}"),
                 cli: None,
+                profile: None,
                 prompt: String::new(),
                 owned_files: None,
             }

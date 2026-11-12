@@ -129,6 +129,7 @@ pub enum Command {
                       git paw start --specs   # opens spec picker (TTY required)\n  \
                       git paw start --dry-run\n  \
                       git paw start --preset backend\n  \
+                      git paw start --profile routine --branches feat/auth   # worker profile from [profiles.routine]\n  \
                       git paw start --supervisor   # dashboard + agents; your own session orchestrates\n  \
                       git paw start --no-supervisor  # disable supervisor for this session (overrides config)\n  \
                       git paw start --no-rebase   # skip rebasing agent branches onto the default branch\n  \
@@ -138,6 +139,16 @@ pub enum Command {
         /// AI CLI to use (e.g., claude, codex, agy). Skips CLI picker if provided.
         #[arg(long, help = "AI CLI to use (skips CLI picker)")]
         cli: Option<String>,
+
+        /// Worker profile (`[profiles.<name>]`, `kind = "worker"`) for every
+        /// branch. Skips the CLI picker.
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with_all = ["cli", "preset"],
+            help = "Worker profile from [profiles.<name>] for every branch (skips CLI picker)"
+        )]
+        profile: Option<String>,
 
         /// Comma-separated branch names. Skips branch picker if provided.
         #[arg(
@@ -340,7 +351,8 @@ pub enum Command {
                       git paw add feat/new-thing\n  \
                       git paw add feat/api --cli codex\n  \
                       git paw add --from-spec add-export\n  \
-                      git paw add feat/api --cli codex --no-rebase"
+                      git paw add feat/api --cli codex --no-rebase\n  \
+                      git paw add feat/api --profile routine   # worker profile from [profiles.routine]"
     )]
     Add {
         /// Branch to attach. Omit when using --from-spec (the branch is
@@ -357,6 +369,16 @@ pub enum Command {
             help = "AI CLI for the new pane (defaults to the session's default CLI)"
         )]
         cli: Option<String>,
+
+        /// Worker profile (`[profiles.<name>]`, `kind = "worker"`) for the new
+        /// pane.
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "cli",
+            help = "Worker profile from [profiles.<name>] for the new pane"
+        )]
+        profile: Option<String>,
 
         /// Resolve the branch name and CLI from a discovered spec instead of a
         /// positional branch argument.
@@ -794,6 +816,56 @@ pub enum Command {
         agent: String,
     },
 
+    /// Run a delegate profile once, headless, at the repository root
+    #[command(
+        about = "Run a delegate profile once, headless, at the repository root",
+        long_about = "Runs the named delegate profile ([profiles.<name>] with kind = \"delegate\") \
+                      once, non-interactively, at the repository's main working tree, and prints \
+                      its result: the delegate's standard output, capped at 64 KiB with a line \
+                      naming the full run log. Its standard error goes only to the run log.\n\n\
+                      The task comes from --task, or from standard input when --task is absent; \
+                      it travels on the delegate's standard input, never on its command line, \
+                      after the delegate framing and the profile's role skill.\n\n\
+                      A delegate runs at its profile's approval level (default manual; full-auto \
+                      is refused at config load), with GIT_PAW_DELEGATE set, no broker URL and no \
+                      authority credential, and with its CLI's operator isolation. It is refused \
+                      from a linked worktree and inside another delegate run. At most four \
+                      manual delegate runs run at once; an auto run runs alone. A refused run \
+                      fails immediately and is never queued. Every run appends one metadata line \
+                      (no task, no result) to .git-paw/logs/delegates/runs.jsonl. Exits 0 only \
+                      when the delegate exited 0 within its timeout (timeout_seconds, default \
+                      600).\n\n\
+                      Examples:\n  \
+                      git paw delegate --list\n  \
+                      git paw delegate explorer --task \"map the config loader\"\n  \
+                      echo \"audit feat/x at abc123, change add-x\" | git paw delegate spec-audit"
+    )]
+    #[command(group(clap::ArgGroup::new("target").required(true).args(["name", "list"])))]
+    Delegate {
+        /// The delegate profile to run.
+        #[arg(
+            value_name = "NAME",
+            help = "Delegate profile to run ([profiles.<name>] with kind = \"delegate\")"
+        )]
+        name: Option<String>,
+
+        /// The task text (read from standard input when absent).
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Task for the delegate (read from standard input when absent)"
+        )]
+        task: Option<String>,
+
+        /// List the configured delegate profiles instead of running one.
+        #[arg(
+            long,
+            conflicts_with_all = ["name", "task"],
+            help = "List the configured delegate profiles"
+        )]
+        list: bool,
+    },
+
     /// View captured session logs
     #[command(
         about = "View captured session logs",
@@ -1073,6 +1145,7 @@ mod tests {
                 force,
                 no_rebase,
                 unattended,
+                ..
             } => StartFields {
                 cli,
                 branches,
@@ -1520,6 +1593,7 @@ mod tests {
                 cli,
                 from_spec,
                 no_rebase,
+                ..
             } => {
                 assert_eq!(branch.as_deref(), Some("feat/new"));
                 assert!(cli.is_none());
@@ -2491,5 +2565,149 @@ mod tests {
             "selftest --help should name doctor as the surface it is the live arm of; \
              got: {help}"
         );
+    }
+
+    /// Scenario "start parses --profile" (`cli-parsing`).
+    #[test]
+    fn start_parses_profile() {
+        match parse(&["start", "--profile", "routine", "--branches", "feat/a"])
+            .command
+            .unwrap()
+        {
+            Command::Start {
+                profile, branches, ..
+            } => {
+                assert_eq!(profile.as_deref(), Some("routine"));
+                assert_eq!(branches, Some(vec!["feat/a".to_string()]));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    /// Scenario "add parses --profile" (`cli-parsing`).
+    #[test]
+    fn add_parses_profile() {
+        match parse(&["add", "feat/a", "--profile", "routine"])
+            .command
+            .unwrap()
+        {
+            Command::Add { profile, .. } => assert_eq!(profile.as_deref(), Some("routine")),
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    /// Scenarios "--profile conflicts with --cli and --preset" and
+    /// "--profile and --cli conflict".
+    #[test]
+    fn profile_conflicts_with_cli_and_preset() {
+        for (args, other) in [
+            (
+                &[
+                    "git-paw",
+                    "start",
+                    "--profile",
+                    "routine",
+                    "--cli",
+                    "claude",
+                ][..],
+                "--cli",
+            ),
+            (
+                &[
+                    "git-paw",
+                    "start",
+                    "--profile",
+                    "routine",
+                    "--preset",
+                    "dev",
+                ][..],
+                "--preset",
+            ),
+            (
+                &[
+                    "git-paw",
+                    "add",
+                    "feat/a",
+                    "--profile",
+                    "routine",
+                    "--cli",
+                    "claude",
+                ][..],
+                "--cli",
+            ),
+        ] {
+            let msg = Cli::try_parse_from(args)
+                .expect_err("conflicting flags must be rejected")
+                .to_string();
+            assert!(
+                msg.contains("--profile") && msg.contains(other),
+                "{args:?}: the error should name both flags; got: {msg}"
+            );
+        }
+    }
+
+    /// `--profile` is documented with a `long_about` example on both
+    /// subcommands.
+    #[test]
+    fn profile_has_help_and_examples_on_start_and_add() {
+        for sub in ["start", "add"] {
+            let help = Cli::try_parse_from(["git-paw", sub, "--help"])
+                .expect_err("--help exits")
+                .to_string();
+            assert!(help.contains("--profile <NAME>"), "{sub}: {help}");
+            assert!(help.contains("--profile routine"), "{sub} example: {help}");
+        }
+    }
+
+    /// Scenario "delegate parses a name and a task".
+    #[test]
+    fn delegate_parses_a_name_and_a_task() {
+        match parse(&["delegate", "explorer", "--task", "map the config loader"])
+            .command
+            .unwrap()
+        {
+            Command::Delegate { name, task, list } => {
+                assert_eq!(name.as_deref(), Some("explorer"));
+                assert_eq!(task.as_deref(), Some("map the config loader"));
+                assert!(!list);
+            }
+            other => panic!("expected Delegate, got {other:?}"),
+        }
+    }
+
+    /// Scenario "delegate --list needs no name".
+    #[test]
+    fn delegate_list_needs_no_name() {
+        match parse(&["delegate", "--list"]).command.unwrap() {
+            Command::Delegate { name, list, .. } => {
+                assert!(list);
+                assert!(name.is_none());
+            }
+            other => panic!("expected Delegate, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["git-paw", "delegate", "--list", "explorer"]).is_err());
+        assert!(Cli::try_parse_from(["git-paw", "delegate", "--list", "--task", "x"]).is_err());
+    }
+
+    /// Scenario "delegate without a name or --list is rejected".
+    #[test]
+    fn delegate_without_a_name_or_list_is_rejected() {
+        let msg = Cli::try_parse_from(["git-paw", "delegate"])
+            .expect_err("a name or --list is required")
+            .to_string();
+        assert!(msg.contains("NAME") && msg.contains("--list"), "{msg}");
+    }
+
+    /// Scenario "delegate appears in help".
+    #[test]
+    fn delegate_appears_in_help() {
+        let help = Cli::try_parse_from(["git-paw", "--help"])
+            .expect_err("--help exits")
+            .to_string();
+        assert!(help.contains("delegate"), "{help}");
+        let sub = Cli::try_parse_from(["git-paw", "delegate", "--help"])
+            .expect_err("--help exits")
+            .to_string();
+        assert!(sub.contains("git paw delegate --list"), "{sub}");
     }
 }

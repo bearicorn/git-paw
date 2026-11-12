@@ -186,6 +186,19 @@ skips the CLI prompt entirely.
 default_cli = "my-cli"
 ```
 
+### `default_profile`
+
+A worker profile (`[profiles.<name>]` with `kind = "worker"`, see
+[Agent profiles](#agent-profiles)) pre-selected in every interactive CLI
+picker, ahead of `default_cli`. Like `default_cli` it never skips a picker;
+a launch with no picker (`git paw add`, `git paw start --supervisor
+--branches`) falls back to it before `default_cli`. A value naming no
+profile, or a delegate profile, fails any launch that consults it.
+
+```toml
+default_profile = "routine"
+```
+
 ### `default_spec_cli`
 
 The AI CLI to use by default when launching with `--from-all-specs` or `--specs`. When set, skips the CLI picker for any specs that don't have a `paw_cli` override.
@@ -751,6 +764,46 @@ git paw start --preset backend
 ```
 
 This skips all interactive prompts and launches with the preset's branches and CLI.
+
+## Agent profiles
+
+`[profiles.<name>]` declares an **agent profile**: what an agent is for. A
+`worker` profile launches a coding agent with its CLI plus the profile's own
+arguments, approval level and optional role skill; a `delegate` profile runs
+one headless agent at the repository root through `git paw delegate`. See the
+[Agent Profiles](../user-guide/agent-profiles.md) chapter for selection order,
+delegate bounds and usage attribution.
+
+```toml
+[profiles.routine]
+kind = "worker"
+description = "Routine implementation"
+cli = "my-agent"
+args = "--model small"
+approval = "auto"
+
+[profiles.explorer]
+kind = "delegate"
+description = "Read-only codebase sweep"
+cli = "my-agent"
+skill = "explorer"
+timeout_seconds = 300
+```
+
+| Key | Kinds | Required | Meaning |
+|---|---|---|---|
+| `kind` | both | yes | `worker` or `delegate` |
+| `description` | both | yes | one line (no line break), shown in the picker and `git paw delegate --list` |
+| `cli` | both | yes | a detected CLI id or a `[clis.<name>]` key; checked when the profile is used |
+| `args` | both | no | arguments appended right after the CLI's own `args` |
+| `skill` | both | delegate: yes | role skill, resolved like any skill (repository `.agents/skills/`, user config, bundled); never `orchestrator` / `supervisor` |
+| `approval` | both | no | `manual`, `auto` or `full-auto`; a worker defaults to `[supervisor] agent_approval`, a delegate to `manual` and refuses `full-auto` |
+| `timeout_seconds` | delegate only | no | run time limit, default `600`; `0` is refused |
+
+The profile name must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. Any invalid
+entry fails the load with an error naming `profiles.<name>` and the key. The
+repository file replaces a user-level profile of the same name whole;
+`default_profile` merges like `default_cli`.
 
 ## Specs
 

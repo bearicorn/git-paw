@@ -1108,12 +1108,30 @@ isolated context, so the context-heavy audit work need not flood yours.
   regression-analysis gates (steps 4 and 5) yourself, inline. Delegate the
   audit gates only after both have passed; a branch that fails either gets
   feedback, not an audit.
-- **When your CLI can run isolated subagents**, you MAY run the three audit
-  gates concurrently, each in its own isolated context given only its
-  reference plus the branch, the re-resolved tip and the change id. Each
-  audit's gate command is the only thing that writes in the shared verify
-  worktree, so run those tooling commands one after another and parallelise
-  only the review.
+- **Which mechanism.** Use the first one available, in this order: a
+  delegate profile, then your CLI's own isolated subagents, then inline.
+- **Delegate profiles first.** List the configured delegate profiles with
+  `git paw delegate --list`. When one has the role skill for the work —
+  `spec-auditor` for the spec audit, `doc-auditor` for the doc audit,
+  `security-auditor` for the security audit, `explorer` for broad read-only
+  exploration — run the work through it from the main working tree, passing
+  the branch, the re-resolved tip and the change id in the task:
+  `git paw delegate <name> --task "<branch> at <tip>, change <change-id>"`.
+  A delegate profile is an isolated context whatever your own CLI supports,
+  so with a matching one configured you delegate even when your CLI has no
+  subagents. A delegate's standard output is its verdict (or its map). At
+  most four read-only delegates run at once, so the three audits and one
+  exploration fit together; a further one is refused, not queued. A
+  delegate never publishes. A run lasts up to its profile's
+  `timeout_seconds` (600 by default): give the call a tool timeout at least
+  that long, or run it in the background and read its output when it ends —
+  a call your tool kills early kills the delegate with it.
+- **Otherwise, when your CLI can run isolated subagents**, you MAY run the
+  three audit gates concurrently, each in its own isolated context given
+  only its reference plus the branch, the re-resolved tip and the change id.
+  Each audit's gate command is the only thing that writes in the shared
+  verify worktree, so run those tooling commands one after another and
+  parallelise only the review.
 - **The verdict.** Each delegated gate returns a compressed verdict and
   nothing else: the gate name; `pass` or `fail`; and one line per finding,
   `[<gate prefix>] <location>: <issue>` — the error `feedback-gate` sends.
@@ -1132,7 +1150,8 @@ isolated context, so the context-heavy audit work need not flood yours.
   one `feedback-gate` call per finding. The gate order and the all-five-pass
   rule do not change.
 - **Without subagent support**, read each reference yourself and run the gate
-  inline, in order: 6, 6a, 6b.
+  inline, in order: 6, 6a, 6b — but only when no matching delegate profile is
+  configured either.
 - **Read-only exploration.** Broad read-only exploration — sweeping many files
   to find where something lives — may be delegated the same way, to an
   isolated read-only context that returns a map (paths with a one-line note

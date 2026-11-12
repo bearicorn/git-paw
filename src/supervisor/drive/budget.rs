@@ -79,6 +79,9 @@ pub enum UsageRole {
     Worker,
     /// A headless orchestrator invocation the loop started.
     Orchestrator,
+    /// A `git paw delegate` run started during the loop's run. Reported per
+    /// profile only; never added to the totals or the caps.
+    Delegate,
 }
 
 /// One attributed session's report, as read now.
@@ -92,8 +95,24 @@ pub struct Attributed {
     pub label: String,
     /// The session id git-paw assigned, when any.
     pub session_id: Option<String>,
+    /// The agent profile the session ran as (a worker's recorded profile, or
+    /// a delegate run's profile), when any.
+    pub profile: Option<String>,
     /// The report.
     pub report: UsageReport,
+}
+
+/// One agent profile's share of the run's usage, for the exit summary.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProfileUsage {
+    /// Whether the profile is a delegate profile (else a worker profile).
+    pub delegate: bool,
+    /// The sum of its sessions' known figures.
+    pub known: UsageTotals,
+    /// Whether any of its sessions' usage is known.
+    pub any_known: bool,
+    /// How many of its workers or runs have unknown usage.
+    pub unknown: usize,
 }
 
 /// One read of the run's attributed usage, by role.
@@ -103,6 +122,10 @@ pub struct UsageSnapshot {
     pub workers: UsageSummary,
     /// Each headless orchestrator invocation the loop started.
     pub orchestrator: UsageSummary,
+    /// Usage per agent profile — profiled workers (also counted in
+    /// `workers`) and delegate runs (counted nowhere else). Empty when no
+    /// profile was used.
+    pub profiles: BTreeMap<String, ProfileUsage>,
 }
 
 impl UsageSnapshot {
@@ -206,6 +229,24 @@ pub fn render_section(snapshot: &UsageSnapshot, caps: BudgetCaps, warnings: &[St
             "  - {unknown_orchestrator} orchestrator invocation(s) with unknown usage"
         );
     }
+    for (name, p) in &snapshot.profiles {
+        let label = if p.delegate {
+            "delegate profile"
+        } else {
+            "worker profile"
+        };
+        let known = if p.any_known {
+            figures(&p.known)
+        } else {
+            "no known usage".to_string()
+        };
+        let unknown = if p.unknown > 0 {
+            format!("; {} with unknown usage", p.unknown)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "  - {label} {name}: {known}{unknown}");
+    }
     let _ = writeln!(
         out,
         "  - {} worker(s) with unknown usage",
@@ -248,6 +289,7 @@ type SessionKey = (UsageRole, String, String);
 #[derive(Debug, Clone, Default)]
 pub struct UsageLedger {
     known: BTreeMap<SessionKey, (String, UsageTotals)>,
+    profile_of: BTreeMap<SessionKey, String>,
     warned: HashSet<SessionKey>,
 }
 
@@ -266,6 +308,9 @@ impl UsageLedger {
         let mut warnings = Vec::new();
         for r in records {
             let key = Self::key(r);
+            if let Some(profile) = &r.profile {
+                self.profile_of.insert(key.clone(), profile.clone());
+            }
             match &r.report {
                 UsageReport::Known(t) => {
                     let grew = self
@@ -293,8 +338,38 @@ impl UsageLedger {
         let snapshot = UsageSnapshot {
             workers: self.summary(UsageRole::Worker, records),
             orchestrator: self.summary(UsageRole::Orchestrator, records),
+            profiles: self.profiles(records),
         };
         (snapshot, warnings)
+    }
+
+    /// Usage per profile: the last known figures of every profiled session,
+    /// plus the profiled sessions whose usage is unknown now and was never
+    /// known.
+    fn profiles(&self, records: &[Attributed]) -> BTreeMap<String, ProfileUsage> {
+        let mut out: BTreeMap<String, ProfileUsage> = BTreeMap::new();
+        let mut known: BTreeMap<String, Vec<UsageTotals>> = BTreeMap::new();
+        for (key, (_, totals)) in &self.known {
+            if let Some(profile) = self.profile_of.get(key) {
+                out.entry(profile.clone()).or_default().delegate = key.0 == UsageRole::Delegate;
+                known.entry(profile.clone()).or_default().push(*totals);
+            }
+        }
+        for r in records {
+            let Some(profile) = &r.profile else { continue };
+            if r.report.known().is_none() && !self.known.contains_key(&Self::key(r)) {
+                let p = out.entry(profile.clone()).or_default();
+                p.delegate = r.role == UsageRole::Delegate;
+                p.unknown += 1;
+            }
+        }
+        for (profile, items) in known {
+            if let Some(p) = out.get_mut(&profile) {
+                p.known = UsageTotals::sum(&items);
+                p.any_known = true;
+            }
+        }
+        out
     }
 
     fn summary(&self, role: UsageRole, records: &[Attributed]) -> UsageSummary {
@@ -465,6 +540,10 @@ pub fn session_usage<S: std::hash::BuildHasher>(
             repo_root: repo_root.to_path_buf(),
             clis: clis.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             cache: UsageCache::new(),
+            delegates_since: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default(),
         }),
         every_sweeps: usage_every_sweeps(),
     }
@@ -481,6 +560,9 @@ pub struct SessionUsageReader {
     pub clis: HashMap<String, CustomCli>,
     /// What earlier reads already parsed.
     pub cache: UsageCache,
+    /// Delegate runs from the run ledger count when they started at or after
+    /// this time (seconds since the Unix epoch): the loop's start.
+    pub delegates_since: u64,
 }
 
 impl SessionUsageReader {
@@ -506,6 +588,7 @@ impl SessionUsageReader {
             cli: profile.id().to_string(),
             label,
             session_id: session_id.map(str::to_string),
+            profile: None,
             report: profile.usage_cached(session_id, cwd, Some(&self.cache)),
         }
     }
@@ -513,8 +596,9 @@ impl SessionUsageReader {
 
 impl UsageReader for SessionUsageReader {
     fn read(&self, headless: &[HeadlessSession]) -> Vec<Attributed> {
-        let workers = self.workers().into_iter().map(|e| {
-            self.attribute(
+        let workers = self.workers().into_iter().map(|e| Attributed {
+            profile: e.profile.clone(),
+            ..self.attribute(
                 UsageRole::Worker,
                 &e.cli,
                 e.branch.clone(),
@@ -522,6 +606,19 @@ impl UsageReader for SessionUsageReader {
                 &e.worktree_path,
             )
         });
+        let delegates = crate::delegate::read_ledger(&self.repo_root)
+            .into_iter()
+            .filter(|run| run.started_at >= self.delegates_since)
+            .map(|run| Attributed {
+                profile: Some(run.profile.clone()),
+                ..self.attribute(
+                    UsageRole::Delegate,
+                    &run.cli,
+                    format!("delegate {} at {}", run.profile, run.started_at),
+                    run.session_id.as_deref(),
+                    &self.repo_root,
+                )
+            });
         let orchestrator = headless.iter().enumerate().map(|(n, h)| {
             self.attribute(
                 UsageRole::Orchestrator,
@@ -531,7 +628,7 @@ impl UsageReader for SessionUsageReader {
                 &h.cwd,
             )
         });
-        workers.chain(orchestrator).collect()
+        workers.chain(orchestrator).chain(delegates).collect()
     }
 
     fn every_worker_reports_cost(&self) -> bool {

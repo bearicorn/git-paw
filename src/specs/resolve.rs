@@ -193,6 +193,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::Markdown,
             branch: format!("spec/{id}"),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         }

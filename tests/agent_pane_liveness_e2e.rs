@@ -98,6 +98,7 @@ fn dead_panes_receipt(session_name: &str, repo_path: &Path) -> Session {
             branch: "feat/gp03c".to_string(),
             worktree_path: repo_path.to_path_buf(),
             cli: "claude".to_string(),
+            profile: None,
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,

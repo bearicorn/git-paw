@@ -199,9 +199,64 @@ pub struct HeadlessInvocation {
     /// [`crate::config::SESSION_ID_PLACEHOLDER`]), when it has one, so each
     /// invocation's usage can be attributed (`worker-usage-budget`).
     pub session_id_args: Option<String>,
+    /// The operator-isolation environment the spawn adds, when the
+    /// invocation applies its CLI's isolation (empty for the orchestrator
+    /// one-shot).
+    pub isolation_env: Vec<(String, String)>,
 }
 
 impl HeadlessInvocation {
+    /// Builds the invocation of `profile`'s CLI at `level` with no shell:
+    /// `launch_args` are the CLI's `args`, then `profile_args` (an agent
+    /// profile's), then `isolation`'s arguments, then the native sandbox
+    /// arguments, each split on whitespace; `isolation`'s environment goes
+    /// to [`Self::isolation_env`].
+    ///
+    /// # Errors
+    ///
+    /// Names `[clis.<cli>].headless_args` when the CLI resolves no headless
+    /// form.
+    pub fn build(
+        cli: &str,
+        profile: &CliProfile,
+        level: &crate::config::ApprovalLevel,
+        profile_args: Option<&str>,
+        isolation: Option<crate::agent_cli::OperatorIsolation>,
+    ) -> Result<Self, String> {
+        let Some(headless) = profile.headless_args() else {
+            return Err(format!(
+                "`{cli}` has no headless form (set [clis.{cli}].headless_args)"
+            ));
+        };
+        let isolation = isolation.unwrap_or(crate::agent_cli::OperatorIsolation::NONE);
+        Ok(Self {
+            cli: cli.to_string(),
+            program: profile.command().to_string(),
+            launch_args: [
+                profile.args().unwrap_or_default().to_string(),
+                profile_args.unwrap_or_default().to_string(),
+                isolation.args.to_string(),
+                profile.launch_sandbox_args(level).unwrap_or_default(),
+            ]
+            .iter()
+            .flat_map(|part| part.split_whitespace())
+            .map(str::to_string)
+            .collect(),
+            approval_flags: profile
+                .approval_flags(level)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            headless_args: headless.split_whitespace().map(str::to_string).collect(),
+            session_id_args: profile.session_id_args(crate::config::SESSION_ID_PLACEHOLDER),
+            isolation_env: isolation
+                .env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        })
+    }
+
     /// The argv after the program: `args`, approval flags, then headless
     /// arguments.
     #[must_use]
@@ -290,11 +345,11 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
         );
     };
     let profile = CliProfile::resolve(cli, clis);
-    let Some(headless) = profile.headless_args() else {
+    if profile.headless_args().is_none() {
         return unavailable(format!(
             "`{cli}` has no headless form (set [clis.{cli}].headless_args)"
         ));
-    };
+    }
     let level = supervisor.orchestrator_approval();
     if let Err(e) = profile.ensure_sandbox_kept(&level) {
         return unavailable(e.to_string());
@@ -309,21 +364,9 @@ pub fn resolve_handoff<S: std::hash::BuildHasher>(
             )
         });
     HandoffResolution {
-        invocation: Ok(HeadlessInvocation {
-            cli: cli.to_string(),
-            program: profile.command().to_string(),
-            launch_args: [
-                profile.args().unwrap_or_default().to_string(),
-                profile.launch_sandbox_args(&level).unwrap_or_default(),
-            ]
-            .iter()
-            .flat_map(|part| part.split_whitespace())
-            .map(str::to_string)
-            .collect(),
-            approval_flags: flags.split_whitespace().map(str::to_string).collect(),
-            headless_args: headless.split_whitespace().map(str::to_string).collect(),
-            session_id_args: profile.session_id_args(crate::config::SESSION_ID_PLACEHOLDER),
-        }),
+        // No profile arguments and no operator isolation: the orchestrator
+        // one-shot's argv and environment are exactly as before.
+        invocation: HeadlessInvocation::build(cli, &profile, &level, None, None),
         warning,
     }
 }
@@ -695,8 +738,10 @@ impl HandoffSetup {
                 .iter()
                 .map(|url| ("GIT_PAW_BROKER_URL".to_string(), url.clone()))
                 .collect(),
+            env_remove: Vec::new(),
             new_process_group: true,
             output_log: Some(self.log_path.clone()),
+            stdout_log: None,
             timeout: self.timeout,
         }
     }
@@ -1252,6 +1297,7 @@ mod tests {
                 approval_flags: vec!["--permission-mode".to_string(), "acceptEdits".to_string()],
                 headless_args: vec!["-p".to_string()],
                 session_id_args: None,
+                isolation_env: Vec::new(),
             },
             repo_root: PathBuf::from("/repo"),
             broker_url: Some(BROKER.to_string()),

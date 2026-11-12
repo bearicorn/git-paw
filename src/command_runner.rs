@@ -92,12 +92,18 @@ pub struct SpawnSpec {
     pub stdin: Vec<u8>,
     /// Environment variables added to the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Environment variables removed from the inherited environment (before
+    /// `env` is added).
+    pub env_remove: Vec<String>,
     /// Whether the child leads a new process group (Unix), so
     /// [`SpawnedChild::kill_group`] also reaches the processes it starts.
     pub new_process_group: bool,
     /// File the child's stdout and stderr are appended to (created when
     /// absent; its parent directory must exist). `None` discards both.
     pub output_log: Option<PathBuf>,
+    /// File the child's stdout alone is appended to instead (created when
+    /// absent). Set, `output_log` receives stderr only.
+    pub stdout_log: Option<PathBuf>,
     /// How long the child may run before [`SpawnedChild::poll`] kills its
     /// group and reports [`ChildState::TimedOut`].
     pub timeout: Duration,
@@ -229,18 +235,33 @@ impl CommandRunner for RealCommandRunner {
 
     fn spawn(&self, spec: &SpawnSpec) -> std::io::Result<Box<dyn SpawnedChild>> {
         let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args)
-            .current_dir(&spec.cwd)
-            .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        cmd.args(&spec.args).current_dir(&spec.cwd);
+        for name in &spec.env_remove {
+            cmd.env_remove(name);
+        }
+        cmd.envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped());
-        if let Some(log) = &spec.output_log {
-            let file = std::fs::OpenOptions::new()
+        let append = |path: &PathBuf| {
+            std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(log)?;
-            cmd.stderr(file.try_clone()?).stdout(file);
-        } else {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                .open(path)
+        };
+        match (&spec.output_log, &spec.stdout_log) {
+            (Some(log), None) => {
+                let file = append(log)?;
+                cmd.stderr(file.try_clone()?).stdout(file);
+            }
+            (log, Some(stdout)) => {
+                cmd.stdout(append(stdout)?);
+                match log {
+                    Some(log) => cmd.stderr(append(log)?),
+                    None => cmd.stderr(Stdio::null()),
+                };
+            }
+            (None, None) => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
         }
         #[cfg(unix)]
         if spec.new_process_group {
@@ -491,10 +512,37 @@ mod tests {
             cwd: dir.to_path_buf(),
             stdin: Vec::new(),
             env: Vec::new(),
+            env_remove: Vec::new(),
             new_process_group: true,
             output_log: Some(dir.join("out.log")),
+            stdout_log: None,
             timeout,
         }
+    }
+
+    /// `env_remove` drops an inherited variable; `stdout_log` takes stdout
+    /// alone while `output_log` keeps stderr.
+    #[test]
+    fn env_removal_and_a_separate_stdout_capture() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // HOME is always inherited by the test process.
+        let mut spec = sh_spec(
+            dir.path(),
+            "echo \"out:${HOME:-unset}\"; echo err >&2",
+            Duration::from_secs(10),
+        );
+        spec.env_remove = vec!["HOME".to_string()];
+        spec.stdout_log = Some(dir.path().join("stdout.log"));
+        let mut child = RealCommandRunner.spawn(&spec).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while child.poll().unwrap() == ChildState::Running {
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stdout = std::fs::read_to_string(dir.path().join("stdout.log")).unwrap();
+        let stderr = std::fs::read_to_string(dir.path().join("out.log")).unwrap();
+        assert_eq!(stdout, "out:unset\n");
+        assert_eq!(stderr, "err\n");
     }
 
     /// Polls `child` until it leaves `Running`, bounded to ~10 s.

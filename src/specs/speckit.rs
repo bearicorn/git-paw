@@ -427,6 +427,7 @@ pub(crate) fn decompose_feature(feature: &Feature) -> Vec<SpecEntry> {
             backend: SpecBackendKind::SpecKit,
             branch,
             cli: None,
+            profile: None,
             prompt,
             owned_files: None,
         });
@@ -453,6 +454,7 @@ pub(crate) fn decompose_feature(feature: &Feature) -> Vec<SpecEntry> {
             backend: SpecBackendKind::SpecKit,
             branch,
             cli: None,
+            profile: None,
             prompt,
             owned_files: None,
         });

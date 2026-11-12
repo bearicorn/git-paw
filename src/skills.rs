@@ -217,7 +217,7 @@ const PAW_COMMON: BundledFile = BundledFile {
 /// (and the compatibility copies, first occurrence of each script) in this
 /// order, and [`packages_for_worktree`] returns its selection — and so the
 /// managed block's `## Skills` index — in this order.
-static BUNDLED_PACKAGES: [BundledPackage; 4] = [
+static BUNDLED_PACKAGES: [BundledPackage; 8] = [
     BundledPackage {
         name: "orchestrator",
         skill_md: BundledFile {
@@ -355,6 +355,57 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
             path: "SKILL.md",
             source: "assets/agent-skills/cli-setup/SKILL.md",
             content: include_str!("../assets/agent-skills/cli-setup/SKILL.md"),
+        },
+        scripts: &[],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    }, // Delegate role: a broad read-only sweep returning a map. Root-only: never selected for a worktree.
+    BundledPackage {
+        name: "explorer",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/explorer/SKILL.md",
+            content: include_str!("../assets/agent-skills/explorer/SKILL.md"),
+        },
+        scripts: &[],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    },
+    // Delegate role: the spec audit gate, included from the orchestrator's reference. Root-only: never selected for a worktree.
+    BundledPackage {
+        name: "spec-auditor",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/spec-auditor/SKILL.md",
+            content: include_str!("../assets/agent-skills/spec-auditor/SKILL.md"),
+        },
+        scripts: &[],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    },
+    // Delegate role: the doc audit gate, included from the orchestrator's reference. Root-only: never selected for a worktree.
+    BundledPackage {
+        name: "doc-auditor",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/doc-auditor/SKILL.md",
+            content: include_str!("../assets/agent-skills/doc-auditor/SKILL.md"),
+        },
+        scripts: &[],
+        references: &[],
+        assets: &[],
+        gate: ProvisionGate::RootOnly,
+    },
+    // Delegate role: the security audit gate, included from the orchestrator's reference. Root-only: never selected for a worktree.
+    BundledPackage {
+        name: "security-auditor",
+        skill_md: BundledFile {
+            path: "SKILL.md",
+            source: "assets/agent-skills/security-auditor/SKILL.md",
+            content: include_str!("../assets/agent-skills/security-auditor/SKILL.md"),
         },
         scripts: &[],
         references: &[],
@@ -1502,6 +1553,38 @@ pub fn render(
     )
 }
 
+/// The placeholder prefix a package uses to include one of the orchestrator
+/// package's gate references: `{{GATE_REFERENCE:<gate>}}` renders as the
+/// unrendered `references/gates/<gate>.md` of the orchestrator package, so
+/// the auditor role skills carry no copy of any gate procedure.
+pub const GATE_REFERENCE_PLACEHOLDER: &str = "{{GATE_REFERENCE:";
+
+/// `text` with every `{{GATE_REFERENCE:<gate>}}` inclusion replaced by the
+/// orchestrator package's `references/gates/<gate>.md` (before any other
+/// placeholder is substituted, so the included procedure renders with the
+/// same gate commands). An inclusion naming no reference is left as is.
+#[must_use]
+pub fn resolve_gate_references(text: &str) -> String {
+    if !text.contains(GATE_REFERENCE_PLACEHOLDER) {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    if let Some(orchestrator) = bundled_package(ORCHESTRATOR_SKILL) {
+        for reference in orchestrator.references {
+            let Some(gate) = reference
+                .path
+                .strip_prefix("references/gates/")
+                .and_then(|p| p.strip_suffix(".md"))
+            else {
+                continue;
+            };
+            let placeholder = format!("{GATE_REFERENCE_PLACEHOLDER}{gate}}}}}");
+            out = out.replace(&placeholder, reference.content.trim_end());
+        }
+    }
+    out
+}
+
 /// Renders a skill for the orchestrator, whose identity is the reserved id
 /// `supervisor` rather than a branch — the orchestrator context written to
 /// the repo-root sidecar.
@@ -1551,8 +1634,7 @@ fn render_for_agent_id(
     // string when unset because the supervisor template is authored so
     // the surrounding prose reads naturally without the value (per D5).
     let spec_doctrine = render_spec_path_doctrine(backends);
-    let mut output = template
-        .content
+    let mut output = resolve_gate_references(&template.content)
         .replace("{{BRANCH_ID}}", &branch_id)
         .replace("{{PROJECT_NAME}}", &crate::domain::project_slug(project))
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
