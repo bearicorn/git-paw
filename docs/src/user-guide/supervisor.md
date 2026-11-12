@@ -67,7 +67,7 @@ at the repository root, outside tmux. git-paw gives it three things:
 
 | File | Written by | What it holds |
 |---|---|---|
-| `.git-paw/skills/orchestrator/SKILL.md` | `git paw init`, refreshed by `git paw start` | The orchestrator skill (the procedure: five gates, spec audit, merge orchestration, stuck detection, routing), rendered with your `[supervisor]` gate commands and configured spec format. It carries no session value, so one file serves every session. |
+| `.git-paw/skills/orchestrator/SKILL.md` | `git paw init`, refreshed by `git paw start` | The orchestrator skill (the procedure: five gates, merge orchestration, stuck detection, routing), rendered with your `[supervisor]` gate commands and configured spec format. It carries no session value, so one file serves every session. The three audit gates live beside it in `references/gates/` (see [Audit-gate references and delegation](#audit-gate-references-and-delegation)). |
 | `.git-paw/AGENTS.local.md` | `git paw start` | The **session context**: session name, broker URL, helper paths, the discovery file, `[governance]` documents, the drive-loop directive under `--unattended`, and a pointer to `SKILL.md`. The only file carrying this session's values. |
 | `AGENTS.md` pointer section | `git paw init` | A short section between `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->` telling the agent session at the repository root that, when a git-paw session is active, it is the orchestrator and should read the two files above. The section scopes itself to that root session: coding agents in worktrees, which check out the same tracked `AGENTS.md`, are told to ignore it. `git paw stop` and `git paw purge` leave it in place. See [AGENTS.md Injection](agents-md.md#orchestrator-pointer-section). |
 
@@ -1441,6 +1441,68 @@ there. The **`just verify`** recipe runs the trustworthy gate —
 socket-isolated, so the opt-out is safe) plus lint, deny, and audit — and
 the dogfood config sets `[supervisor].test_command = "just verify"` so the
 supervisor uses it automatically.
+
+## Audit-gate references and delegation
+
+The testing and regression gates stay in the orchestrator `SKILL.md`: they are
+mechanical, and they gate everything else. The three audit gates — spec audit,
+doc audit and security audit — are references installed beside it:
+
+| Gate | Reference |
+|---|---|
+| Spec audit (with the governance sub-step) | `.git-paw/skills/orchestrator/references/gates/spec-audit.md` |
+| Doc audit | `.git-paw/skills/orchestrator/references/gates/doc-audit.md` |
+| Security audit | `.git-paw/skills/orchestrator/references/gates/security-audit.md` |
+
+Workflow steps 6, 6a and 6b in `SKILL.md` each state the gate's purpose, name
+its reference by that installed path, and say to read it before running the
+gate. The always-loaded skill stays smaller, and the headless one-shot that is
+handed only `SKILL.md` still reaches every gate by following those paths. Each
+reference reads correctly on its own. It states its inputs (the re-resolved
+branch tip, the merge-base diff, the change id, and the gate's rendered command
+or `(not configured)`), the rule to run that command bare and never pipe it,
+the procedure, and the finding format with the gate's bracketed prefix. The
+references are rendered with the same `[supervisor]` gate commands as
+`SKILL.md`.
+
+**Delegation.** When the orchestrator's CLI can run isolated subagents, the
+skill's *Delegating gates* section lets it run the three audits concurrently,
+once testing and regression have passed. Each audit runs in its own context,
+which is given only its reference plus the branch, the re-resolved tip and
+the change id. Each returns a compressed verdict: the gate name, `pass` or
+`fail`, and one line per finding as `[<gate prefix>] <location>: <issue>`.
+Raw tool output stays in the subagent's context. A delegated gate never
+publishes. The orchestrator publishes `agent.verified` only when testing,
+regression and all three audit verdicts pass; otherwise it sends one
+`feedback-gate` call per finding. An orchestrator whose CLI has no subagents
+reads each reference and runs the gate inline. Broad read-only exploration
+may be delegated the same way, returning a map of paths rather than file
+contents.
+
+**No persona files.** git-paw ships no CLI-specific subagent definitions — no
+vendor agents directory, no model or tool lists. Such files would be a vendor
+format, and git-paw does not install into any CLI's own directories. A
+persona's tool access belongs to the CLI's permission model, and its model is
+the operator's cost choice. The gate procedure is the only git-paw-specific
+part, and it ships as the references above, usable by any CLI.
+
+**Self-hosted sessions run the branch's own build.** When the repository being
+orchestrated is git-paw's own source, the session's broker, helpers and
+rendered skills all come from whichever `git paw` is on the operator's PATH.
+An installed copy older than the branch silently brings back bugs the branch
+has already fixed. The orchestrator therefore confirms at bootstrap that the
+session runs the build from the branch under test. If it does not, the
+orchestrator asks the human to rebuild with the project's own build and
+restart on it before driving any agent. Other repositories never trigger this
+check.
+
+**The baseline runs on a prepared checkout.** A `[worktree.hooks] on_create`
+hook installs dependencies per agent worktree only, so the root checkout where
+the baseline runs may have none. Before recording the baseline, the
+orchestrator makes sure the checkout it runs the gate commands in has the
+project's dependencies installed the way the project's own setup does it. A
+baseline that failed for missing dependencies is fixed and re-run, never
+recorded.
 
 ## Per-commit verification
 

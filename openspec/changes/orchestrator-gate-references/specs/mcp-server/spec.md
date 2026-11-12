@@ -10,8 +10,12 @@ The `get_skill` tool SHALL return, as a named skill's rendered content, the rend
 - **THEN** the content SHALL contain the rendered orchestrator `SKILL.md`
 - **AND** SHALL contain a heading naming `references/gates/spec-audit.md` followed by that reference's rendered content
 
+Test: `mcp::tools::project::tests::get_skill_includes_the_orchestrators_gate_references`
+
 #### Scenario: A skill without references is unchanged
 
 - **WHEN** the MCP client calls `get_skill({ "name": "docs-fetch" })`
 - **THEN** the content SHALL equal the rendered `docs-fetch` `SKILL.md`
 - **AND** no file SHALL be written to disk
+
+Test: `mcp::tools::project::tests::get_skill_serves_a_skill_without_references_unchanged`

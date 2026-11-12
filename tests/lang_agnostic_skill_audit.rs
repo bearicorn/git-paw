@@ -24,6 +24,7 @@ use std::collections::HashMap;
 /// developer's own overrides never change what this test sees.
 fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
     git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+        .map(git_paw::skills::with_package_references)
 }
 
 /// Forbidden tokens that SHALL NOT appear in the rendered supervisor
@@ -242,7 +243,7 @@ fn audit_passes_for_coordination_skill() {
 #[test]
 fn no_meta_commentary_names_a_stack() {
     let supervisor = git_paw::skills::bundled_package("orchestrator")
-        .map(|p| p.skill_md.content.to_string())
+        .map(git_paw::skills::package_text)
         .expect("supervisor.md is at the expected path");
     let coordination = git_paw::skills::bundled_package("coordination")
         .map(|p| p.skill_md.content.to_string())

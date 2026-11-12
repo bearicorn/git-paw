@@ -94,6 +94,8 @@ Anything the binary EXPORTS to a consumer — bundled skills (`assets/agent-skil
 4. **Doc audit** — `--help`, README, mdBook, and the configuration reference updated to match the change.
 5. **Security** — no secrets, no unsafe shell/path handling, least-privilege preserved (path-scoped allowlists, never `curl *` / `cd *`).
 
+In the bundled orchestrator skill, gates 3–5 each have a self-contained per-gate reference (`assets/agent-skills/orchestrator/references/gates/{spec-audit,doc-audit,security-audit}.md`, installed under `.git-paw/skills/orchestrator/references/gates/`) that its Workflow points at, so an orchestrator CLI with subagents can delegate them; testing and regression stay inline in `SKILL.md`.
+
 Gate 5 (and the safety angle running through all five) is the `security-and-safety-review` agent skill (`.agents/skills/security-and-safety-review/SKILL.md`) — SECURITY (external attackers on the tool or the consumer's environment) + SAFETY (the blast radius of a rogue or mistaken agent git-paw itself runs, under whatever permission mode its agent CLI resolves — up to `full-auto`, where nothing prompts at all). Consult it whenever a change touches allowlists (including any agent-CLI allow rule git-paw seeds), keystroke dispatch, process spawning, paths, untrusted input, secrets, dependencies, prompt detection, worktree confinement, or git/file operations. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 
 ## Project Structure

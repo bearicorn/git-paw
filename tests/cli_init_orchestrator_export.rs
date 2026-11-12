@@ -24,6 +24,20 @@ fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills
 }
 
 const ORCHESTRATOR_MD: &str = ".git-paw/skills/orchestrator/SKILL.md";
+
+/// The installed spec-audit reference, which carries the spec-path doctrine
+/// and the `{{CHANGE_ID}}`-bearing spec-validate step.
+const SPEC_AUDIT_MD: &str = ".git-paw/skills/orchestrator/references/gates/spec-audit.md";
+
+/// The installed orchestrator `SKILL.md` followed by its installed spec-audit
+/// reference: content requirements are satisfied package-wide.
+fn installed_package(root: &Path) -> String {
+    format!(
+        "{}\n{}",
+        read(root, ORCHESTRATOR_MD),
+        read(root, SPEC_AUDIT_MD)
+    )
+}
 const CLI_SETUP_MD: &str = ".git-paw/skills/cli-setup/SKILL.md";
 const POINTER_START: &str = "<!-- git-paw-orchestrator:start -->";
 const POINTER_END: &str = "<!-- git-paw-orchestrator:end -->";
@@ -131,7 +145,7 @@ fn init_renders_configured_gate_commands() {
 fn init_renders_the_skill_without_a_session() {
     let tmp = repo(Some("[specs]\ntype = \"openspec\"\n"));
     init(tmp.path());
-    let md = read(tmp.path(), ORCHESTRATOR_MD);
+    let md = installed_package(tmp.path());
     let doctrine = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/spec-path-doctrine/openspec.md"),
     )
@@ -155,9 +169,7 @@ fn init_without_a_spec_system_renders_the_sentinel() {
     let tmp = repo(Some("default_cli = \"echo\"\n"));
     init(tmp.path());
     // The no-backend sentinel sentence.
-    assert!(
-        read(tmp.path(), ORCHESTRATOR_MD).contains("no spec backend resolved for this session")
-    );
+    assert!(installed_package(tmp.path()).contains("no spec backend resolved for this session"));
 }
 
 // core-init / Scenarios: Init overwrites a stale skill file; Init overwrites
@@ -390,4 +402,50 @@ fn init_installs_exactly_the_registered_packages() {
     exported.sort();
     expected.sort_unstable();
     assert_eq!(exported, expected);
+}
+
+// skill-agent / Scenario: A headless hand-off that reads SKILL.md reaches the
+// gates — the unattended merge one-shot is handed only the installed
+// `SKILL.md`; every reference path that file names must exist at the root.
+#[test]
+#[serial]
+fn a_headless_hand_off_that_reads_skill_md_reaches_the_gates() {
+    const PREFIX: &str = ".git-paw/skills/orchestrator/references/";
+    let tmp = repo(None);
+    init(tmp.path());
+    let md = read(tmp.path(), ORCHESTRATOR_MD);
+
+    let mut named: Vec<&str> = md
+        .match_indices(PREFIX)
+        .map(|(at, _)| {
+            let rest = &md[at..];
+            let end = rest
+                .find(|c: char| c == '`' || c.is_whitespace() || c == ')')
+                .unwrap_or(rest.len());
+            &rest[..end]
+        })
+        .collect();
+    named.sort_unstable();
+    named.dedup();
+
+    for gate in ["spec-audit", "doc-audit", "security-audit"] {
+        let path = format!("{PREFIX}gates/{gate}.md");
+        assert!(
+            named.contains(&path.as_str()),
+            "the installed SKILL.md names `{path}`; it names {named:?}"
+        );
+    }
+    for path in named {
+        let installed = tmp.path().join(path);
+        // A path ending in `/` names the references directory itself.
+        let exists = if path.ends_with('/') {
+            installed.is_dir()
+        } else {
+            installed.is_file()
+        };
+        assert!(
+            exists,
+            "`{path}`, named by the installed SKILL.md, exists under the repository root"
+        );
+    }
 }
