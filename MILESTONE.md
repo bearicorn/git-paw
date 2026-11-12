@@ -973,6 +973,22 @@ instructions*, *Per-CLI compact mechanism table*). Each is fixed by keeping the 
 REMOVED + ADDED. All six are re-checked against the v0.19.0 code (`src/agent_cli`, the helper
 refresh on supervised launch) before the build.
 
+**Built 2026-11-12 as the v0.19.0 dogfood (in progress).** git-paw v0.19.0 builds this cycle on
+itself on `release/v0.20.0`: an external Claude Code session orchestrates, workers run Opus 5.5 at
+medium effort. Merged and archived so far: `worker-operator-isolation`, `skill-package-layout`,
+`worker-prompt-suggestions-off` (added during the build, PK-12/PK-18), `skill-override-resolution`
+and `skill-package-deploy`. The gate audits caught two security defects before merge: a symlinked
+override `SKILL.md` could pull any file into every agent's instructions (now confined to its
+level directory), and doctor's drift check had stopped covering the `_paw_common.sh` beside a
+granted helper. The `setup-cli` claude row was re-verified on Claude Code 2.1.322 (74 probes).
+Findings DV-01 to DV-19; fixed in this cycle:
+- **DV-03, DV-12** — `--setting-sources project,local` did not stop the operator's plugins: they
+  load through an inherited `CLAUDE_CODE_PLUGIN_DIRS`. `worker-operator-isolation` also clears it.
+  One such plugin's "Send anyway?" cache dialog swallowed an orchestrator `tell`.
+- **Prompt suggestions** — idle workers showed a ghost suggestion that a lone Enter could submit;
+  `worker-prompt-suggestions-off` turns them off.
+The rest are carried into v0.21.0 and v0.23.0 below.
+
 **Triaged 2026-11-12 from the peer-4-poker run on v0.19.0** (Spec Kit project, 20 findings, PK-01
 to PK-20). Into v0.20.0, folded into changes already in flight:
 - **PK-01** — `git paw init` renders the gate commands into the orchestrator `SKILL.md`; config
@@ -1235,6 +1251,27 @@ Stale premises found while speccing:
   them as values like the agent-CLI layer now does (with F10–F15 in v0.24.0).
 
 
+**Carried here 2026-11-12 from the v0.20.0 build dogfood** (DV-xx; see v0.20.0):
+- **Broker event semantics** (with DF-35/45/46/50): every orchestrator rebase replays one
+  `agent.artifact committed` + `verify-now` per commit (DV-13); edits are attributed to
+  "supervisor" (DV-08, DV-10); `conflict-ack` stops the question but not the repeated in-flight
+  feedback, and the question returns later (DV-09, DV-10); `git paw remove` makes the worktree
+  teardown look like edits by long-gone agents, raising eight false questions (DV-15); the wave
+  reads `stalled` while a worker is visibly mid-turn for 30 minutes (DV-17).
+- **Helpers:** `sweep.sh tell` addresses agents by id while `approve` / `capture` take a pane index
+  (DV-06), and it once reported `wedged` for a turn that had started (DV-05). `sweep.sh status`
+  missed a booting worker (DV-07).
+- **Config:** every repository defaults the broker to port 9119, so a second repository's live
+  session blocks the next one; derive a per-repository default (DV-01).
+- **Layout:** after `remove` and two `add`s the grid left the newest pane one column wide (DV-19)
+  → `configurable-agent-grid`.
+- **Robustness:** a six-hour host sleep left both workers' test shells hung and nothing
+  re-engaged them (DV-11, DF-26 again).
+- **CI flake:** `agent_pane_liveness_e2e::doctor_warns_that_the_agent_panes_exited_with_the_start_remedy`
+  failed once under load, passed 3/3 alone (DV-18).
+- **Docs:** the orchestrator's own permission classifier refused `git paw purge --force` on a
+  stopped zero-agent session; `start --specs` replacing the empty session was the way out (DV-02).
+
 **Deferred here 2026-11-12 from the peer-4-poker run on v0.19.0** (see v0.20.0 for the triage):
 - **Spec Kit wave planning:** `--from-all-specs` launches the first open phase of every spec in
   one wave (14 workers), ignoring a plan's "Phase 1 must merge first" gate and human-only tasks
@@ -1365,6 +1402,11 @@ the per-CLI provider layer; this cycle checks it CLI by CLI and publishes the re
   CLI that can't reach launch-only is dropped from detection.
 - **Freeze tie-in:** v1.0.0 freezes the tier definitions and the first-class list, not the whole
   detection list.
+
+**From the v0.20.0 build dogfood (2026-11-12):** launch readiness left the boot prompt typed but
+unsubmitted (once with a warning, once silently after `add`) until the orchestrator pressed Enter
+(DV-04, DV-16, with DF-11); and workers cannot run the full suite while a dogfood session is live,
+because the live-session guard refuses the tmux tests (DV-14, with DF-22).
 
 **From the peer-4-poker run on v0.19.0 (2026-11-12):** workers launched with
 `--dangerously-skip-permissions` show "auto mode on" in Claude Code 2.1.322; the approval-flag
