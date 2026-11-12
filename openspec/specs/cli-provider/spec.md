@@ -546,14 +546,15 @@ Test: `tests/source_audit.rs::cli_names_are_compared_only_inside_agent_cli`
 
 ### Requirement: Operator isolation is a provider facet
 
-Each provider family SHALL declare its operator-isolation launch environment and arguments: what keeps a worker from loading the operator's personal configuration and extensions and from writing memory the operator's sessions share. An environment entry MAY assign the empty value to clear an inherited variable. A family that encodes none SHALL contribute nothing, so the `generic` fallback launches unchanged.
+Each provider family SHALL declare its operator-isolation launch environment and arguments in two parts: *worker safety*, which keeps a worker from writing memory the operator's sessions share and from holding predicted input, and *operator config*, which keeps a worker from loading the operator's personal configuration and extensions. An environment entry MAY assign the empty value to clear an inherited variable. A family that encodes none SHALL contribute nothing, so the `generic` fallback launches unchanged.
 
 #### Scenario: The claude family declares its isolation
 
 - **GIVEN** the `claude` provider family
 - **WHEN** its operator isolation is resolved
-- **THEN** the arguments SHALL be `--setting-sources project,local`
-- **AND** the environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_PLUGIN_DIRS=` (empty) and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, in that order
+- **THEN** the worker-safety environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
+- **AND** the operator-config environment SHALL be `CLAUDE_CODE_PLUGIN_DIRS=` (empty) and its arguments `--setting-sources project,local`
+- **AND** a launch applying both parts SHALL emit the environment as `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, in that order
 
 Test: `agent_cli::tests::the_claude_family_declares_its_isolation`
 
@@ -596,15 +597,16 @@ Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_worke
 
 ### Requirement: A CLI may inherit the operator's configuration
 
-`[clis.<name>]` SHALL accept an optional boolean `inherit_operator_config`, default `false`. When it is `true`, the launch builder SHALL add neither that CLI's isolation environment nor its isolation arguments. A config without the key SHALL load unchanged and SHALL NOT gain the key when written back.
+`[clis.<name>]` SHALL accept an optional boolean `inherit_operator_config`, default `false`. When it is `true`, the launch builder SHALL drop that CLI's operator-config environment and arguments and SHALL still apply its worker-safety environment. A config without the key SHALL load unchanged and SHALL NOT gain the key when written back.
 
-#### Scenario: Opting out restores the previous launch
+#### Scenario: Opting out keeps worker safety
 
-- **GIVEN** `[clis.claude] command = "claude"` with `inherit_operator_config = true` and `agent_approval = "manual"`
-- **WHEN** a worker using `claude` is launched
-- **THEN** its pane command SHALL contain none of `--setting-sources`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY` and `CLAUDE_CODE_PLUGIN_DIRS`
+- **GIVEN** `[clis.claude-worker] command = "/home/u/bin/claude-worker"`, `family = "claude"`, `inherit_operator_config = true`, and `agent_approval = "manual"`
+- **WHEN** a worker using `claude-worker` is launched
+- **THEN** its pane command SHALL contain neither `--setting-sources` nor `CLAUDE_CODE_PLUGIN_DIRS`
+- **AND** its `env` prefix SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
 
-Test: `agent_cli::tests::opting_out_restores_the_previous_launch`
+Test: `agent_cli::tests::opting_out_keeps_worker_safety`
 
 #### Scenario: An existing config round-trips without the key
 
@@ -616,7 +618,7 @@ Test: `config::tests::an_existing_config_round_trips_without_the_inherit_operato
 
 ### Requirement: Claude-family workers launch without prompt suggestions
 
-A claude-family worker's operator isolation SHALL also turn off the CLI's prompt suggestions, so an idle worker's input box never holds a predicted message that a lone Enter from git-paw (buffered-input recovery, `sweep.sh tell`, an approval) could submit as if someone had typed it. The opt-out `inherit_operator_config = true` SHALL leave prompt suggestions as the operator configured them.
+A claude-family worker SHALL launch with the CLI's prompt suggestions off, so an idle worker's input box never holds a predicted message that a lone Enter from git-paw (buffered-input recovery, `sweep.sh tell`, an approval) could submit as if someone had typed it. This SHALL hold whether or not the CLI sets `inherit_operator_config = true`.
 
 #### Scenario: An isolated claude worker gets no prompt suggestions
 
@@ -624,8 +626,10 @@ A claude-family worker's operator isolation SHALL also turn off the CLI's prompt
 - **WHEN** its worker pane command is built
 - **THEN** its `env` prefix SHALL include `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
 
-#### Scenario: An opted-out claude worker keeps the operator's setting
+#### Scenario: An opted-out claude worker still gets no prompt suggestions
 
 - **GIVEN** `[clis.claude] command = "claude"` with `inherit_operator_config = true`
 - **WHEN** its worker pane command is built
-- **THEN** it SHALL NOT contain `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`
+- **THEN** its `env` prefix SHALL include `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
+
+Test: `agent_cli::tests::an_opted_out_claude_worker_still_gets_no_prompt_suggestions`

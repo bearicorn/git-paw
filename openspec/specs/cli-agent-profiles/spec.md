@@ -257,11 +257,12 @@ A delegate's argv SHALL be built from its CLI record with no shell, each part sp
 - **THEN** its argv SHALL be `claude --model small --setting-sources project,local --session-id <id> -p`
 - **AND** its environment SHALL contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`
 
-#### Scenario: An opted-out CLI's delegate keeps the operator configuration
+#### Scenario: An opted-out CLI's delegate keeps worker safety
 
 - **GIVEN** the same profile and `[clis.opus] inherit_operator_config = true`
 - **WHEN** `git paw delegate explorer --task x` runs
-- **THEN** its argv SHALL NOT contain `--setting-sources` and its environment SHALL NOT contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+- **THEN** its argv SHALL NOT contain `--setting-sources` and its environment SHALL NOT contain `CLAUDE_CODE_PLUGIN_DIRS`
+- **AND** its environment SHALL still contain `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
 
 ### Requirement: A delegate runs at the root with a marked, credential-free environment
 
