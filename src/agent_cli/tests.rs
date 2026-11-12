@@ -540,10 +540,25 @@ fn recovery_carries_approval_flags_then_resume_args() {
 #[test]
 fn the_claude_family_declares_its_isolation() {
     let isolation = CliFamily::Claude.provider().operator_isolation();
-    assert_eq!(isolation.args, "--setting-sources project,local");
     assert_eq!(
-        isolation.env,
-        &[
+        isolation
+            .part_env(IsolationPart::WorkerSafety)
+            .collect::<Vec<_>>(),
+        [
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+            ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+        ]
+    );
+    assert_eq!(
+        isolation
+            .part_env(IsolationPart::OperatorConfig)
+            .collect::<Vec<_>>(),
+        [("CLAUDE_CODE_PLUGIN_DIRS", "")]
+    );
+    assert_eq!(isolation.args(), "--setting-sources project,local");
+    assert_eq!(
+        isolation.env().collect::<Vec<_>>(),
+        [
             ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CODE_PLUGIN_DIRS", ""),
             ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
@@ -604,21 +619,22 @@ fn recovery_keeps_the_isolation() {
     assert!(sources < resume, "{cmd}");
 }
 
-/// Scenario "Opting out restores the previous launch".
+/// Scenario "Opting out restores the previous launch" (as modified by
+/// `worker-isolation-split`: the opt-out keeps worker safety).
 #[test]
-fn opting_out_restores_the_previous_launch() {
-    let mut claude = entry("claude");
-    claude.inherit_operator_config = true;
-    let map = clis(&[("claude", claude)]);
-    let cmd = CliProfile::resolve("claude", &map)
+fn opting_out_keeps_worker_safety() {
+    let mut worker = entry("/home/u/bin/claude-worker");
+    worker.family = Some("claude".to_string());
+    worker.inherit_operator_config = true;
+    let map = clis(&[("claude-worker", worker)]);
+    let cmd = CliProfile::resolve("claude-worker", &map)
         .launch_command(&ApprovalLevel::Manual, LaunchSession::None);
-    assert_eq!(cmd, "claude");
-    for absent in [
-        "--setting-sources",
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-        "CLAUDE_CODE_PLUGIN_DIRS",
-        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
-    ] {
+    assert_eq!(
+        cmd,
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+         /home/u/bin/claude-worker"
+    );
+    for absent in ["--setting-sources", "CLAUDE_CODE_PLUGIN_DIRS"] {
         assert!(!cmd.contains(absent), "{cmd}");
     }
 }
@@ -647,19 +663,29 @@ fn an_isolated_claude_worker_gets_no_prompt_suggestions() {
     }
 }
 
-/// Scenario "An opted-out claude worker keeps the operator's setting".
+/// Scenario "An opted-out claude worker keeps the operator's setting" (as
+/// modified by `worker-isolation-split`: suggestions stay off).
 #[test]
-fn an_opted_out_claude_worker_keeps_the_operators_setting() {
+fn an_opted_out_claude_worker_still_gets_no_prompt_suggestions() {
     let mut claude = entry("claude");
     claude.inherit_operator_config = true;
     let map = clis(&[("claude", claude)]);
     for approval in [ApprovalLevel::Manual, ApprovalLevel::Auto] {
-        let cmd = CliProfile::resolve("claude", &map)
-            .launch_command(&approval, LaunchSession::Assign("abc"));
-        assert!(
-            !cmd.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"),
-            "{cmd}"
-        );
+        for session in [
+            LaunchSession::None,
+            LaunchSession::Assign("abc"),
+            LaunchSession::Resume("abc"),
+        ] {
+            let cmd = CliProfile::resolve("claude", &map).launch_command(&approval, session);
+            let (env_prefix, _) = cmd.split_once(" claude").expect("env prefix");
+            assert!(
+                env_prefix.starts_with("env ")
+                    && env_prefix
+                        .split(' ')
+                        .any(|a| a == "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"),
+                "{cmd}"
+            );
+        }
     }
 }
 

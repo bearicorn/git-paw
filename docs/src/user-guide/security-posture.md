@@ -49,11 +49,15 @@ longer reach them. Put repository allow rules in project-local settings
 server registered only at user scope was not part of the verification;
 register it per project (`.mcp.json`) to be sure a worker sees it.
 
-**Opting out.** A setup that needs your user settings to work at all — a proxy
-endpoint or a model provider in the user settings' `env` block — sets
-`inherit_operator_config = true` on that CLI's
-[`[clis.<name>]` entry](../configuration/README.md#custom-clis). Its workers
-then launch with your full configuration, as before.
+**Opting out.** `inherit_operator_config = true` on a CLI's
+[`[clis.<name>]` entry](../configuration/README.md#custom-clis) drops the
+operator-config part — `--setting-sources project,local` and the emptied
+`CLAUDE_CODE_PLUGIN_DIRS` — so that CLI's own config folder decides which
+settings, plugins and skills its workers load. The worker-safety part stays:
+auto memory and prompt suggestions are off for every claude-family worker,
+opted out or not, so this is not the launch from before v0.20.0. The
+recommended use is a separate worker config folder behind a wrapper entry; see
+[Customising Workers](customising-workers.md).
 
 **Not closed here.** Answering "Yes, and don't ask again" in a worker writes
 the rule into the **main checkout's** `.claude/settings.local.json` (Claude
@@ -622,10 +626,11 @@ every worktree, with no pane anyone watches. What bounds it:
   own group, and its leader still runs the recorded delegate program with the
   start time recorded at spawn; a planted or reused group is never signalled,
   and a record whose group could not be confirmed and killed keeps counting.
-- **Operator isolation.** The run gets its CLI's operator isolation (unless
-  `[clis.<name>] inherit_operator_config = true`). That matters more than for
-  a worker: a delegate runs in the main checkout, whose auto memory is your
-  own.
+- **Operator isolation.** The run gets its CLI's operator isolation; with
+  `[clis.<name>] inherit_operator_config = true` it drops only the
+  operator-config part and keeps the worker-safety part. That matters more
+  than for a worker: a delegate runs in the main checkout, whose auto memory
+  is your own, and auto memory stays off either way.
 - **The marker refusals.** The run carries `GIT_PAW_DELEGATE=<name>` and no
   `GIT_PAW_BROKER_URL`. Under the marker `git paw __authority` prints no
   credential, `git paw __send` refuses (exit 3) before touching any pane, the

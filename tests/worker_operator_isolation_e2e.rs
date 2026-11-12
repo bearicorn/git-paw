@@ -11,6 +11,9 @@
 //!   does with the flag and the variables is the recorded fact gate
 //!   (`worker-operator-isolation` design D5); these tests observe that a real
 //!   launch hands them to the CLI.
+//! - `core-memory-isolation` "A worker-config-folder CLI keeps memory off":
+//!   an `inherit_operator_config = true` worker drops the operator-config
+//!   part but keeps the worker-safety part on start, add and recovery.
 //!
 //! The CLI is a stub named `claude` on `PATH` that records its argv and the
 //! three isolation variables, distinguishing unset from empty, then reads
@@ -45,6 +48,27 @@ const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// What every isolated launch hands the CLI, after its argv.
 const ISOLATED_ENV: &str = "|MEM=1|PLUG=|SUGG=false";
+
+/// What an opted-out launch hands the CLI: worker safety only, so the
+/// operator's plugin directories come through untouched.
+const OPTED_OUT_ENV: &str = "|MEM=1|PLUG=/operator/plugins|SUGG=false";
+
+/// A `.git-paw/config.toml` whose `claude-worker` CLI opts out of the
+/// operator-config isolation.
+fn write_opted_out_config(repo: &Path) {
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!(
+            "default_cli = \"claude-worker\"\n\n[clis.claude-worker]\ncommand = \"claude\"\n\
+             family = \"claude\"\ninherit_operator_config = true\n\n\
+             [broker]\nenabled = true\nport = {}\n",
+            find_free_port()
+        ),
+    )
+    .expect("write config");
+}
 
 fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
@@ -396,5 +420,145 @@ fn recovery_through_start_keeps_the_isolation() {
     assert!(
         launch.starts_with("--setting-sources project,local ") && launch.ends_with(&resume),
         "the recovered worker resumes isolated, the setting sources before --resume: {launch}"
+    );
+}
+
+/// Scenario "A worker-config-folder CLI keeps memory off": `start`, `add` and
+/// recovery of an opted-out claude-family CLI keep auto memory and prompt
+/// suggestions off and leave the operator's setting sources and plugin
+/// directories alone.
+#[test]
+#[serial]
+fn an_opted_out_worker_keeps_auto_memory_off() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available on PATH");
+        return;
+    }
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
+    // start + add
+    let tr = setup_test_repo();
+    let project = unique_project_name("optout");
+    let repo = rename_repo_basename(&tr, &project);
+    let st = stub();
+    write_opted_out_config(&repo);
+    let home = TempDir::new().expect("home tempdir");
+    let session = format!("paw-{project}");
+    let start = paw(
+        &repo,
+        home.path(),
+        &tmux_env,
+        &st,
+        &[
+            "start",
+            "--no-supervisor",
+            "--cli",
+            "claude-worker",
+            "--branches",
+            "a",
+        ],
+    );
+    let started = wait_for_launches(&st.log, 1, Duration::from_secs(20));
+    let add = paw(
+        &repo,
+        home.path(),
+        &tmux_env,
+        &st,
+        &["add", "b", "--cli", "claude-worker"],
+    );
+    let launches = wait_for_launches(&st.log, 2, Duration::from_secs(20));
+    kill_session(&tmux_env, &session);
+
+    assert!(
+        start.status.success(),
+        "start failed; stderr:\n{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert_eq!(started.len(), 1, "start launches one worker: {started:?}");
+    assert!(
+        add.status.success(),
+        "add failed; stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert_eq!(launches.len(), 2, "start + add: {launches:?}");
+    for launch in &launches {
+        assert!(
+            !launch.contains("--setting-sources"),
+            "the operator's setting sources apply: {launch}"
+        );
+        assert!(
+            launch.ends_with(OPTED_OUT_ENV),
+            "auto memory and prompt suggestions off, plugin dirs inherited: {launch}"
+        );
+    }
+
+    // recovery through `git paw start` on a stopped session
+    let tr = setup_test_repo();
+    let project = unique_project_name("optoutrec");
+    let repo = rename_repo_basename(&tr, &project);
+    let st = stub();
+    write_opted_out_config(&repo);
+    let branch = "feat/alpha";
+    let wt = repo
+        .parent()
+        .expect("repo has parent")
+        .join(format!("{project}-feat-alpha"));
+    for args in [
+        vec!["branch", branch],
+        vec!["worktree", "add", &*wt.to_string_lossy(), branch],
+    ] {
+        let status = StdCommand::new("git")
+            .current_dir(&repo)
+            .args(&args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let home = TempDir::new().expect("home tempdir");
+    let sessions_dir = sessions_dir_for(home.path());
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let session = format!("paw-{project}");
+    let receipt = serde_json::json!({
+        "session_name": session,
+        "repo_path": toplevel_of(&repo).to_string_lossy(),
+        "project_name": project,
+        "created_at": "2026-01-01T00:00:00Z",
+        "status": "stopped",
+        "mode": "bare",
+        "worktrees": [{
+            "branch": branch,
+            "worktree_path": wt.to_string_lossy(),
+            "cli": "claude-worker",
+            "branch_created": true,
+            "cli_session_id": SESSION_ID,
+        }],
+    });
+    fs::write(
+        sessions_dir.join(format!("{session}.json")),
+        serde_json::to_string_pretty(&receipt).expect("serialize receipt"),
+    )
+    .expect("write receipt");
+    let out = paw(
+        &repo,
+        home.path(),
+        &tmux_env,
+        &st,
+        &["start", "--no-supervisor"],
+    );
+    let recovered = wait_for_launches(&st.log, 1, Duration::from_secs(20));
+    kill_session(&tmux_env, &session);
+
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Recovering session"),
+        "start must take the recovery path; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(recovered.len(), 1, "one recovered worker: {recovered:?}");
+    let launch = &recovered[0];
+    assert!(
+        !launch.contains("--setting-sources")
+            && launch.ends_with(&format!("--resume {SESSION_ID}{OPTED_OUT_ENV}")),
+        "the recovered worker resumes with worker safety only: {launch}"
     );
 }

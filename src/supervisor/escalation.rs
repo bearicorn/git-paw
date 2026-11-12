@@ -235,7 +235,7 @@ impl HeadlessInvocation {
             launch_args: [
                 profile.args().unwrap_or_default().to_string(),
                 profile_args.unwrap_or_default().to_string(),
-                isolation.args.to_string(),
+                isolation.args().to_string(),
                 profile.launch_sandbox_args(level).unwrap_or_default(),
             ]
             .iter()
@@ -250,9 +250,8 @@ impl HeadlessInvocation {
             headless_args: headless.split_whitespace().map(str::to_string).collect(),
             session_id_args: profile.session_id_args(crate::config::SESSION_ID_PLACEHOLDER),
             isolation_env: isolation
-                .env
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .env()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         })
     }

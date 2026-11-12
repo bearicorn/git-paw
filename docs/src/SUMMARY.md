@@ -21,6 +21,7 @@
   - [Supervisor](user-guide/supervisor.md)
   - [Tiered-Model Workflow](user-guide/tiered-model-workflow.md)
   - [Agent Profiles](user-guide/agent-profiles.md)
+  - [Customising Workers](user-guide/customising-workers.md)
   - [Dashboard](user-guide/dashboard.md)
   - [Pause and Resume](user-guide/pause.md)
   - [Skill Templates](user-guide/skill-templates.md)

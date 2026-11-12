@@ -274,11 +274,23 @@ pub trait CliProvider: Sync {
     }
 
     /// What keeps a worker from loading the operator's personal configuration
-    /// and extensions and from writing memory the operator's sessions share.
+    /// and extensions (operator config) and from writing memory the
+    /// operator's sessions share or holding predicted input (worker safety).
     /// Empty for a family with no verified facts.
     fn operator_isolation(&self) -> OperatorIsolation {
         OperatorIsolation::NONE
     }
+}
+
+/// Which part of a family's operator isolation a launch fact belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationPart {
+    /// Keeps a worker from writing memory the operator's sessions share and
+    /// from holding predicted input. Always applied.
+    WorkerSafety,
+    /// Keeps a worker from loading the operator's personal configuration and
+    /// extensions. Dropped by `inherit_operator_config = true`.
+    OperatorConfig,
 }
 
 /// A family's operator-isolation launch facts (`cli-provider`): environment
@@ -288,16 +300,64 @@ pub trait CliProvider: Sync {
 /// would otherwise inherit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperatorIsolation {
-    /// `(NAME, value)` pairs, in launch order.
-    pub env: &'static [(&'static str, &'static str)],
-    /// Arguments, or `""` for none.
-    pub args: &'static str,
+    /// `(NAME, value, part)` triples, in launch order.
+    env: &'static [(&'static str, &'static str, IsolationPart)],
+    /// The operator-config arguments, or `""` for none.
+    config_args: &'static str,
+    /// Whether the operator-config part applies.
+    with_operator_config: bool,
 }
 
 impl OperatorIsolation {
     /// No isolation: the Null Object every family without verified facts
     /// returns.
-    pub const NONE: Self = Self { env: &[], args: "" };
+    pub const NONE: Self = Self {
+        env: &[],
+        config_args: "",
+        with_operator_config: true,
+    };
+
+    /// This isolation without its operator-config part, which is what
+    /// `inherit_operator_config = true` launches with.
+    #[must_use]
+    pub fn worker_safety_only(self) -> Self {
+        Self {
+            with_operator_config: false,
+            ..self
+        }
+    }
+
+    /// The environment assignments to apply, in launch order.
+    pub fn env(self) -> impl Iterator<Item = (&'static str, &'static str)> {
+        let with_config = self.with_operator_config;
+        self.env
+            .iter()
+            .filter(move |(_, _, part)| with_config || *part == IsolationPart::WorkerSafety)
+            .map(|(name, value, _)| (*name, *value))
+    }
+
+    /// The environment assignments of one `part`, in launch order, whether
+    /// or not that part applies.
+    pub fn part_env(
+        self,
+        part: IsolationPart,
+    ) -> impl Iterator<Item = (&'static str, &'static str)> {
+        self.env
+            .iter()
+            .filter(move |(_, _, p)| *p == part)
+            .map(|(name, value, _)| (*name, *value))
+    }
+
+    /// The arguments to apply, or `""` for none. Every argument belongs to
+    /// the operator-config part.
+    #[must_use]
+    pub fn args(self) -> &'static str {
+        if self.with_operator_config {
+            self.config_args
+        } else {
+            ""
+        }
+    }
 }
 
 /// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
@@ -388,14 +448,22 @@ impl CliProvider for ClaudeProvider {
     /// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (verified 2026-11-12,
     /// `worker-prompt-suggestions-off`) keeps an idle worker's input box
     /// empty, so a lone Enter from git-paw cannot submit a predicted message.
+    /// Memory and suggestions are worker safety; the setting sources and
+    /// plugin directories are operator config.
     fn operator_isolation(&self) -> OperatorIsolation {
+        use IsolationPart::{OperatorConfig, WorkerSafety};
         OperatorIsolation {
             env: &[
-                ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
-                ("CLAUDE_CODE_PLUGIN_DIRS", ""),
-                ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+                ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1", WorkerSafety),
+                ("CLAUDE_CODE_PLUGIN_DIRS", "", OperatorConfig),
+                (
+                    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                    "false",
+                    WorkerSafety,
+                ),
             ],
-            args: "--setting-sources project,local",
+            config_args: "--setting-sources project,local",
+            with_operator_config: true,
         }
     }
     /// Session transcripts, verified against Claude Code 2.1.322 on
