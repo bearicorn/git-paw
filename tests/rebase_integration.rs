@@ -155,6 +155,7 @@ fn start_default_rebases_feat_branch_onto_main() {
         .current_dir(&sandbox.repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--cli", "sh", "--branches", "feat/example"])
         .output()
         .expect("run git paw start");
@@ -204,6 +205,7 @@ fn start_with_no_rebase_preserves_old_baseline() {
         .current_dir(&sandbox.repo)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-rebase",

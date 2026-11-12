@@ -69,6 +69,7 @@ fn paw(
     c.current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("PATH", path_env)
         .args(args)
         .timeout(Duration::from_secs(40))

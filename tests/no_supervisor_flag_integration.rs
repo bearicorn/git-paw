@@ -54,6 +54,7 @@ fn no_supervisor_overrides_config_enabled_in_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -115,6 +116,7 @@ fn supervisor_config_enabled_routes_to_supervisor_dry_run() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--cli",

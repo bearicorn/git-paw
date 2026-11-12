@@ -12,10 +12,16 @@ use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use git_paw::skills::{
     BundledPackage, ORCHESTRATOR_SKILL, PAW_COMMON_SCRIPT, ProvisionGate, Source, bundled_package,
-    bundled_packages, render_standardized, resolve, to_skill_md, validate_skill_dir,
+    bundled_packages, render_standardized, to_skill_md, validate_skill_dir,
 };
 use serial_test::serial;
 use tempfile::TempDir;
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 /// The package tree's root.
 fn package_root() -> PathBuf {
@@ -241,15 +247,6 @@ fn the_binary_renders_bundled_skills_with_no_assets_on_disk() {
     }
 }
 
-/// Restores the process working directory on drop.
-struct CwdGuard(PathBuf);
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.0);
-    }
-}
-
 // skill-packages / Scenario: An override's script is not installed
 #[test]
 #[serial]
@@ -269,10 +266,12 @@ fn an_overrides_script_is_not_installed() {
     .expect("write decoy broker.sh");
 
     let worktree = TempDir::new().expect("worktree");
-    let _guard = CwdGuard(std::env::current_dir().expect("cwd"));
-    std::env::set_current_dir(project.path()).expect("cd project");
-
-    let resolved = resolve("coordination").expect("coordination resolves");
+    let roots = git_paw::skills::SkillRoots {
+        repo_root: Some(project.path().to_path_buf()),
+        user_config_dir: None,
+    };
+    let resolved =
+        git_paw::skills::resolve_from("coordination", &roots).expect("coordination resolves");
     git_paw::init::provision_worktree_helpers(worktree.path(), true, false)
         .expect("provision worktree helpers");
 

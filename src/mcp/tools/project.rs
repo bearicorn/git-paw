@@ -169,7 +169,7 @@ impl GitPawMcpServer {
         Parameters(p): Parameters<GetSkillParams>,
     ) -> Json<SkillResponse> {
         let root = &self.ctx.root;
-        match skills::resolve(&p.name) {
+        match skills::resolve(&p.name, root) {
             Ok(template) => {
                 let cfg = config::load_config(root, None).unwrap_or_default();
                 let project = git::project_name(root);
@@ -258,7 +258,11 @@ mod tests {
         let server = server_for(tmp.path().to_path_buf());
         let config = crate::config::PawConfig::default();
         let exported = crate::skills::render_standardized(
-            &crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL).unwrap(),
+            &crate::skills::resolve_from(
+                crate::skills::ORCHESTRATOR_SKILL,
+                &crate::skills::SkillRoots::default(),
+            )
+            .unwrap(),
             &config
                 .supervisor
                 .clone()

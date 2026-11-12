@@ -56,7 +56,9 @@ fn tmux_available() -> bool {
 /// mirroring `tests/e2e_tests.rs::cmd_iso`.
 fn cmd_iso(fake_home: &Path, tmux_env: &TmuxTestEnv) -> Command {
     let mut c = Command::cargo_bin("git-paw").expect("binary exists");
-    c.env("HOME", fake_home).env_remove("XDG_DATA_HOME");
+    c.env("HOME", fake_home)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME");
     tmux_env.apply_assert(&mut c);
     c
 }

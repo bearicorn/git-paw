@@ -1,8 +1,14 @@
 //! The budget step exists only as prose. This guard stops edits that drop a
 //! rule or name a vendor.
 
-use git_paw::skills::{GateCommands, render, resolve};
+use git_paw::skills::{GateCommands, render};
 use git_paw::specs::SpecBackendKind;
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 /// The step's last rule: its presence also proves the section was not cut
 /// short before the vendor scan.

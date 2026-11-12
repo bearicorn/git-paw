@@ -160,6 +160,20 @@ fn the_report_surfaces_an_unsandboxed_full_auto_warning() {
     assert_eq!(row_for(&checks, "claude").status, CheckStatus::Warn);
 }
 
+/// A `skill sources` probe driving the check into both non-✓ branches.
+fn broken_skill_sources() -> SkillSourcesProbe {
+    SkillSourcesProbe {
+        skills: vec![(
+            "coordination".into(),
+            SkillSource::Broken {
+                path: Some("/repo/.agents/skills/coordination/SKILL.md".into()),
+                error: "invalid frontmatter".into(),
+            },
+        )],
+        ignored_overrides: vec!["/repo/.agents/skills/cli-setup".into()],
+    }
+}
+
 #[test]
 fn every_non_ok_check_carries_a_remedy() {
     // The report contract: a ⚠ or ✗ is only actionable with a remedy line.
@@ -219,6 +233,7 @@ fn every_non_ok_check_carries_a_remedy() {
             }],
             python3: None,
         },
+        skill_sources: broken_skill_sources(),
         broker: BrokerProbe {
             enabled: true,
             bind: "127.0.0.1".into(),
@@ -1599,5 +1614,110 @@ fn report_includes_the_sandbox_check_and_never_fails_on_it() {
         sandbox.status,
         CheckStatus::Fail,
         "a missing optional sandbox must never be a hard ✗ failure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// preflight-diagnostics: "Doctor reports where each bundled skill resolves
+// from".
+// ---------------------------------------------------------------------------
+
+fn all_embedded() -> Vec<(String, SkillSource)> {
+    crate::skills::bundled_packages()
+        .iter()
+        .map(|p| (p.name.to_string(), SkillSource::Embedded))
+        .collect()
+}
+
+#[test]
+fn skill_sources_check_table() {
+    let user_path =
+        std::path::PathBuf::from("/home/u/.config/git-paw/agent-skills/coordination/SKILL.md");
+    let repo_path = std::path::PathBuf::from("/repo/.agents/skills/coordination/SKILL.md");
+    let cli_setup_dir = std::path::PathBuf::from("/repo/.agents/skills/cli-setup");
+    let with = |name: &str, source: SkillSource| {
+        let mut skills = all_embedded();
+        for (n, s) in &mut skills {
+            if n == name {
+                *s = source.clone();
+            }
+        }
+        skills
+    };
+
+    // All bundled skills embedded: ✓, naming every registered package.
+    let check = check_skill_sources(&SkillSourcesProbe {
+        skills: all_embedded(),
+        ignored_overrides: Vec::new(),
+    });
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert_eq!(check.name, "skill sources");
+    assert_eq!(check.group, GROUP_BUNDLED_SCRIPTS);
+    for package in crate::skills::bundled_packages() {
+        assert!(
+            check
+                .detail
+                .contains(&format!("{}: embedded", package.name)),
+            "{}",
+            check.detail
+        );
+    }
+
+    // A user override is named with its path: ✓.
+    let check = check_skill_sources(&SkillSourcesProbe {
+        skills: with("coordination", SkillSource::User(user_path.clone())),
+        ignored_overrides: Vec::new(),
+    });
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check
+            .detail
+            .contains(&format!("coordination: user {}", user_path.display())),
+        "{}",
+        check.detail
+    );
+
+    // An ignored cli-setup override: ⚠, cli-setup still embedded, the
+    // directory named as ignored.
+    let check = check_skill_sources(&SkillSourcesProbe {
+        skills: all_embedded(),
+        ignored_overrides: vec![cli_setup_dir.clone()],
+    });
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("cli-setup: embedded"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains(&cli_setup_dir.display().to_string())
+            && check.detail.contains("ignored"),
+        "{}",
+        check.detail
+    );
+
+    // A broken override: ✗ naming the package, the path, and the remedy.
+    let check = check_skill_sources(&SkillSourcesProbe {
+        skills: with(
+            "coordination",
+            SkillSource::Broken {
+                path: Some(repo_path.clone()),
+                error: "skill 'coordination' validation failed".into(),
+            },
+        ),
+        ignored_overrides: Vec::new(),
+    });
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(check.detail.contains("coordination"), "{}", check.detail);
+    assert!(
+        check.detail.contains(&repo_path.display().to_string()),
+        "{}",
+        check.detail
+    );
+    let remedy = check.remedy.expect("a ✗ carries a remedy");
+    assert!(remedy.contains("fix or remove"), "{remedy}");
+    assert!(
+        remedy.contains(&repo_path.display().to_string()),
+        "{remedy}"
     );
 }

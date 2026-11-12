@@ -99,6 +99,7 @@ fn non_tty_supervisor_skips_cli_launch() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--supervisor", "--from-specs"])
         .timeout(Duration::from_secs(10))
         .output()

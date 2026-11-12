@@ -250,6 +250,7 @@ fn worker_pane_launches_configured_command_not_key() {
         .env("HOME", home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -319,6 +320,7 @@ fn saved_session_records_cli_key() {
         .env("HOME", home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -391,6 +393,7 @@ fn worker_overrides_resolve_by_key_and_launch_command() {
         .env("HOME", home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -475,6 +478,7 @@ fn supervisor_cli_is_never_launched_in_a_pane() {
         .env("HOME", home.path())
         .env("PATH", &path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",
@@ -613,6 +617,7 @@ fn recovery_launches_configured_command_with_resume_args() {
         .env("HOME", fake_home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--no-supervisor"])
         .timeout(Duration::from_secs(20))
         .output()
@@ -692,6 +697,7 @@ fn mcp_opt_in_reaches_worker_boot_prompt() {
         .env("HOME", home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -767,6 +773,7 @@ fn declared_family_reaches_worker_boot_prompt() {
         .env("HOME", home.path())
         .env("PATH", &st.path_env)
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--no-supervisor",

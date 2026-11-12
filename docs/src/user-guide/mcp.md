@@ -309,8 +309,16 @@ only reads broker state.
 | `get_dependency_graph` | — | `{ nodes: [{ id, backend }], edges: [{ from, to }] }` |
 | `get_skill` | `{ name }` | `{ skill: { name, content, source } \| null, message? }` |
 
-`source` is one of `standard` (`.agents/skills/`), `user_override`, or
-`embedded`. An unknown skill returns `skill: null` with a `message` — not an
+`source` names the level that supplied the template, resolved exactly as a
+launch or `git paw init` export from the same repository would:
+`standard` (the repository's `.agents/skills/<name>/SKILL.md`),
+`user_override` (`<config_dir>/git-paw/agent-skills/<name>/SKILL.md`) or
+`embedded`. The repository level is read from the server's repository — the
+`--repo` path when given, not the process's current directory — and always
+from its **main working tree**: a server rooted in a linked (agent) worktree
+ignores that worktree's own `.agents/skills/`. `cli-setup` is always
+`embedded`. See [Skill Templates → Skill Resolution](skill-templates.md#skill-resolution).
+An unknown skill returns `skill: null` with a `message` — not an
 error. The orchestrator skill is served under the name `orchestrator`
 (`supervisor` is an alias returning the same content) — the same procedure
 `git paw init` exports to `.git-paw/skills/orchestrator/SKILL.md`.

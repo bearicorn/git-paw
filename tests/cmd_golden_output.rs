@@ -164,6 +164,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .args(args);
         cmd.output().expect("run git-paw")
     }

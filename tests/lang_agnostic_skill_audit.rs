@@ -13,9 +13,15 @@
 
 use git_paw::skills::{
     BundledFile, GateCommands, SkillFormat, SkillTemplate, Source, bundled_package,
-    bundled_packages, render, resolve,
+    bundled_packages, render,
 };
 use git_paw::specs::SpecBackendKind;
+
+/// Resolves `name` from the embedded defaults only (no override root), so a
+/// developer's own overrides never change what this test sees.
+fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills::SkillError> {
+    git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
+}
 
 /// Forbidden tokens that SHALL NOT appear in the rendered supervisor
 /// skill outside `<!-- allowlist-prose -->` sentinel spans, per the
@@ -886,6 +892,7 @@ fn rendered_for_every_backend(package: &str, file: &BundledFile) -> Vec<(String,
         format: SkillFormat::Standardized,
         metadata: None,
         resource_paths: None,
+        origin_path: None,
     };
     let mut sets: Vec<Vec<SpecBackendKind>> =
         SpecBackendKind::ALL.iter().map(|k| vec![*k]).collect();

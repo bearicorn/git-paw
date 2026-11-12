@@ -108,7 +108,8 @@ fn snapshot(kind: SpecBackendKind) -> String {
     let prompt = crate::commands::launch::build_task_prompt(Some(entry));
     let doctrine = crate::skills::render_spec_path_doctrine(&[kind]);
     let coordination = crate::skills::render(
-        &crate::skills::resolve("coordination").unwrap(),
+        &crate::skills::resolve_from("coordination", &crate::skills::SkillRoots::default())
+            .unwrap(),
         "feat/x",
         "http://127.0.0.1:9119",
         "git-paw",

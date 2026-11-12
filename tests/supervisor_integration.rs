@@ -56,6 +56,7 @@ type = "markdown"
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",
@@ -114,6 +115,7 @@ cli = "echo"
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",
@@ -177,6 +179,7 @@ type = "markdown"
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",
@@ -239,6 +242,7 @@ agent_approval = "full-auto"
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",
@@ -287,6 +291,7 @@ fn dry_run_with_config_and(config_content: &str, extra: &[&str]) -> (String, Str
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--supervisor",

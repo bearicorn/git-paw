@@ -291,6 +291,7 @@ fn pause_detaches_and_stops_broker() {
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["pause"])
         .output()
         .expect("run pause");
@@ -421,6 +422,7 @@ fn pause_idempotent_on_already_paused() {
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["pause"])
         .output()
         .expect("run pause");
@@ -505,6 +507,7 @@ fn stop_after_pause_kills_remaining_panes() {
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["stop"])
         .output()
         .expect("run stop");
@@ -607,7 +610,8 @@ fn restart_from_pause_gates_a_held_prompt() {
         c.current_dir(&repo)
             .env("PATH", &test_path)
             .env("HOME", home.path())
-            .env_remove("XDG_DATA_HOME");
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME");
         if let Some(ms) = timeout_ms {
             c.env("GIT_PAW_READINESS_TIMEOUT_MS", ms);
         }
@@ -726,6 +730,7 @@ fn restart_from_pause_keeps_a_held_prompt_whose_pane_is_gone() {
         c.current_dir(&repo)
             .env("HOME", home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .args(args)
             .timeout(Duration::from_secs(60))
             .output()
@@ -865,6 +870,7 @@ fn restart_from_pause_keeps_a_held_entry_point_with_its_held_prompt() {
         c.current_dir(&repo)
             .env("HOME", home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "2000")
             .args(args)
             .timeout(Duration::from_secs(60))

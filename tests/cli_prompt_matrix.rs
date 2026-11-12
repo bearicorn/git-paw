@@ -38,6 +38,9 @@ fn init_non_tty_bypasses_prompts_and_writes_commented_template() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();
@@ -74,6 +77,9 @@ fn init_non_tty_is_idempotent() {
         Command::cargo_bin("git-paw")
             .expect("binary")
             .arg("init")
+            .env("HOME", tempfile::tempdir().unwrap().path())
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .current_dir(repo.path())
             .assert()
             .success();
@@ -107,6 +113,9 @@ fn init_non_tty_migrates_supervisor_as_opt_out() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();
@@ -165,6 +174,7 @@ fn start_all_flags_bypass_all_pickers() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--branches",
@@ -206,6 +216,7 @@ fn start_supervisor_flag_enters_supervisor_mode() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args([
             "start",
             "--branches",
@@ -320,6 +331,9 @@ fn stop_does_not_prompt() {
     Command::cargo_bin("git-paw")
         .expect("binary")
         .arg("stop")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .current_dir(repo.path())
         .assert()
         .success();
@@ -361,6 +375,7 @@ fn purge_force_bypasses_confirmation() {
         .expect("binary")
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["purge", "--force"])
         .current_dir(repo.path())
         .assert()
@@ -408,6 +423,7 @@ fn from_all_specs_launches_every_spec_without_picker() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -439,6 +455,7 @@ fn from_all_specs_unconfigured_spec_format_errors() {
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs with no specs config");

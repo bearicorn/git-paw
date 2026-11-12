@@ -115,6 +115,7 @@ impl Sandbox {
             .current_dir(root)
             .env("HOME", self.home.path())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CONFIG_HOME")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -638,6 +639,7 @@ fn inherited_git_location_env_does_not_make_a_worktree_a_root_session() {
         .current_dir(&worktree)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env("GIT_DIR", &main_git_dir)
         .env("GIT_COMMON_DIR", &main_git_dir)
         .env("GIT_WORK_TREE", &worktree)

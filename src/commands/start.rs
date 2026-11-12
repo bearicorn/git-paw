@@ -268,7 +268,8 @@ pub fn start(
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let skill_content = crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
+    let skill_content =
+        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", &repo_root)?;
 
     let worktree_runtime = config.worktree_runtime();
 
@@ -776,7 +777,8 @@ fn launch_spec_session(
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let skill_template = crate::skills::resolve_for_worktree(worktree_inputs, "coordination")?;
+    let skill_template =
+        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", repo_root)?;
 
     let mut worktree_entries = Vec::new();
 

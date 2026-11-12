@@ -99,6 +99,7 @@ fn attach_with_no_session_errors_actionably() {
         .current_dir(tr.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["attach"])
         .output()
         .expect("run attach");
@@ -161,6 +162,7 @@ fn attach_resolves_the_repos_running_session() {
         .current_dir(tr.path())
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .args(["attach"])
         .output()
         .expect("run attach");

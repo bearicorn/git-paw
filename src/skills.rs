@@ -4,15 +4,22 @@
 //! a SKILL.md file with YAML frontmatter and optional resource subdirectories
 //! (scripts/, references/, assets/).
 //!
-//! ## Resolution order (agentskills.io compliant)
+//! ## Resolution order
 //!
-//! When a skill is requested by name, the system searches in this order:
+//! [`resolve`]`(name, repo_root)` searches, first match wins:
 //!
-//! 1. **Standard location** — `.agents/skills/<name>/SKILL.md` (walking up directory tree)
+//! 1. **Repository override** — `<main>/.agents/skills/<name>/SKILL.md`, where
+//!    `<main>` is the main working tree of the repository containing
+//!    `repo_root` (never a linked worktree, never the current directory or a
+//!    directory above the repository)
 //! 2. **User override** — `<config_dir>/git-paw/agent-skills/<name>/SKILL.md`
 //! 3. **Embedded default** — compiled into the binary via `include_str!`
 //!
-//! The first match wins. If none exist, resolution fails with [`SkillError::UnknownSkill`].
+//! Overrides use the directory form only and replace the skill text only.
+//! `supervisor` is an alias of `orchestrator`; [`CLI_SETUP_SKILL`] is never
+//! overridden. If no level has the skill, resolution fails with
+//! [`SkillError::UnknownSkill`]. [`resolve_from`] is the same search over
+//! explicit [`SkillRoots`], reserved for this module and tests.
 //!
 //! ## Substitution rules
 //!
@@ -262,9 +269,10 @@ pub fn packages_for_worktree(inputs: WorktreeInputs) -> Vec<&'static BundledPack
 pub fn resolve_for_worktree(
     inputs: WorktreeInputs,
     name: &str,
+    repo_root: &Path,
 ) -> Result<Option<SkillTemplate>, SkillError> {
     if packages_for_worktree(inputs).iter().any(|p| p.name == name) {
-        resolve(name).map(Some)
+        resolve(name, repo_root).map(Some)
     } else {
         Ok(None)
     }
@@ -335,6 +343,10 @@ pub struct SkillTemplate {
     /// Optional resource paths for standardized skills.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_paths: Option<Vec<PathBuf>>,
+    /// The `SKILL.md` that supplied the content, `None` for the embedded
+    /// default. Diagnostic only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_path: Option<PathBuf>,
 }
 
 /// Errors that can occur during skill loading.
@@ -363,6 +375,21 @@ pub enum SkillError {
         path: PathBuf,
         /// The underlying I/O error.
         source: std::io::Error,
+    },
+
+    /// An override's `SKILL.md` resolves, through a symlink, outside its
+    /// override directory (or a repository override directory outside the
+    /// repository).
+    #[error(
+        "skill override '{}' resolves to '{}', outside its override directory — replace the symlink with a regular file or remove the override",
+        path.display(),
+        resolved.display()
+    )]
+    OverrideOutsideLevel {
+        /// The override `SKILL.md` as found.
+        path: PathBuf,
+        /// Where it resolves.
+        resolved: PathBuf,
     },
 
     /// User override skill file cannot be read.
@@ -405,78 +432,272 @@ fn skill_name_candidates(skill_name: &str) -> Vec<&str> {
     }
 }
 
-/// Resolves a skill template by name.
-///
-/// Checks for a user override first, then falls back to the embedded default.
-/// `supervisor` is an alias of `orchestrator`: both names resolve to the same
-/// template, and the returned template is named `orchestrator`.
-/// Returns [`SkillError::UnknownSkill`] if neither source has the skill.
-pub fn resolve(skill_name: &str) -> Result<SkillTemplate, SkillError> {
-    resolve_with_config_dir(skill_name, None)
+/// The name of the bundled skill no level may override (D9): it carries the
+/// consent rules for writing an agent CLI's permission settings.
+pub const CLI_SETUP_SKILL: &str = "cli-setup";
+
+/// Bundled skills that always resolve from the embedded copy: no override
+/// directory for them is read or validated at any level.
+const NON_OVERRIDABLE_SKILLS: &[&str] = &[CLI_SETUP_SKILL];
+
+/// Whether `skill_name` names a bundled skill no override can replace.
+#[must_use]
+pub fn is_overridable(skill_name: &str) -> bool {
+    !NON_OVERRIDABLE_SKILLS.contains(&skill_name)
 }
 
-/// Attempts to load a standardized skill from .agents/skills/ directory.
+/// The search roots [`resolve_from`] reads, as plain values.
 ///
-/// Walks up the directory tree from current directory looking for .agents/skills/<name>/SKILL.md
-/// Also checks user override location if `config_dir_override` is provided
-fn try_load_standardized_skill(
-    skill_name: &str,
-    config_dir_override: Option<&Path>,
-) -> Result<Option<SkillTemplate>, SkillError> {
-    // First try user override if config directory is provided
-    if let Some(config_dir) = config_dir_override
-        && let Some(skill) = try_load_user_override(skill_name, config_dir)?
-    {
-        return Ok(Some(skill));
+/// Production code never builds one: [`resolve`] derives it from the
+/// repository's main working tree and [`crate::dirs::config_dir`]. Tests build
+/// it over temporary directories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRoots {
+    /// The repository's main working tree; its `.agents/skills/` is the
+    /// repository level. `None` skips that level.
+    pub repo_root: Option<PathBuf>,
+    /// The user configuration directory; its `git-paw/agent-skills/` is the
+    /// user level. `None` skips that level.
+    pub user_config_dir: Option<PathBuf>,
+}
+
+impl SkillRoots {
+    /// The repository-level override directory, `<repo>/.agents/skills/`.
+    #[must_use]
+    pub fn repo_skills_dir(&self) -> Option<PathBuf> {
+        self.repo_root
+            .as_ref()
+            .map(|r| r.join(".agents").join("skills"))
     }
 
-    // Then try standardized agents directory
-    try_load_from_agents_dir(skill_name)
+    /// The user-level override directory, `<config>/git-paw/agent-skills/`.
+    #[must_use]
+    pub fn user_skills_dir(&self) -> Option<PathBuf> {
+        self.user_config_dir
+            .as_ref()
+            .map(|c| c.join("git-paw").join("agent-skills"))
+    }
 }
 
-/// Try loading from user override location in config directory
-fn try_load_user_override(
+/// Resolves a skill template by name for the repository containing
+/// `repo_root`.
+///
+/// Searches, first match wins:
+///
+/// 1. the repository override `<main>/.agents/skills/<name>/SKILL.md`, where
+///    `<main>` is the main working tree of the repository containing
+///    `repo_root` (skipped when there is none, e.g. a bare repository);
+/// 2. the user override `<config_dir>/git-paw/agent-skills/<name>/SKILL.md`,
+///    with `<config_dir>` from [`crate::dirs::config_dir`];
+/// 3. the embedded default.
+///
+/// No other location is read: not the current directory, not a directory
+/// above the repository, not a linked worktree's `.agents/skills/`, not the
+/// installed `.git-paw/skills/`. `supervisor` is an alias of `orchestrator`,
+/// and [`CLI_SETUP_SKILL`] always resolves embedded. See [`resolve_from`] for
+/// the failure semantics.
+///
+/// # Errors
+///
+/// Returns [`SkillError::UnknownSkill`] when no level has the skill, and the
+/// [`resolve_from`] error for an override that exists but cannot be loaded.
+pub fn resolve(skill_name: &str, repo_root: &Path) -> Result<SkillTemplate, SkillError> {
+    resolve_from(skill_name, &production_roots(repo_root))
+}
+
+/// The real search roots for `repo_root`: its main working tree and the
+/// user configuration directory.
+fn production_roots(repo_root: &Path) -> SkillRoots {
+    roots_for(repo_root, crate::dirs::config_dir())
+}
+
+/// The search roots for `repo_root` (normalized to its main working tree)
+/// with `user_config_dir` as the user level.
+fn roots_for(repo_root: &Path, user_config_dir: Option<PathBuf>) -> SkillRoots {
+    SkillRoots {
+        repo_root: crate::git::main_worktree_root(repo_root),
+        user_config_dir,
+    }
+}
+
+/// Resolves a skill template by name from explicit search roots: the
+/// repository level, then the user level, then the embedded default.
+///
+/// Reads only the two roots it is given — no environment, no current
+/// directory, no git. Production code calls [`resolve`] instead; only this
+/// module and tests call this directly.
+///
+/// An override exists at a level when `<level>/<name>/SKILL.md` exists. One
+/// that exists but cannot be loaded fails resolution there and never falls
+/// through: [`SkillError::DirectoryReadError`] for the repository level,
+/// [`SkillError::UserOverrideRead`] for the user level,
+/// [`SkillError::ValidationError`] for invalid frontmatter at either.
+///
+/// # Errors
+///
+/// As above, plus [`SkillError::UnknownSkill`] when no level has the skill.
+pub fn resolve_from(skill_name: &str, roots: &SkillRoots) -> Result<SkillTemplate, SkillError> {
+    if is_overridable(skill_name) && is_safe_skill_name(skill_name) {
+        let levels = [
+            (
+                roots.repo_skills_dir(),
+                roots.repo_root.as_deref(),
+                Source::AgentsStandard,
+            ),
+            (roots.user_skills_dir(), None, Source::User),
+        ];
+        for (dir, boundary, source) in levels {
+            if let Some(dir) = dir
+                && let Some(skill) = try_load_override(skill_name, &dir, boundary, source)?
+            {
+                return Ok(skill);
+            }
+        }
+    }
+    embedded_template(skill_name)
+}
+
+/// The override `SKILL.md` [`resolve`] would load for `skill_name` in the
+/// repository containing `repo_root`, or `None` when it would use the
+/// embedded default. Includes an override that exists but fails to load, so
+/// a diagnostic can name it.
+#[must_use]
+pub fn override_path(skill_name: &str, repo_root: &Path) -> Option<PathBuf> {
+    override_path_from(skill_name, &production_roots(repo_root))
+}
+
+/// [`override_path`] over explicit roots.
+fn override_path_from(skill_name: &str, roots: &SkillRoots) -> Option<PathBuf> {
+    if !is_overridable(skill_name) || !is_safe_skill_name(skill_name) {
+        return None;
+    }
+    [roots.repo_skills_dir(), roots.user_skills_dir()]
+        .into_iter()
+        .flatten()
+        .flat_map(|dir| {
+            skill_name_candidates(skill_name)
+                .into_iter()
+                .map(move |c| dir.join(c).join("SKILL.md"))
+        })
+        .find(|path| path.try_exists().unwrap_or(true))
+}
+
+/// Override directories that exist for a non-overridable skill
+/// ([`CLI_SETUP_SKILL`]) at either level of the repository containing
+/// `repo_root`. [`resolve`] ignores them; a diagnostic reports them.
+#[must_use]
+pub fn ignored_override_dirs(repo_root: &Path) -> Vec<PathBuf> {
+    ignored_override_dirs_from(&production_roots(repo_root))
+}
+
+/// [`ignored_override_dirs`] over explicit roots.
+fn ignored_override_dirs_from(roots: &SkillRoots) -> Vec<PathBuf> {
+    [roots.repo_skills_dir(), roots.user_skills_dir()]
+        .into_iter()
+        .flatten()
+        .flat_map(|dir| NON_OVERRIDABLE_SKILLS.iter().map(move |n| dir.join(n)))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+/// Whether `skill_name` can be joined onto an override directory without
+/// leaving it: non-empty, no path separator, not `.`/`..`-prefixed.
+fn is_safe_skill_name(skill_name: &str) -> bool {
+    !skill_name.is_empty() && !skill_name.starts_with('.') && !skill_name.contains(['/', '\\'])
+}
+
+/// Loads the override for `skill_name` from one level's skills directory,
+/// trying every alias candidate in precedence order.
+///
+/// `boundary` (the repository root, for the repository level) is a directory
+/// the level directory itself must resolve inside.
+fn try_load_override(
     skill_name: &str,
-    config_dir: &Path,
+    level_dir: &Path,
+    boundary: Option<&Path>,
+    source: Source,
 ) -> Result<Option<SkillTemplate>, SkillError> {
     let canonical = skill_name_candidates(skill_name)[0];
     for candidate in skill_name_candidates(skill_name) {
-        let skill_dir = config_dir
-            .join("git-paw")
-            .join("agent-skills")
-            .join(candidate);
-
-        if skill_dir.is_dir() && skill_dir.join("SKILL.md").exists() {
-            return load_skill_from_directory(&skill_dir, canonical, Source::User);
+        let skill_dir = level_dir.join(candidate);
+        match skill_dir.join("SKILL.md").try_exists() {
+            Ok(true) => {
+                confine_override(&skill_dir, level_dir, boundary, source)?;
+                return load_skill_from_directory(&skill_dir, canonical, source);
+            }
+            Ok(false) => {}
+            Err(e) => return Err(override_read_error(&skill_dir, source, e)),
         }
     }
-
     Ok(None)
 }
 
-/// Try loading from .agents/skills/ by walking up directory tree
-fn try_load_from_agents_dir(skill_name: &str) -> Result<Option<SkillTemplate>, SkillError> {
-    let Ok(mut current_dir) = std::env::current_dir() else {
-        return Ok(None);
+/// Refuses an override whose `SKILL.md` resolves, through a symlink, outside
+/// its level directory — or, at the repository level, whose level directory
+/// resolves outside the repository — so a committed symlink cannot pull an
+/// arbitrary file (a credentials file, say) into agent instructions.
+fn confine_override(
+    skill_dir: &Path,
+    level_dir: &Path,
+    boundary: Option<&Path>,
+    source: Source,
+) -> Result<(), SkillError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let canon = |p: &Path| {
+        p.canonicalize()
+            .map_err(|e| override_read_error(skill_dir, source, e))
     };
-
-    let canonical = skill_name_candidates(skill_name)[0];
-    for _ in 0..5 {
-        // Limit to 5 levels up to prevent infinite loops
-        for candidate in skill_name_candidates(skill_name) {
-            let agents_dir = current_dir.join(".agents").join("skills").join(candidate);
-
-            if agents_dir.is_dir() && agents_dir.join("SKILL.md").exists() {
-                return load_skill_from_directory(&agents_dir, canonical, Source::AgentsStandard);
-            }
-        }
-
-        if !current_dir.pop() {
-            break;
-        }
+    let resolved = canon(&skill_md)?;
+    let level = canon(level_dir)?;
+    let inside_level = resolved.starts_with(&level);
+    let level_inside_boundary = match boundary {
+        Some(root) => level.starts_with(canon(root)?),
+        None => true,
+    };
+    if inside_level && level_inside_boundary {
+        Ok(())
+    } else {
+        Err(SkillError::OverrideOutsideLevel {
+            path: skill_md,
+            resolved,
+        })
     }
+}
 
-    Ok(None)
+/// The embedded default for `skill_name` (alias-resolved).
+fn embedded_template(skill_name: &str) -> Result<SkillTemplate, SkillError> {
+    let skill_name = skill_name_candidates(skill_name)[0];
+    let Some(content) = embedded_default(skill_name) else {
+        return Err(SkillError::UnknownSkill {
+            name: skill_name.to_string(),
+        });
+    };
+    let (metadata, content_without_frontmatter) = parse_standardized_metadata(content)?;
+    Ok(SkillTemplate {
+        name: skill_name.to_string(),
+        content: content_without_frontmatter,
+        source: Source::Embedded,
+        format: SkillFormat::Standardized,
+        metadata,
+        resource_paths: None,
+        origin_path: None,
+    })
+}
+
+/// The error for an override at `skill_dir` that exists but cannot be read:
+/// [`SkillError::UserOverrideRead`] (naming its `SKILL.md`) at the user level,
+/// [`SkillError::DirectoryReadError`] at the repository level.
+fn override_read_error(skill_dir: &Path, source: Source, err: std::io::Error) -> SkillError {
+    match source {
+        Source::User => SkillError::UserOverrideRead {
+            path: skill_dir.join("SKILL.md"),
+            source: err,
+        },
+        _ => SkillError::DirectoryReadError {
+            path: skill_dir.to_path_buf(),
+            source: err,
+        },
+    }
 }
 
 /// Common loading logic for both locations
@@ -490,19 +711,7 @@ fn load_skill_from_directory(
     let content = match std::fs::read_to_string(&skill_md_path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source_err) => {
-            let error = match source {
-                Source::User => SkillError::UserOverrideRead {
-                    path: skill_md_path.clone(),
-                    source: source_err,
-                },
-                _ => SkillError::DirectoryReadError {
-                    path: skill_dir.to_path_buf(),
-                    source: source_err,
-                },
-            };
-            return Err(error);
-        }
+        Err(source_err) => return Err(override_read_error(skill_dir, source, source_err)),
     };
 
     // Parse metadata from frontmatter if present
@@ -528,6 +737,7 @@ fn load_skill_from_directory(
         } else {
             Some(resource_paths)
         },
+        origin_path: Some(skill_md_path),
     }))
 }
 
@@ -601,37 +811,6 @@ fn parse_standardized_metadata(
     let content_without_frontmatter = lines[frontmatter_end + 1..].join("\n");
 
     Ok((Some(metadata), content_without_frontmatter))
-}
-
-/// Internal resolver that accepts an optional config directory override for testing.
-fn resolve_with_config_dir(
-    skill_name: &str,
-    config_dir: Option<&Path>,
-) -> Result<SkillTemplate, SkillError> {
-    // Try standardized format
-    if let Some(skill) = try_load_standardized_skill(skill_name, config_dir)? {
-        return Ok(skill);
-    }
-
-    // Try embedded default (now also uses standardized format)
-    let skill_name = skill_name_candidates(skill_name)[0];
-    if let Some(content) = embedded_default(skill_name) {
-        // Parse embedded content as standardized format
-        let (metadata, content_without_frontmatter) = parse_standardized_metadata(content)?;
-
-        return Ok(SkillTemplate {
-            name: skill_name.to_string(),
-            content: content_without_frontmatter,
-            source: Source::Embedded,
-            format: SkillFormat::Standardized,
-            metadata,
-            resource_paths: None,
-        });
-    }
-
-    Err(SkillError::UnknownSkill {
-        name: skill_name.to_string(),
-    })
 }
 
 /// Re-export of [`crate::broker::messages::slugify_branch`] to ensure skill
@@ -1367,7 +1546,30 @@ pub fn supervisor_boot_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+
+    /// Resolves `name` with no override root: only the embedded default can
+    /// answer, whatever the developer's machine has under its config
+    /// directory or above the checkout.
+    fn resolve_embedded(name: &str) -> Result<SkillTemplate, SkillError> {
+        resolve_from(name, &SkillRoots::default())
+    }
+
+    /// Roots whose repository level is `repo` and that have no user level.
+    fn repo_roots(repo: &Path) -> SkillRoots {
+        SkillRoots {
+            repo_root: Some(repo.to_path_buf()),
+            user_config_dir: None,
+        }
+    }
+
+    /// Roots whose user level is `config_dir` and that have no repository
+    /// level.
+    fn user_roots(config_dir: &Path) -> SkillRoots {
+        SkillRoots {
+            repo_root: None,
+            user_config_dir: Some(config_dir.to_path_buf()),
+        }
+    }
 
     // Byte-identical safety net (D1 / task 1.3): each per-backend spec-path
     // doctrine sentence, relocated from a compiled match arm into its own
@@ -1428,14 +1630,14 @@ mod tests {
     // 9.2: Embedded coordination skill is reachable without any user files
     #[test]
     fn embedded_coordination_is_reachable() {
-        let tmpl = resolve("coordination").expect("should resolve coordination");
+        let tmpl = resolve_embedded("coordination").expect("should resolve coordination");
         assert_eq!(tmpl.source, Source::Embedded);
         assert!(!tmpl.content.is_empty());
     }
 
     #[test]
     fn embedded_docs_fetch_is_reachable() {
-        let tmpl = resolve("docs-fetch").expect("should resolve docs-fetch");
+        let tmpl = resolve_embedded("docs-fetch").expect("should resolve docs-fetch");
         assert_eq!(tmpl.source, Source::Embedded);
         assert!(!tmpl.content.is_empty());
         // Frontmatter is parsed into standardized metadata.
@@ -1461,7 +1663,7 @@ mod tests {
     /// the MCP `get_skill` half lives in `mcp::tools::project`).
     #[test]
     fn embedded_cli_setup_is_reachable() {
-        let tmpl = resolve("cli-setup").expect("should resolve cli-setup");
+        let tmpl = resolve_embedded("cli-setup").expect("should resolve cli-setup");
         assert_eq!(tmpl.source, Source::Embedded);
         assert!(!tmpl.content.is_empty());
         let metadata = tmpl.metadata.expect("cli-setup has frontmatter metadata");
@@ -1474,7 +1676,11 @@ mod tests {
     /// rule it covers so a reworded skill fails with the rule that was lost.
     #[test]
     fn cli_setup_skill_states_every_consent_rule() {
-        let body = flat(&resolve("cli-setup").expect("cli-setup resolves").content);
+        let body = flat(
+            &resolve_embedded("cli-setup")
+                .expect("cli-setup resolves")
+                .content,
+        );
 
         // 1 — the writing form runs only on an explicit ask in this conversation.
         assert!(
@@ -1542,7 +1748,11 @@ mod tests {
     /// would hand an agent a standing justification for clearing prompts.
     #[test]
     fn cli_setup_skill_calls_nothing_safe_to_approve() {
-        let body = flat(&resolve("cli-setup").expect("cli-setup resolves").content);
+        let body = flat(
+            &resolve_embedded("cli-setup")
+                .expect("cli-setup resolves")
+                .content,
+        );
         for claim in [
             "safe to approve",
             "always safe",
@@ -1571,7 +1781,9 @@ mod tests {
     /// names the skill, says how to load it, and restates rules 1, 3 and 4.
     #[test]
     fn supervisor_skill_carries_the_per_cli_setup_section() {
-        let body = resolve("supervisor").expect("supervisor resolves").content;
+        let body = resolve_embedded("supervisor")
+            .expect("supervisor resolves")
+            .content;
 
         assert!(
             body.contains("## Per-CLI setup"),
@@ -1659,7 +1871,7 @@ mod tests {
         // the bundled skill must be instructions-only — it teaches the agent to
         // fetch docs on demand via the helper and must NOT embed documentation
         // page bodies. Guard against a future edit that inlines doc prose.
-        let body = resolve("docs-fetch").unwrap().content;
+        let body = resolve_embedded("docs-fetch").unwrap().content;
         // It references the helper and states docs are fetched on demand.
         assert!(body.contains(".git-paw/scripts/docs-fetch.sh"));
         assert!(body.to_lowercase().contains("on demand") || body.contains("live"));
@@ -1679,7 +1891,7 @@ mod tests {
     // 9.3: Embedded coordination skill contains all four operations
     #[test]
     fn embedded_coordination_contains_all_operations() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(tmpl.content.contains("agent.status"));
         assert!(tmpl.content.contains("agent.artifact"));
         assert!(tmpl.content.contains("agent.blocked"));
@@ -1691,7 +1903,7 @@ mod tests {
 
     #[test]
     fn embedded_coordination_documents_supervisor_messages() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(tmpl.content.contains("agent.verified"));
         assert!(tmpl.content.contains("agent.feedback"));
         assert!(tmpl.content.contains("re-publish"));
@@ -1703,7 +1915,7 @@ mod tests {
     /// `agent.feedback`, which carries corrective errors.
     #[test]
     fn embedded_coordination_documents_answer_as_authoritative_reply() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let start = tmpl
             .content
             .find("### Messages you may receive")
@@ -1741,7 +1953,7 @@ mod tests {
     /// wire fields), reserving `agent.feedback` for corrective errors.
     #[test]
     fn supervisor_skill_answers_questions_via_agent_answer() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("### Answer a peer agent's question"),
             "supervisor skill must carry an answer-a-question section"
@@ -1778,7 +1990,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_documents_automatic_status_publishing() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("publishes your status automatically")
@@ -1795,7 +2007,7 @@ mod tests {
     /// `skill-agent` scenario "Coordination skill forbids hook bypass".
     #[test]
     fn coordination_skill_forbids_hook_bypass() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("core.hooksPath"),
             "names the hook override"
@@ -1811,7 +2023,7 @@ mod tests {
     /// `skill-agent` scenario "Coordination skill forbids driving tmux".
     #[test]
     fn coordination_skill_forbids_driving_tmux_and_self_approval() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(tmpl.content.contains("tmux send-keys"), "names send-keys");
         assert!(tmpl.content.contains("tmux run-shell"), "names run-shell");
         assert!(
@@ -1827,7 +2039,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_does_not_contain_cherry_pick_instructions() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             !tmpl.content.contains("git cherry-pick"),
             "coordination skill must not contain the literal 'git cherry-pick' command"
@@ -1840,7 +2052,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_contains_peer_dependency_escalation_section() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("When you depend on a peer's work"),
             "coordination skill should contain a peer-dependency escalation section"
@@ -1858,7 +2070,7 @@ mod tests {
     /// uncommitted-edits example.
     #[test]
     fn coordination_skill_teaches_main_advances_discipline() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let content = &tmpl.content;
 
         let idx = content
@@ -1904,7 +2116,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_contains_before_you_start_editing_heading() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("Before you start editing"),
             "coordination skill should contain 'Before you start editing' heading"
@@ -1913,7 +2125,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_contains_agent_intent_helper_example() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let section_start = tmpl
             .content
             .find("### Before you start editing")
@@ -1937,7 +2149,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_contains_while_youre_editing_heading() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("While you're editing"),
             "coordination skill should contain 'While you're editing' heading"
@@ -1946,7 +2158,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_instructs_republish_on_scope_growth() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("scope grows") || lowered.contains("scope grow"),
@@ -1960,7 +2172,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_instructs_question_on_peer_intent_overlap() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         // The skill should tell agents to send agent.question on overlap, not
         // race the peer.
         assert!(
@@ -1976,7 +2188,7 @@ mod tests {
 
     #[test]
     fn coordination_skill_contains_must_not_anti_pattern_statements() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("must not"),
@@ -2001,7 +2213,7 @@ mod tests {
     /// dirs, and question-instead-of-write are all present.
     #[test]
     fn coordination_skill_carries_memory_isolation_section() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let content = &tmpl.content;
         let idx = content
             .find("Memory isolation")
@@ -2042,7 +2254,7 @@ mod tests {
     /// product names/paths are forbidden outside an allowed span).
     #[test]
     fn memory_isolation_section_is_engine_and_cli_agnostic() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let content = &tmpl.content;
         let idx = content
             .find("Memory isolation")
@@ -2075,7 +2287,7 @@ mod tests {
     /// first sighting, operator escalation on repeat.
     #[test]
     fn supervisor_skill_carries_out_of_worktree_violation_procedure() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let content = &tmpl.content;
         let idx = content
             .find("Out-of-worktree write violations")
@@ -2112,7 +2324,7 @@ mod tests {
     /// relays rather than approving on its own judgment.
     #[test]
     fn supervisor_skill_relays_prompts_whether_or_not_a_loop_runs() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Drain the loop's escalations first"),
             "supervisor skill must tell it to drain loop escalations before sweeping"
@@ -2136,7 +2348,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_contains_watch_peer_intents_section() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Watch peer intents"),
             "supervisor skill should contain 'Watch peer intents' heading"
@@ -2158,7 +2370,7 @@ mod tests {
     /// `for p in …; do tmux capture-pane` loops.
     #[test]
     fn supervisor_skill_references_bundled_sweep_helper() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let required = [
             ".git-paw/scripts/sweep.sh snapshot",
             ".git-paw/scripts/sweep.sh capture",
@@ -2188,7 +2400,7 @@ mod tests {
     /// instead.
     #[test]
     fn supervisor_skill_does_not_credit_seeded_allowlist_for_prompt_free_broker_calls() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             !tmpl.content.contains("allowed_bash_prefixes"),
             "supervisor skill should not reference the removed allowed_bash_prefixes seeding key"
@@ -2212,7 +2424,7 @@ mod tests {
     /// verification scratch.
     #[test]
     fn supervisor_skill_uses_repo_local_verify_scratch_dir() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains(".git-paw/tmp/verify-"),
             "supervisor skill should name the repo-local verify scratch path .git-paw/tmp/verify-"
@@ -2234,7 +2446,7 @@ mod tests {
     /// the seven v0.6.0 phase values.
     #[test]
     fn supervisor_skill_has_introspection_section_with_phase_taxonomy() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content
                 .contains("### Introspection: what to publish and when"),
@@ -2268,7 +2480,7 @@ mod tests {
     /// gates (tests, spec, docs, security, regression).
     #[test]
     fn supervisor_skill_audit_step_enumerates_five_gates() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("audit_step"),
             "the audit phase must document the audit_step field"
@@ -2286,7 +2498,7 @@ mod tests {
     /// single-emit on idle.
     #[test]
     fn supervisor_skill_documents_emission_cadence() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("phase transition"),
@@ -2310,7 +2522,7 @@ mod tests {
     /// published payload internally rather than showing a raw JSON literal.
     #[test]
     fn supervisor_skill_documents_checkpoint_phase() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("checkpoint"),
             "the skill must document the checkpoint phase value"
@@ -2328,7 +2540,7 @@ mod tests {
     /// than a hardcoded literal.
     #[test]
     fn supervisor_skill_publishes_advanced_main_after_merge() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let content = &tmpl.content;
 
         // The publish step lives inside the merge-orchestration procedure.
@@ -2378,7 +2590,7 @@ mod tests {
     /// do tmux ...; done` loops with the `simple_expansion` rationale.
     #[test]
     fn supervisor_skill_mandates_helper_and_forbids_inline_pane_loops() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Driving agent panes"),
             "supervisor skill should contain a 'Driving agent panes' section"
@@ -2399,7 +2611,7 @@ mod tests {
     /// rationale.
     #[test]
     fn supervisor_skill_states_never_own_pane_rule() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("never") && lowered.contains("pane 0"),
@@ -2416,7 +2628,7 @@ mod tests {
     /// untrusted-hooks and wrong-branch (cwd-leak) rationales.
     #[test]
     fn supervisor_skill_mandates_git_dash_c_and_forbids_cd() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("git -C"),
             "supervisor skill should mandate `git -C <path>` for cross-worktree git"
@@ -2441,7 +2653,7 @@ mod tests {
     /// `agent.feedback` nudge.
     #[test]
     fn supervisor_skill_states_commit_cadence_nudge() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("uncommitted") && lowered.contains("10"),
@@ -2466,7 +2678,7 @@ mod tests {
         // Stack-agnostic: the skill states the discipline generically via
         // {{TEST_COMMAND}} — no repo-specific runner/flag literals (those
         // would trip the no-language-leak audit).
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("never fail-fast") || lowered.contains("no-fail-fast"),
@@ -2490,7 +2702,7 @@ mod tests {
     /// example of the batching anti-pattern.
     #[test]
     fn supervisor_skill_mandates_per_event_verification() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content
                 .contains("### Verify on each event, never batch"),
@@ -2521,7 +2733,7 @@ mod tests {
     /// remains permitted".
     #[test]
     fn supervisor_skill_permits_dependency_driven_deferral() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("only acceptable reason to defer is a genuine dependency"),
@@ -2537,7 +2749,7 @@ mod tests {
     /// documented".
     #[test]
     fn supervisor_skill_permits_concurrent_verification() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("per-branch verifications may run concurrently"),
@@ -2553,7 +2765,7 @@ mod tests {
     /// the explicit trigger event.
     #[test]
     fn supervisor_skill_references_verify_now_nudge() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("supervisor.verify-now"),
             "subsection must reference the broker's supervisor.verify-now nudge"
@@ -2570,7 +2782,7 @@ mod tests {
     /// monitors.
     #[test]
     fn supervisor_skill_has_detecting_stuck_agents_section() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("### Detecting stuck agents"),
             "supervisor skill must include a 'Detecting stuck agents' section"
@@ -2608,7 +2820,6 @@ mod tests {
 
     // 9.4: Standard location skill loading
     #[test]
-    #[serial(directory_changes)]
     fn standard_location_skill_loading() {
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path().join("my-project");
@@ -2624,22 +2835,15 @@ mod tests {
         let skill_md_content = "---\nname: coordination\ndescription: Custom coordination skill\n---\n\ncustom skill content";
         std::fs::write(skill_dir.join("SKILL.md"), skill_md_content).unwrap();
 
-        // Change to project directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project_dir).unwrap();
-
-        let tmpl = resolve("coordination").expect("should resolve");
+        let tmpl = resolve_from("coordination", &repo_roots(&project_dir)).expect("should resolve");
         assert_eq!(tmpl.source, Source::AgentsStandard);
         assert!(tmpl.content.contains("custom skill content"));
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn supervisor_is_an_alias_of_orchestrator() {
-        let supervisor = resolve("supervisor").expect("supervisor resolves");
-        let orchestrator = resolve("orchestrator").expect("orchestrator resolves");
+        let supervisor = resolve_embedded("supervisor").expect("supervisor resolves");
+        let orchestrator = resolve_embedded("orchestrator").expect("orchestrator resolves");
         assert_eq!(supervisor.source, Source::Embedded);
         assert_eq!(orchestrator.source, Source::Embedded);
         assert_eq!(supervisor.content, orchestrator.content);
@@ -2652,7 +2856,7 @@ mod tests {
     /// The embedded orchestrator skill rendered as `SKILL.md` for `backends`
     /// with `test_command = "make test"` and every other gate unset.
     fn standardized_for(backends: &[crate::specs::SpecBackendKind]) -> String {
-        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        let tmpl = resolve_embedded(ORCHESTRATOR_SKILL).unwrap();
         render_standardized(
             &tmpl,
             &GateCommands {
@@ -2738,7 +2942,7 @@ mod tests {
         let cli_setup = skill_dir_with(
             tmp.path(),
             "cli-setup",
-            &to_skill_md(&resolve("cli-setup").unwrap()),
+            &to_skill_md(&resolve_embedded("cli-setup").unwrap()),
         );
         assert_eq!(validate_skill_dir(&cli_setup).unwrap().name, "cli-setup");
     }
@@ -2797,7 +3001,7 @@ mod tests {
     // repo-root sidecar (the content half)
     #[test]
     fn session_context_names_the_session_values_and_points_at_the_skill() {
-        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        let tmpl = resolve_embedded(ORCHESTRATOR_SKILL).unwrap();
         let ctx = orchestrator_session_context(
             &tmpl,
             "paw-demo",
@@ -2819,7 +3023,7 @@ mod tests {
     // drive-loop directive
     #[test]
     fn unattended_session_context_carries_the_drive_loop_directive() {
-        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        let tmpl = resolve_embedded(ORCHESTRATOR_SKILL).unwrap();
         let ctx = orchestrator_session_context(
             &tmpl,
             "paw-demo",
@@ -2844,7 +3048,7 @@ mod tests {
     // 9.9: Unknown skill name returns error
     #[test]
     fn unknown_skill_returns_error() {
-        let result = resolve("nonexistent");
+        let result = resolve_embedded("nonexistent");
         assert!(
             matches!(result, Err(SkillError::UnknownSkill { ref name }) if name == "nonexistent"),
             "expected UnknownSkill error, got {result:?}"
@@ -2861,6 +3065,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -2884,6 +3089,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -2907,6 +3113,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -2923,7 +3130,7 @@ mod tests {
     // 9.13: Render is deterministic
     #[test]
     fn render_is_deterministic() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let a = render(
             &tmpl,
             "feat/x",
@@ -2945,7 +3152,6 @@ mod tests {
 
     // 9.14: Render performs no I/O (resolve then render after "deletion")
     #[test]
-    #[serial(directory_changes)]
     fn render_performs_no_io() {
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path().join("my-project");
@@ -2960,11 +3166,7 @@ mod tests {
         let skill_md_content = "---\nname: coordination\ndescription: Test coordination skill\n---\n\nuser {{BRANCH_ID}}";
         std::fs::write(skill_dir.join("SKILL.md"), skill_md_content).unwrap();
 
-        // Change to project directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project_dir).unwrap();
-
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_from("coordination", &repo_roots(&project_dir)).unwrap();
         assert_eq!(tmpl.source, Source::AgentsStandard);
 
         // Delete the skill directory — render must still succeed from in-memory content
@@ -2978,9 +3180,6 @@ mod tests {
             &[],
         );
         assert!(output.contains("feat-x"));
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // 9.15: Unknown placeholder survives in output (warning is emitted to stderr)
@@ -2993,6 +3192,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -3011,7 +3211,7 @@ mod tests {
     // 9.16: No {{...}} remains after rendering the embedded coordination template
     #[test]
     fn no_unknown_placeholders_after_render() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let output = render(
             &tmpl,
             "feat/x",
@@ -3029,7 +3229,7 @@ mod tests {
     // Supervisor skill is reachable as an embedded default
     #[test]
     fn embedded_supervisor_is_reachable() {
-        let tmpl = resolve("supervisor").expect("should resolve supervisor");
+        let tmpl = resolve_embedded("supervisor").expect("should resolve supervisor");
         assert_eq!(tmpl.source, Source::Embedded);
         assert!(!tmpl.content.is_empty());
     }
@@ -3037,14 +3237,14 @@ mod tests {
     // Supervisor skill contains role definition
     #[test]
     fn supervisor_skill_contains_role_definition() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(tmpl.content.contains("do NOT write code"));
     }
 
     // Supervisor skill reads broker status through the helper, not a URL
     #[test]
     fn supervisor_skill_contains_broker_status() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(tmpl.content.contains(".git-paw/scripts/sweep.sh status"));
         assert!(!tmpl.content.contains("{{GIT_PAW_BROKER_URL}}"));
     }
@@ -3052,7 +3252,7 @@ mod tests {
     // Supervisor skill contains verified and feedback message types
     #[test]
     fn supervisor_skill_contains_verified_and_feedback() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(tmpl.content.contains("agent.verified"));
         assert!(tmpl.content.contains("agent.feedback"));
     }
@@ -3086,7 +3286,7 @@ mod tests {
 
     #[test]
     fn supervisor_verified_example_uses_correct_payload_fields() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let example = verified_curl_example_body(&tmpl.content);
         assert!(
             example.contains("verified_by"),
@@ -3106,7 +3306,7 @@ mod tests {
 
     #[test]
     fn supervisor_feedback_example_uses_correct_payload_fields() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let example = feedback_curl_example_body(&tmpl.content);
         assert!(
             example.contains("\"from\""),
@@ -3134,7 +3334,7 @@ mod tests {
 
     #[test]
     fn supervisor_examples_clarify_recipient_vs_sender() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
 
         // Verified-section clarification (between the verified heading and the
@@ -3173,7 +3373,7 @@ mod tests {
 
     #[test]
     fn supervisor_workflow_prose_drops_legacy_verified_fields() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         // Strip whitespace inside the matches so a stray space doesn't hide a
         // regression like `result : "pass"` or `notes : ""`.
         let condensed: String = tmpl
@@ -3194,7 +3394,7 @@ mod tests {
     // Supervisor skill contains tmux commands targeting the session name
     #[test]
     fn supervisor_skill_contains_tmux_commands() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(tmpl.content.contains("tmux capture-pane"));
         assert!(tmpl.content.contains("tmux send-keys"));
         // Every tmux target names window 0 of the session the sidecar records.
@@ -3204,7 +3404,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_contains_spec_audit_procedure() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Spec Audit"),
             "supervisor skill should contain Spec Audit section"
@@ -3235,7 +3435,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_spec_audit_after_test_before_verified() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let test_pos = tmpl.content.find("Regression check").unwrap_or(0);
         let audit_pos = tmpl.content.find("Spec Audit").unwrap_or(0);
         let verify_pos = tmpl.content.find("Verify or feedback").unwrap_or(0);
@@ -3253,7 +3453,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_mentions_paste_buffer_recovery() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("paste-buffer") || lowered.contains("paste buffer"),
@@ -3263,7 +3463,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_mentions_pasted_text_indicator() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Pasted text"),
             "supervisor skill should mention the Claude Code 'Pasted text' indicator"
@@ -3275,7 +3475,7 @@ mod tests {
     /// (`C-u`), re-types and submits with `Enter`.
     #[test]
     fn supervisor_skill_paste_buffer_recovery_uses_sweep_tell() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .to_lowercase()
@@ -3319,7 +3519,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_mentions_launch_time_sweep() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("launch-time pane sweep")
@@ -3354,7 +3554,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_paste_buffer_recovery_is_safe_by_default() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         let start = lowered
             .find("paste-buffer recovery")
@@ -3376,7 +3576,7 @@ mod tests {
     /// fall back to the disproven single-Enter recovery.
     #[test]
     fn supervisor_skill_states_a_lone_enter_is_a_no_op() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         let start = lowered
             .find("paste-buffer recovery")
@@ -3396,7 +3596,7 @@ mod tests {
     /// proactively at launch, with the rationale.
     #[test]
     fn supervisor_skill_paste_buffer_recovery_applies_at_launch() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         let start = lowered
             .find("paste-buffer recovery")
@@ -3418,7 +3618,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_contains_governance_verification() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Governance verification"),
             "supervisor skill should contain 'Governance verification' heading"
@@ -3427,7 +3627,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_is_substep_of_spec_audit() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let audit_pos = tmpl
             .content
             .find("### Spec Audit Procedure")
@@ -3456,7 +3656,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_examples_cover_all_five_docs() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3476,7 +3676,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_findings_via_agent_feedback() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3492,7 +3692,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_no_governance_gate_tag() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             !tmpl.content.contains("[governance-gate:"),
             "supervisor skill must not contain the dropped `[governance-gate:<doc>]` tag prefix"
@@ -3501,7 +3701,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_no_governance_gates_table() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             !tmpl.content.contains("[governance.gates]"),
             "supervisor skill must not reference the dropped `[governance.gates]` table"
@@ -3510,7 +3710,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_no_gating_language() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         // The opsx-role-gating capability legitimately uses the tokens
         // `role-gating` / `role_gating` (a feature name, not the dropped
         // governance-"gating" terminology this test guards against). Strip
@@ -3534,7 +3734,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_missing_doc_handling() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3555,7 +3755,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_missing_doc_is_not_distinct_failure_type() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3574,7 +3774,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_states_activation_condition() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3595,7 +3795,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_examples_state_they_are_illustrative() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3612,7 +3812,7 @@ mod tests {
 
     #[test]
     fn supervisor_skill_governance_states_judgment_per_project_conventions() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let gov_pos = tmpl
             .content
             .find("Governance verification")
@@ -3654,7 +3854,7 @@ mod tests {
     /// the four subsections appear in the documented order.
     #[test]
     fn supervisor_skill_stream_timeout_section_has_four_ordered_pieces() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
 
         let error_shape = section
@@ -3682,7 +3882,7 @@ mod tests {
     /// no specific CLI's exact error string.
     #[test]
     fn supervisor_skill_stream_timeout_names_two_generic_symptoms() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         let lowered = section.to_lowercase();
         assert!(
@@ -3703,7 +3903,7 @@ mod tests {
     /// `status: "checkpoint"` label (the helper shapes `status: "working"`).
     #[test]
     fn supervisor_skill_stream_timeout_documents_checkpoint_shape() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
             section.contains("agent.status"),
@@ -3727,7 +3927,7 @@ mod tests {
     /// only for multi-publish iterations".
     #[test]
     fn supervisor_skill_stream_timeout_checkpoint_only_for_multi_publish() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         let lowered = section.to_lowercase();
         assert!(
@@ -3745,7 +3945,7 @@ mod tests {
     /// "Per-target poll-then-replay pattern documented".
     #[test]
     fn supervisor_skill_stream_timeout_documents_replay_loop() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
             section.contains("sweep.sh events"),
@@ -3775,7 +3975,7 @@ mod tests {
     /// plus a stream-timeout rationale.
     #[test]
     fn supervisor_skill_stream_timeout_confirmation_rule_is_prominent() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
             section.contains("**Never advance to the next sub-action"),
@@ -3793,7 +3993,7 @@ mod tests {
     /// `recovery_cycles` `agent.learning` record with a structured body.
     #[test]
     fn supervisor_skill_stream_timeout_names_recovery_learning_record() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
             section.contains("recovery_cycles"),
@@ -3824,7 +4024,7 @@ mod tests {
     /// ≥2-occurrence gate (with the one-off friction forbidden).
     #[test]
     fn supervisor_skill_documents_tooling_friction_category() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let c = &tmpl.content;
         let start = c
             .find("**`tooling_friction`**")
@@ -3856,7 +4056,7 @@ mod tests {
     /// `agent.learning`.
     #[test]
     fn supervisor_skill_publishes_learnings_via_helper_not_raw_curl() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let c = &tmpl.content;
         assert!(
             c.contains("sweep.sh learn"),
@@ -3876,7 +4076,7 @@ mod tests {
     /// primary identifier.
     #[test]
     fn supervisor_skill_wires_capture_into_sweep_and_winddown() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let c = &tmpl.content;
 
         // Opportunistic capture step, ordered after prompt relaying
@@ -4029,6 +4229,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             doc_tool_command: Some("sphinx-build -W docs docs/_build"),
@@ -4059,6 +4260,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4082,6 +4284,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let openspec_output = render(
             &tmpl,
@@ -4114,6 +4317,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4253,6 +4457,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4276,6 +4481,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4293,7 +4499,6 @@ mod tests {
 
     // Standardized skill format is detected and loaded
     #[test]
-    #[serial(directory_changes)]
     fn standardized_skill_format_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path().join("my-project");
@@ -4308,11 +4513,8 @@ mod tests {
         let skill_md_content = "---\nname: test-standardized\ndescription: A test standardized skill\n---\n\nThis is the skill content with {{BRANCH_ID}} placeholder.";
         std::fs::write(skill_dir.join("SKILL.md"), skill_md_content).unwrap();
 
-        // Change to project directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project_dir).unwrap();
-
-        let tmpl = resolve("test-standardized").expect("should resolve");
+        let tmpl =
+            resolve_from("test-standardized", &repo_roots(&project_dir)).expect("should resolve");
         assert_eq!(tmpl.format, SkillFormat::Standardized);
         assert!(tmpl.content.contains("This is the skill content"));
         assert!(tmpl.content.contains("{{BRANCH_ID}}"));
@@ -4320,9 +4522,6 @@ mod tests {
         let metadata = tmpl.metadata.as_ref().unwrap();
         assert_eq!(metadata.name, "test-standardized");
         assert_eq!(metadata.description, "A test standardized skill");
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // Standardized skill with resources loads resource paths
@@ -4341,8 +4540,8 @@ mod tests {
         let skill_md_content = "---\nname: test-with-resources\ndescription: Skill with resources\n---\n\nMain content here.";
         std::fs::write(specific_skill_dir.join("SKILL.md"), skill_md_content).unwrap();
 
-        let tmpl = resolve_with_config_dir("test-with-resources", Some(dir.path()))
-            .expect("should resolve");
+        let tmpl =
+            resolve_from("test-with-resources", &user_roots(dir.path())).expect("should resolve");
         assert_eq!(tmpl.format, SkillFormat::Standardized);
         assert!(tmpl.resource_paths.is_some());
         let resource_paths = tmpl.resource_paths.as_ref().unwrap();
@@ -4354,7 +4553,6 @@ mod tests {
 
     // Standard location (.agents/skills/) loading
     #[test]
-    #[serial(directory_changes)]
     fn standard_location_loading() {
         let temp_dir = tempfile::tempdir().unwrap();
         let project_dir = temp_dir.path().join("my-project");
@@ -4369,18 +4567,11 @@ mod tests {
         let standard_content = "---\nname: test-skill\ndescription: Standard location skill\n---\n\nContent from .agents/skills/";
         std::fs::write(standard_skill_dir.join("SKILL.md"), standard_content).unwrap();
 
-        // Change to project directory so .agents/skills/ can be found
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project_dir).unwrap();
-
-        let tmpl = resolve("test-skill").expect("should resolve");
+        let tmpl = resolve_from("test-skill", &repo_roots(&project_dir)).expect("should resolve");
 
         // Should load from standard location
         assert_eq!(tmpl.source, Source::AgentsStandard);
         assert!(tmpl.content.contains("Content from .agents/skills/"));
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // Standardized skill metadata placeholders are substituted
@@ -4401,6 +4592,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: Some(metadata),
             resource_paths: None,
+            origin_path: None,
         };
 
         let output = render(
@@ -4425,6 +4617,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4450,6 +4643,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let output = render(
             &tmpl,
@@ -4473,7 +4667,7 @@ mod tests {
         // `{{CHANGE_ID}}` is a per-invocation placeholder (substituted by the
         // supervisor agent, not by render) and is therefore expected to
         // survive a render pass.
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let output = render(
             &tmpl,
             "supervisor",
@@ -4508,6 +4702,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             test_command: value,
@@ -4538,6 +4733,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             test_command: Some("just check"),
@@ -4575,6 +4771,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             lint_command: Some("cargo clippy -- -D warnings"),
@@ -4609,6 +4806,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             build_command: Some("cargo build"),
@@ -4640,6 +4838,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             doc_build_command: Some("mdbook build docs/"),
@@ -4671,6 +4870,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict"),
@@ -4705,6 +4905,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             fmt_check_command: Some("cargo fmt --check"),
@@ -4736,6 +4937,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             security_audit_command: Some("cargo audit"),
@@ -4763,7 +4965,7 @@ mod tests {
         // With distinct Some("CMD-N") values, the rendered supervisor skill
         // contains each CMD-N value (proving the gate prose references the
         // placeholders, not hardcoded git-paw commands).
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let gates = GateCommands {
             test_command: Some("CMD-TEST"),
             lint_command: Some("CMD-LINT"),
@@ -4803,7 +5005,7 @@ mod tests {
         // With all placeholders None, every gate section in the rendered
         // skill must show '(not configured)' so the supervisor agent can
         // recognise the gate as having no tooling-aided phase.
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let output = render(
             &tmpl,
             "supervisor",
@@ -4872,7 +5074,7 @@ mod tests {
     /// the audit windows are the §4-§7 gate-prose paragraphs only.
     #[test]
     fn supervisor_template_gate_prose_has_no_hardcoded_git_paw_commands() {
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let content = &tmpl.content;
         let start = content
             .find("Steps 4-7 below are the **five first-class verification gates**")
@@ -4923,6 +5125,7 @@ mod tests {
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let gates = GateCommands {
             spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict"),
@@ -4963,15 +5166,8 @@ mod tests {
         let skill_md_content = "---\nname: invalid-skill\n---\n\nContent here.";
         std::fs::write(skill_dir.join("SKILL.md"), skill_md_content).unwrap();
 
-        // Change to project directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project_dir).unwrap();
-
-        let result = resolve("invalid-skill");
+        let result = resolve_from("invalid-skill", &repo_roots(&project_dir));
         assert!(matches!(result, Err(SkillError::ValidationError { .. })));
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // Corpus parity (drop-serde-yaml 4.1): every embedded skill, every
@@ -4980,10 +5176,7 @@ mod tests {
     // parser in tests/fixtures/skill_frontmatter_expected.json.
     #[test]
     fn frontmatter_corpus_matches_frozen_serde_yaml_parity() {
-        // Resolved against CARGO_MANIFEST_DIR, not the process CWD: other
-        // tests in this module call `std::env::set_current_dir`, which is
-        // process-global and races with this test under cargo's default
-        // parallel test execution.
+        // Resolved against CARGO_MANIFEST_DIR, not the process CWD.
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let expected_json = std::fs::read_to_string(
             repo_root.join("tests/fixtures/skill_frontmatter_expected.json"),
@@ -5070,7 +5263,7 @@ mod tests {
     // 9.17: SkillTemplate is cloneable
     #[test]
     fn skill_template_is_cloneable() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let cloned = tmpl.clone();
         assert_eq!(tmpl.name, cloned.name);
         assert_eq!(tmpl.content, cloned.content);
@@ -5102,7 +5295,7 @@ mod tests {
 
         // The real bundled region, not just the fixture, must carry the
         // escalate-and-relay contract.
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let rendered = render(
             &tmpl,
             "supervisor",
@@ -5146,7 +5339,7 @@ mod tests {
     // instruct approving a prompt judged safe, or selecting a durable grant.
     #[test]
     fn no_boot_context_tells_the_supervisor_to_approve_by_pattern() {
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let rendered = render(
             &tmpl,
             "supervisor",
@@ -5198,7 +5391,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human in your session, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.";
 
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let rendered = render(
             &tmpl,
             "supervisor",
@@ -5220,7 +5413,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     // boot context, and the section follows the skill body.
     #[test]
     fn supervisor_boot_context_appends_governance_after_the_drive_loop_directive() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let rendered = render(
             &tmpl,
             "supervisor",
@@ -5517,6 +5710,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let rendered = render(
             &tmpl,
@@ -5540,6 +5734,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             format: SkillFormat::Standardized,
             metadata: None,
             resource_paths: None,
+            origin_path: None,
         };
         let rendered = render_for_supervisor(
             &tmpl,
@@ -5798,7 +5993,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_contains_conflict_detector_tag() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("[conflict-detector]"),
             "supervisor skill should reference the [conflict-detector] tag"
@@ -5807,7 +6002,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_documents_broker_side_detection() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("auto-detect") || lowered.contains("auto-emit"),
@@ -5829,7 +6024,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_removes_v04_manual_conflict_detection() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             !tmpl
                 .content
@@ -5840,7 +6035,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_mentions_agent_intent() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(tmpl.content.contains("agent.intent"));
         assert!(
             tmpl.content.contains("Watch peer intents")
@@ -5853,7 +6048,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_focuses_on_question_escalations() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         // The supervisor agent's role on detector output is to react to
         // agent.question escalations and follow up on repeat offenders.
@@ -5872,7 +6067,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn embedded_coordination_mentions_spec_kit_consolidated_worktrees() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("Spec Kit")
                 && (tmpl.content.contains("consolidated") || tmpl.content.contains("phase/")),
@@ -5882,7 +6077,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn embedded_coordination_instructs_sequential_work_and_writeback() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("sequential") || tmpl.content.contains("Sequential"),
             "should instruct sequential execution"
@@ -5899,7 +6094,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn embedded_coordination_states_agent_done_timing_for_consolidated() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("agent.done"),
             "should mention agent.done"
@@ -5915,7 +6110,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn embedded_coordination_clarifies_p_worktrees_follow_standard_pattern() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("[P]") || tmpl.content.contains("task/"),
             "should distinguish [P] / task/ worktrees from consolidated ones"
@@ -5933,7 +6128,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// section heading.
     #[test]
     fn supervisor_skill_has_user_input_section() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("When the user types in your session"),
             "orchestrator skill should include the 'When the user types in your session' section"
@@ -5947,7 +6142,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.2 — user-input section maps directives to `agent.feedback`.
     #[test]
     fn supervisor_skill_user_input_uses_agent_feedback_for_directives() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("When the user types in your session")
@@ -5962,7 +6157,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.3 — user-input section maps judgment-call asks to `agent.question`.
     #[test]
     fn supervisor_skill_user_input_uses_agent_question_for_judgment_calls() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("When the user types in your session")
@@ -5977,7 +6172,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.4 — user-input section states the autonomous loop continues.
     #[test]
     fn supervisor_skill_user_input_states_loop_continues() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("When the user types in your session")
@@ -5992,7 +6187,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.5 — supervisor skill contains the "Merge orchestration" section.
     #[test]
     fn supervisor_skill_has_merge_orchestration_section() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("Merge orchestration"),
             "supervisor skill should include the 'Merge orchestration' section"
@@ -6002,7 +6197,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.6 — merge orchestration uses `git merge --ff-only`.
     #[test]
     fn supervisor_skill_merge_uses_ff_only() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Merge orchestration")
@@ -6017,7 +6212,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// revert.
     #[test]
     fn supervisor_skill_merge_reverts_via_reset_hard() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Merge orchestration")
@@ -6032,7 +6227,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// `agent.question`.
     #[test]
     fn supervisor_skill_merge_cycle_uses_agent_question() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Merge orchestration")
@@ -6047,7 +6242,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8.9 — merge orchestration ends with a final `agent.status` summary.
     #[test]
     fn supervisor_skill_merge_publishes_final_status_summary() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Merge orchestration")
@@ -6065,7 +6260,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// references/terminology section.
     #[test]
     fn coordination_skill_documents_slugify_terminology() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("agent_id"),
             "coordination skill should mention the agent_id identifier form"
@@ -6086,7 +6281,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// drift 57 — coordination skill documents stash-hygiene rules.
     #[test]
     fn coordination_skill_documents_stash_hygiene() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("git stash list"),
             "stash-hygiene section should reference `git stash list`"
@@ -6110,7 +6305,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// work with `agent_id` = "supervisor".
     #[test]
     fn supervisor_skill_documents_main_side_intent() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("supervisor publishes agent.intent")
@@ -6145,7 +6340,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// instructs tmux-send-keys alongside agent.feedback answers").
     #[test]
     fn supervisor_skill_documents_sweep_tell_alongside_answer() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Send the answer to the agent pane too")
@@ -6177,7 +6372,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// the filesystem-watcher rationale.
     #[test]
     fn coordination_skill_documents_working_heartbeat() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("working heartbeat") || lowered.contains("heartbeat"),
@@ -6209,7 +6404,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// step with explicit non-silent-approval guidance.
     #[test]
     fn supervisor_skill_documents_accept_edits_audit() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("accept-edits commits") || lowered.contains("accept edits"),
@@ -6244,7 +6439,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// the `agent-unnamed` empty fallback and the single-word `agent-` prefix.
     #[test]
     fn coordination_skill_describes_slugify_rule() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let start = tmpl
             .content
             .find("slugify_branch")
@@ -6290,7 +6485,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     // Tests assert against the rendered output so any post-render
     // transformation regressions are caught.
     fn rendered_supervisor() -> String {
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         render(
             &tmpl,
             "supervisor",
@@ -6302,7 +6497,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     }
 
     fn rendered_coordination() -> String {
-        let tmpl = resolve("coordination").expect("coordination skill resolves");
+        let tmpl = resolve_embedded("coordination").expect("coordination skill resolves");
         render(
             &tmpl,
             "feat/x",
@@ -6448,7 +6643,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// the agent-side `Before you start editing` flow in `coordination.md`.
     #[test]
     fn supervisor_skill_cross_references_agent_intent_flow() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let start = tmpl
             .content
             .find("Supervisor publishes agent.intent")
@@ -6474,7 +6669,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     // ---------------------------------------------------------------------------
 
     fn render_supervisor() -> String {
-        let tmpl = resolve("supervisor").expect("resolve supervisor template");
+        let tmpl = resolve_embedded("supervisor").expect("resolve supervisor template");
         render(
             &tmpl,
             "supervisor",
@@ -6866,7 +7061,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// binary exports to every consumer).
     #[test]
     fn coordination_skill_documents_commit_cadence() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("commit cadence") || lowered.contains("per-group commit cadence"),
@@ -6905,7 +7100,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// invoking `/opsx:verify` and `/opsx:archive`.
     #[test]
     fn coordination_skill_forbids_opsx_verify_and_archive() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("/opsx:verify"),
             "coordination skill should name `/opsx:verify` literally"
@@ -6928,7 +7123,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// with status "done" or "committed".
     #[test]
     fn coordination_skill_names_terminal_action() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content.contains("agent.artifact"),
             "coordination skill should name `agent.artifact` as the terminal publish"
@@ -6943,7 +7138,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// pane→agent resolution mechanism.
     #[test]
     fn supervisor_skill_documents_pane_current_path_resolution() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         assert!(
             tmpl.content.contains("tmux display-message"),
             "supervisor skill should show the tmux display-message command"
@@ -6971,7 +7166,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// collapsed so substring scans survive line rewrapping. Runs from the
     /// `1.5` heading to the next top-level workflow step.
     fn launch_sweep_window() -> String {
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let tmpl = resolve_embedded("supervisor").expect("supervisor skill resolves");
         let lowered = tmpl.content.to_lowercase();
         let start = lowered
             .find("launch-time pane sweep")
@@ -7046,7 +7241,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_paste_buffer_cross_ref_in_send_keys_section() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         let lowered = tmpl.content.to_lowercase();
         // Anchor on the "send the answer to the agent pane too" heading
         // — that's the section drift-34 owns. Fall back to a substring
@@ -7076,7 +7271,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn supervisor_skill_warns_against_git_paw_status_ordering() {
-        let tmpl = resolve("supervisor").unwrap();
+        let tmpl = resolve_embedded("supervisor").unwrap();
         // Case-sensitive search first for the literal `git paw status`
         // substring, then case-insensitive for the surrounding warning.
         assert!(
@@ -7113,7 +7308,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// after the v0.5.0 "While you're editing" heading.
     #[test]
     fn coordination_skill_contains_context_budget_after_while_editing() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let editing = tmpl
             .content
             .find("While you're editing")
@@ -7134,7 +7329,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// commit-before-compact discipline.
     #[test]
     fn coordination_skill_context_budget_covers_three_topics() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let lowered = tmpl.content.to_lowercase();
         assert!(
             lowered.contains("residual-budget heuristic"),
@@ -7155,7 +7350,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// config field is introduced in the section.
     #[test]
     fn coordination_skill_residual_budget_heuristic_in_prose() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let start = tmpl
             .content
             .find("### Context budget")
@@ -7186,7 +7381,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// appear in the documented order, each with its action labelled.
     #[test]
     fn coordination_skill_three_moments_in_priority_order() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let content = &tmpl.content;
         let scenario = content
             .find("After each spec scenario completes")
@@ -7227,7 +7422,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// matters.
     #[test]
     fn coordination_skill_states_commit_before_compact_discipline() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(
             tmpl.content
                 .contains("**Never compact, clear, or summarise without first committing"),
@@ -7250,7 +7445,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// their CLI's equivalent".
     #[test]
     fn coordination_skill_per_cli_mechanism_table() {
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         let start = tmpl
             .content
             .find("#### Per-CLI mechanism")
@@ -7282,7 +7477,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     use crate::specs::SpecBackendKind;
 
     fn render_skill(name: &str, backends: &[SpecBackendKind]) -> String {
-        let tmpl = resolve(name).unwrap_or_else(|_| panic!("resolve {name}"));
+        let tmpl = resolve_embedded(name).unwrap_or_else(|_| panic!("resolve {name}"));
         render(
             &tmpl,
             if name == "supervisor" {
@@ -7476,7 +7671,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         // The bundled template (pre-render) contains the section; rendering is
         // what gates it per engine. Satisfies the spec's "bundled coordination.md
         // is inspected" scenario.
-        let tmpl = resolve("coordination").unwrap();
+        let tmpl = resolve_embedded("coordination").unwrap();
         assert!(tmpl.content.contains("Commands you must not run"));
         assert!(tmpl.content.contains(OPSX_REGION_BEGIN));
     }
@@ -7524,22 +7719,23 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
     #[test]
     fn resolve_for_worktree_resolves_only_selected_packages() {
+        let empty = tempfile::tempdir().unwrap();
         let inputs = WorktreeInputs {
             broker_enabled: true,
             docs_base_url_configured: false,
         };
         assert!(
-            resolve_for_worktree(inputs, "coordination")
+            resolve_for_worktree(inputs, "coordination", empty.path())
                 .unwrap()
                 .is_some()
         );
         assert!(
-            resolve_for_worktree(inputs, "docs-fetch")
+            resolve_for_worktree(inputs, "docs-fetch", empty.path())
                 .unwrap()
                 .is_none()
         );
         assert!(
-            resolve_for_worktree(inputs, "orchestrator")
+            resolve_for_worktree(inputs, "orchestrator", empty.path())
                 .unwrap()
                 .is_none()
         );
@@ -7552,11 +7748,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let empty = tempfile::tempdir().unwrap();
         let mut checked = 0;
         for package in bundled_packages() {
-            let tmpl = resolve_with_config_dir(package.name, Some(empty.path())).unwrap();
-            if tmpl.source != Source::Embedded {
-                // A repo-level `.agents/skills/` override shadows this name.
-                continue;
-            }
+            let tmpl = resolve_from(package.name, &user_roots(empty.path())).unwrap();
+            assert_eq!(tmpl.source, Source::Embedded, "{}", package.name);
             let (_, body) = parse_standardized_metadata(package.skill_md.content).unwrap();
             assert_eq!(tmpl.content, body, "{}", package.name);
             checked += 1;
@@ -7588,5 +7781,549 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                     .replace("{{GIT_PAW_BROKER_URL}}", "http://b")
             );
         }
+    }
+
+    // --- skill-override-resolution: repository → user → embedded ---
+
+    /// Writes `<level_dir>/<dir_name>/SKILL.md` with valid frontmatter and
+    /// `body`, returning the `SKILL.md` path.
+    fn write_skill(level_dir: &Path, dir_name: &str, body: &str) -> PathBuf {
+        let dir = level_dir.join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: {dir_name}\ndescription: override\n---\n\n{body}"),
+        )
+        .unwrap();
+        path
+    }
+
+    /// A repository root and a user config directory under one tempdir, with
+    /// the level directories `resolve_from` reads.
+    struct Levels {
+        _tmp: tempfile::TempDir,
+        roots: SkillRoots,
+    }
+
+    impl Levels {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let roots = SkillRoots {
+                repo_root: Some(tmp.path().join("repo")),
+                user_config_dir: Some(tmp.path().join("config")),
+            };
+            std::fs::create_dir_all(roots.repo_root.as_ref().unwrap()).unwrap();
+            std::fs::create_dir_all(roots.user_config_dir.as_ref().unwrap()).unwrap();
+            Self { _tmp: tmp, roots }
+        }
+        fn repo(&self, dir_name: &str, body: &str) -> PathBuf {
+            write_skill(&self.roots.repo_skills_dir().unwrap(), dir_name, body)
+        }
+        fn user(&self, dir_name: &str, body: &str) -> PathBuf {
+            write_skill(&self.roots.user_skills_dir().unwrap(), dir_name, body)
+        }
+        fn resolve(&self, name: &str) -> Result<SkillTemplate, SkillError> {
+            resolve_from(name, &self.roots)
+        }
+    }
+
+    #[test]
+    fn resolve_falls_back_to_embedded_with_no_override() {
+        let levels = Levels::new();
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+        assert_eq!(tmpl.origin_path, None);
+        assert_eq!(tmpl.name, "coordination");
+        assert!(!tmpl.content.is_empty());
+        let clone = tmpl.clone();
+        assert_eq!(
+            (clone.name, clone.content, clone.source),
+            (tmpl.name, tmpl.content, tmpl.source)
+        );
+    }
+
+    #[test]
+    fn repository_override_is_preferred_over_embedded() {
+        let levels = Levels::new();
+        let path = levels.repo("coordination", "custom user content");
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert_eq!(tmpl.content.trim(), "custom user content");
+        assert_eq!(tmpl.origin_path, Some(path));
+    }
+
+    #[test]
+    fn user_override_is_preferred_over_embedded() {
+        let levels = Levels::new();
+        let path = levels.user("coordination", "custom user content");
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::User);
+        assert_eq!(tmpl.content.trim(), "custom user content");
+        assert_eq!(tmpl.origin_path, Some(path));
+    }
+
+    #[test]
+    fn repository_override_is_preferred_over_user_override() {
+        let levels = Levels::new();
+        levels.repo("coordination", "repo content");
+        levels.user("coordination", "user content");
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert_eq!(tmpl.content.trim(), "repo content");
+    }
+
+    #[test]
+    fn installed_package_copies_are_not_overrides() {
+        let levels = Levels::new();
+        let installed = levels
+            .roots
+            .repo_root
+            .as_ref()
+            .unwrap()
+            .join(".git-paw")
+            .join("skills");
+        write_skill(&installed, "coordination", "edited installed copy");
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+        assert_eq!(
+            tmpl.content,
+            resolve_embedded("coordination").unwrap().content
+        );
+    }
+
+    #[test]
+    fn a_legacy_flat_user_file_is_not_an_override() {
+        let levels = Levels::new();
+        let dir = levels.roots.user_skills_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("coordination.md"), "flat legacy override").unwrap();
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+    }
+
+    #[test]
+    fn an_invalid_repository_override_is_a_hard_error() {
+        let levels = Levels::new();
+        let dir = levels.roots.repo_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: coordination\n---\n\nno description",
+        )
+        .unwrap();
+        levels.user("coordination", "valid user override");
+        let result = levels.resolve("coordination");
+        assert!(
+            matches!(result, Err(SkillError::ValidationError { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_user_override_is_a_hard_error() {
+        let levels = Levels::new();
+        let dir = levels.roots.user_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: coordination\n---\n\nx").unwrap();
+        let result = levels.resolve("coordination");
+        assert!(
+            matches!(result, Err(SkillError::ValidationError { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_supervisor_user_override_applies_to_the_orchestrator_name() {
+        let levels = Levels::new();
+        levels.user("supervisor", "legacy user supervisor");
+        let tmpl = levels.resolve("orchestrator").unwrap();
+        assert_eq!(tmpl.source, Source::User);
+        assert_eq!(tmpl.name, "orchestrator");
+        assert!(tmpl.content.contains("legacy user supervisor"));
+    }
+
+    #[test]
+    fn an_orchestrator_override_wins_over_a_supervisor_override_at_one_level() {
+        let levels = Levels::new();
+        levels.repo("supervisor", "legacy supervisor");
+        levels.repo("orchestrator", "canonical orchestrator");
+        let tmpl = levels.resolve("supervisor").unwrap();
+        assert!(tmpl.content.contains("canonical orchestrator"));
+    }
+
+    #[test]
+    fn level_precedence_beats_name_precedence() {
+        let levels = Levels::new();
+        levels.repo("supervisor", "repository supervisor");
+        levels.user("orchestrator", "user orchestrator");
+        let tmpl = levels.resolve("orchestrator").unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert!(tmpl.content.contains("repository supervisor"));
+    }
+
+    #[test]
+    fn unknown_skill_with_no_override_at_either_level_is_unknown() {
+        let levels = Levels::new();
+        let result = levels.resolve("nonexistent");
+        assert!(
+            matches!(result, Err(SkillError::UnknownSkill { ref name }) if name == "nonexistent"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_user_level_falls_through_to_embedded() {
+        // No config dir at all.
+        let tmpl = resolve_from(
+            "coordination",
+            &SkillRoots {
+                repo_root: None,
+                user_config_dir: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+
+        // `<config_dir>/git-paw/` exists, `agent-skills/` does not.
+        let levels = Levels::new();
+        std::fs::create_dir_all(
+            levels
+                .roots
+                .user_config_dir
+                .as_ref()
+                .unwrap()
+                .join("git-paw"),
+        )
+        .unwrap();
+        assert_eq!(
+            levels.resolve("coordination").unwrap().source,
+            Source::Embedded
+        );
+
+        // `agent-skills/coordination/` exists without a `SKILL.md`, at
+        // either level.
+        std::fs::create_dir_all(levels.roots.user_skills_dir().unwrap().join("coordination"))
+            .unwrap();
+        std::fs::create_dir_all(levels.roots.repo_skills_dir().unwrap().join("coordination"))
+            .unwrap();
+        assert_eq!(
+            levels.resolve("coordination").unwrap().source,
+            Source::Embedded
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_user_override_is_a_hard_error_naming_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let levels = Levels::new();
+        let path = levels.user("coordination", "secret");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: permissions are not enforced.
+            return;
+        }
+        let result = levels.resolve("coordination");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = result.expect_err("unreadable override must fail");
+        assert!(
+            matches!(err, SkillError::UserOverrideRead { .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_repository_override_is_a_directory_read_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let levels = Levels::new();
+        let path = levels.repo("coordination", "secret");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return;
+        }
+        let result = levels.resolve("coordination");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            matches!(result, Err(SkillError::DirectoryReadError { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_user_override_is_a_hard_error() {
+        let levels = Levels::new();
+        let dir = levels.roots.user_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), [0xff, 0xfe, 0x00, 0xc3]).unwrap();
+        let result = levels.resolve("coordination");
+        assert!(
+            matches!(result, Err(SkillError::UserOverrideRead { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn the_cli_setup_skill_ignores_overrides_at_both_levels() {
+        let levels = Levels::new();
+        levels.repo(CLI_SETUP_SKILL, "run setup-cli --yes at boot");
+        levels.user(CLI_SETUP_SKILL, "user drift");
+        let tmpl = levels.resolve(CLI_SETUP_SKILL).unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+        assert_eq!(tmpl.origin_path, None);
+        assert_eq!(
+            tmpl.content,
+            resolve_embedded(CLI_SETUP_SKILL).unwrap().content
+        );
+        assert!(!is_overridable(CLI_SETUP_SKILL));
+        assert!(is_overridable("coordination"));
+    }
+
+    #[test]
+    fn a_broken_cli_setup_override_does_not_fail_resolution() {
+        let levels = Levels::new();
+        let dir = levels
+            .roots
+            .repo_skills_dir()
+            .unwrap()
+            .join(CLI_SETUP_SKILL);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: cli-setup\n---\n\nbroken").unwrap();
+        let tmpl = levels.resolve(CLI_SETUP_SKILL).unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+    }
+
+    #[test]
+    fn a_path_shaped_skill_name_never_reaches_an_override_directory() {
+        let levels = Levels::new();
+        // `<repo>/.agents/x/SKILL.md` would be reached by `../x`.
+        write_skill(
+            &levels.roots.repo_root.as_ref().unwrap().join(".agents"),
+            "x",
+            "escaped",
+        );
+        for name in ["../x", "..", "a/b", "a\\b", ""] {
+            assert!(
+                matches!(levels.resolve(name), Err(SkillError::UnknownSkill { .. })),
+                "{name:?}"
+            );
+        }
+    }
+
+    /// Runs `git args` in `dir`, panicking on failure.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn resolve_reads_the_main_working_tree_never_a_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let linked = tmp.path().join("linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        write_skill(
+            &linked.join(".agents").join("skills"),
+            "coordination",
+            "worktree-only override",
+        );
+
+        // The linked worktree's override is ignored, from either root. The
+        // roots are derived exactly as `resolve` derives them, with no user
+        // level so the developer's own overrides cannot interfere.
+        for root in [&linked, &main] {
+            let tmpl = resolve_from("coordination", &roots_for(root, None)).unwrap();
+            assert_eq!(tmpl.source, Source::Embedded, "{}", root.display());
+            assert!(!tmpl.content.contains("worktree-only override"));
+        }
+
+        // The main working tree's override applies, even resolved from the
+        // linked worktree.
+        write_skill(
+            &main.join(".agents").join("skills"),
+            "coordination",
+            "main override",
+        );
+        let tmpl = resolve_from("coordination", &roots_for(&linked, None)).unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert!(tmpl.content.contains("main override"));
+    }
+
+    #[test]
+    fn resolve_skips_the_repository_level_outside_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            &tmp.path().join(".agents").join("skills"),
+            "coordination",
+            "not a repository",
+        );
+        let tmpl = resolve_from("coordination", &roots_for(tmp.path(), None)).unwrap();
+        assert_eq!(tmpl.source, Source::Embedded);
+    }
+
+    #[test]
+    fn override_path_names_the_override_resolve_would_load() {
+        let levels = Levels::new();
+        assert_eq!(override_path_from("coordination", &levels.roots), None);
+        let user = levels.user("coordination", "u");
+        assert_eq!(
+            override_path_from("coordination", &levels.roots),
+            Some(user)
+        );
+        let repo = levels.repo("supervisor", "r");
+        assert_eq!(
+            override_path_from("orchestrator", &levels.roots),
+            Some(repo)
+        );
+        levels.repo(CLI_SETUP_SKILL, "ignored");
+        assert_eq!(override_path_from(CLI_SETUP_SKILL, &levels.roots), None);
+    }
+
+    #[test]
+    fn ignored_override_dirs_lists_cli_setup_directories_at_either_level() {
+        let levels = Levels::new();
+        assert!(ignored_override_dirs_from(&levels.roots).is_empty());
+        levels.repo("coordination", "not ignored");
+        let repo = levels
+            .roots
+            .repo_skills_dir()
+            .unwrap()
+            .join(CLI_SETUP_SKILL);
+        std::fs::create_dir_all(&repo).unwrap();
+        let user = levels
+            .roots
+            .user_skills_dir()
+            .unwrap()
+            .join(CLI_SETUP_SKILL);
+        std::fs::create_dir_all(&user).unwrap();
+        assert_eq!(ignored_override_dirs_from(&levels.roots), vec![repo, user]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_override_resolving_outside_its_level_is_a_hard_error() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let secret = levels
+            .roots
+            .repo_root
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("secret");
+        std::fs::write(
+            &secret,
+            "---\nname: coordination\ndescription: x\n---\n\nSECRET",
+        )
+        .unwrap();
+
+        // Repository level: SKILL.md -> a file outside `.agents/skills/`.
+        let dir = levels.roots.repo_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&secret, dir.join("SKILL.md")).unwrap();
+        levels.user("coordination", "valid user override");
+        let err = levels.resolve("coordination").expect_err("escape refused");
+        assert!(
+            matches!(err, SkillError::OverrideOutsideLevel { ref path, .. } if *path == dir.join("SKILL.md")),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&dir.join("SKILL.md").display().to_string()),
+            "{err}"
+        );
+
+        // User level: the same escape is refused too.
+        std::fs::remove_dir_all(levels.roots.repo_skills_dir().unwrap()).unwrap();
+        let user_md = levels
+            .roots
+            .user_skills_dir()
+            .unwrap()
+            .join("coordination/SKILL.md");
+        std::fs::remove_file(&user_md).unwrap();
+        symlink(&secret, &user_md).unwrap();
+        assert!(matches!(
+            levels.resolve("coordination"),
+            Err(SkillError::OverrideOutsideLevel { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_override_directory_symlinked_outside_the_repository_is_refused() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let outside = levels
+            .roots
+            .repo_root
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("outside");
+        write_skill(&outside.join("skills"), "coordination", "OUTSIDE");
+        symlink(
+            &outside,
+            levels.roots.repo_root.as_ref().unwrap().join(".agents"),
+        )
+        .unwrap();
+        assert!(matches!(
+            levels.resolve("coordination"),
+            Err(SkillError::OverrideOutsideLevel { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_stays_inside_its_level_is_followed() {
+        use std::os::unix::fs::symlink;
+        let levels = Levels::new();
+        let shared = levels.repo("shared", "SHARED BODY");
+        let dir = levels.roots.repo_skills_dir().unwrap().join("coordination");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&shared, dir.join("SKILL.md")).unwrap();
+        let tmpl = levels.resolve("coordination").unwrap();
+        assert_eq!(tmpl.source, Source::AgentsStandard);
+        assert!(tmpl.content.contains("SHARED BODY"));
     }
 }

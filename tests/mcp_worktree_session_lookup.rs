@@ -72,6 +72,7 @@ impl McpClient {
             .current_dir(cwd)
             .env("HOME", home)
             .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env_remove("XDG_CONFIG_HOME")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
