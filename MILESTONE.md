@@ -973,6 +973,32 @@ instructions*, *Per-CLI compact mechanism table*). Each is fixed by keeping the 
 REMOVED + ADDED. All six are re-checked against the v0.19.0 code (`src/agent_cli`, the helper
 refresh on supervised launch) before the build.
 
+**Triaged 2026-11-12 from the peer-4-poker run on v0.19.0** (Spec Kit project, 20 findings, PK-01
+to PK-20). Into v0.20.0, folded into changes already in flight:
+- **PK-01** — `git paw init` renders the gate commands into the orchestrator `SKILL.md`; config
+  written later leaves `(not configured)` until init is re-run, and nothing flags it →
+  `skill-package-deploy` (every `start` re-renders stale root packages from the current config).
+- **PK-07** — `doctor` before `init` shows four ✗ "bundled scripts missing", so a fresh repository
+  looks broken instead of not initialised → `skill-package-deploy` (its doctor package checks).
+- **PK-19** — `git paw init` does not gitignore `.git-paw/sessions/`, so `git add .git-paw/` would
+  commit the runtime roster → `skill-package-deploy` (it already edits the required gitignore
+  entries).
+- **PK-10** — the orchestrator's baseline assumes the root checkout can run the gates, but
+  per-worktree dependencies (`node_modules`) are missing there → `orchestrator-gate-references`
+  (the baseline step says to prepare the root checkout's dependencies, in project-agnostic words).
+- **PK-06** — the sandbox wrapper example's `CLIHOME` misses `CLAUDE_CONFIG_DIR`, `~/.claude.json`
+  and the package-manager cache, so a copied profile breaks → docs rider in v0.20.0
+  (`docs/src/user-guide/sandbox.md`).
+- **PK-12 / PK-18, worker input nobody sent** — a worker received "do T012 … next" and "poll
+  again" that no broker event or drive-log line records. The v0.20.0 dogfood showed the likely
+  source: Claude Code shows a ghost prompt suggestion in an idle worker's input, and any lone
+  Enter (the drive loop's buffered-input recovery, `tell`, an approval) submits it. → v0.20.0
+  rider, after fact-checking a documented switch for prompt suggestions: add it to the `claude`
+  operator-isolation row, or make the senders clear the input first.
+- **PK-18, the cold-cache dialog** — the "Send anyway?" dialog that swallowed a `tell` came from
+  the operator's own plugin. `worker-operator-isolation` (merged) keeps operator plugins out of
+  workers.
+
 ---
 
 ## v0.21.0 — Pre-freeze contract + DX hardening (planned)
@@ -1208,6 +1234,31 @@ Stale premises found while speccing:
 - **Architecture:** the config loader still prints warnings with a process-global dedupe; return
   them as values like the agent-CLI layer now does (with F10–F15 in v0.24.0).
 
+
+**Deferred here 2026-11-12 from the peer-4-poker run on v0.19.0** (see v0.20.0 for the triage):
+- **Spec Kit wave planning:** `--from-all-specs` launches the first open phase of every spec in
+  one wave (14 workers), ignoring a plan's "Phase 1 must merge first" gate and human-only tasks
+  (PK-03); the `[P]` split ignores intra-phase dependencies (PK-05), and `[P]` siblings cannot
+  import each other's exports, so types get re-declared (PK-17).
+- **Names:** branch and worktree names come from the full task text (80+ characters, PK-04);
+  cap them with the slugify unification above.
+- **Conflict detector:** every split Spec Kit phase starts with a false-positive forward conflict
+  on `specs/<feature>/tasks.md`, whose checkbox writeback is mandatory for each worker (PK-08).
+- **Unattended launch:** `--unattended` blocks the launching command, and the broker is
+  unreachable while per-worktree `on_create` runs (about a minute of `npm ci`), so the
+  orchestrator's bootstrap publish fails with no hint to wait (PK-09).
+- **Verdict and merge truth:** merging a tip newer than the verified one is not caught; the
+  broker or `advanced-main` should check the merged tip against the last verified SHA (PK-13).
+  The drive-loop summary counts a branch merged only if its current tip is on main, so a worker
+  that committed after the merge reads as unmerged (PK-14). Workers keep working after their
+  terminal commit, and `tell` refuses mid-response, so scope creep cannot be stopped (PK-12,
+  PK-16; with DF-21/37/40 above).
+- **Spend:** 68.5M tokens for three small Phase 1 workers in 34 minutes, 99% cache reads (PK-15;
+  with DF-48 and `dashboard-usage-view`).
+- **Config:** `[clis.*].command` needs an absolute path for a repository-local wrapper, so the
+  committed config carries a machine-specific path; resolve a relative `command` against the
+  repository root (PK-20). The init comment points Spec Kit at `.specify/specs`, but real projects
+  keep features in `specs/<NNN-feature>/` (PK-02).
 ---
 
 ## v0.22.0 — Session recording & replay, rethought (planned)
@@ -1314,6 +1365,10 @@ the per-CLI provider layer; this cycle checks it CLI by CLI and publishes the re
   CLI that can't reach launch-only is dropped from detection.
 - **Freeze tie-in:** v1.0.0 freezes the tier definitions and the first-class list, not the whole
   detection list.
+
+**From the peer-4-poker run on v0.19.0 (2026-11-12):** workers launched with
+`--dangerously-skip-permissions` show "auto mode on" in Claude Code 2.1.322; the approval-flag
+mapping was verified against 2.1.220 only (PK-11). Re-verify every level's flags.
 
 ### Sequencing & process
 
