@@ -405,19 +405,19 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "claude",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local",
         ),
         (
             "claude",
             ApprovalLevel::FullAuto,
             LaunchSession::Assign("u1"),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --dangerously-skip-permissions --session-id u1",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --dangerously-skip-permissions --session-id u1",
         ),
         (
             "claude",
             ApprovalLevel::Auto,
             LaunchSession::Resume("u1"),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume u1",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --permission-mode acceptEdits --resume u1",
         ),
         (
             "codex",
@@ -430,13 +430,13 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "sonnet",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local",
         ),
         (
             "sonnet",
             ApprovalLevel::FullAuto,
             LaunchSession::Resume("u2"),
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --dangerously-skip-permissions --resume u2",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local --dangerously-skip-permissions --resume u2",
         ),
         // A configured command is one shell word.
         (
@@ -503,11 +503,11 @@ fn two_profiles_of_one_executable_keep_their_own_args() {
     let level = ApprovalLevel::Manual;
     assert_eq!(
         CliProfile::resolve("sonnet", &map).launch_command(&level, LaunchSession::None),
-        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local"
     );
     assert_eq!(
         CliProfile::resolve("opus", &map).launch_command(&level, LaunchSession::None),
-        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus --setting-sources project,local"
     );
 }
 
@@ -519,7 +519,7 @@ fn an_identity_with_trailing_flags_keeps_its_base_cli_facets() {
     assert_eq!(profile.family(), CliFamily::Claude);
     assert_eq!(
         profile.launch_command(&ApprovalLevel::FullAuto, LaunchSession::Assign("abc")),
-        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x --setting-sources project,local --dangerously-skip-permissions --session-id abc"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model x --setting-sources project,local --dangerously-skip-permissions --session-id abc"
     );
 }
 
@@ -546,6 +546,7 @@ fn the_claude_family_declares_its_isolation() {
         &[
             ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CODE_PLUGIN_DIRS", ""),
+            ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
         ]
     );
 }
@@ -582,7 +583,7 @@ fn a_claude_worker_is_launched_isolated() {
     assert_eq!(
         CliProfile::resolve("opus", &map)
             .launch_command(&ApprovalLevel::Auto, LaunchSession::Assign("abc")),
-        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus \
          --setting-sources project,local --permission-mode acceptEdits --session-id abc"
     );
 }
@@ -593,7 +594,7 @@ fn recovery_keeps_the_isolation() {
     let cmd = CliProfile::resolve("claude", &HashMap::new())
         .launch_command(&ApprovalLevel::Manual, LaunchSession::Resume("u9"));
     assert!(
-        cmd.starts_with("env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude"),
+        cmd.starts_with("env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude"),
         "{cmd}"
     );
     let sources = cmd
@@ -616,8 +617,49 @@ fn opting_out_restores_the_previous_launch() {
         "--setting-sources",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
         "CLAUDE_CODE_PLUGIN_DIRS",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
     ] {
         assert!(!cmd.contains(absent), "{cmd}");
+    }
+}
+
+/// Scenario "An isolated claude worker gets no prompt suggestions".
+#[test]
+fn an_isolated_claude_worker_gets_no_prompt_suggestions() {
+    let mut sonnet = entry("claude");
+    sonnet.family = Some("claude".to_string());
+    sonnet.args = Some("--model sonnet".to_string());
+    let map = clis(&[("sonnet", sonnet)]);
+    for session in [
+        LaunchSession::None,
+        LaunchSession::Assign("abc"),
+        LaunchSession::Resume("abc"),
+    ] {
+        let cmd = CliProfile::resolve("sonnet", &map).launch_command(&ApprovalLevel::Auto, session);
+        let (env_prefix, _) = cmd.split_once(" claude ").expect("env prefix");
+        assert!(
+            env_prefix.starts_with("env ")
+                && env_prefix
+                    .split(' ')
+                    .any(|a| a == "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"),
+            "{cmd}"
+        );
+    }
+}
+
+/// Scenario "An opted-out claude worker keeps the operator's setting".
+#[test]
+fn an_opted_out_claude_worker_keeps_the_operators_setting() {
+    let mut claude = entry("claude");
+    claude.inherit_operator_config = true;
+    let map = clis(&[("claude", claude)]);
+    for approval in [ApprovalLevel::Manual, ApprovalLevel::Auto] {
+        let cmd = CliProfile::resolve("claude", &map)
+            .launch_command(&approval, LaunchSession::Assign("abc"));
+        assert!(
+            !cmd.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"),
+            "{cmd}"
+        );
     }
 }
 
@@ -748,7 +790,7 @@ fn native_sandbox_arguments_sit_after_args_and_before_approval_flags() {
             "opus",
             &map,
             ApprovalLevel::Auto,
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus \
              --setting-sources project,local --confine . --permission-mode acceptEdits",
         ),
         (
@@ -880,7 +922,7 @@ fn a_known_name_may_point_at_another_install() {
         profile
             .launch_command(&ApprovalLevel::Manual, LaunchSession::None)
             .starts_with(&format!(
-                "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= {}",
+                "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false {}",
                 alt_claude.to_string_lossy()
             ))
     );

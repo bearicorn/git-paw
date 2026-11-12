@@ -13,9 +13,10 @@
 //!   launch hands them to the CLI.
 //!
 //! The CLI is a stub named `claude` on `PATH` that records its argv and the
-//! two isolation variables, distinguishing unset from empty, then reads stdin
-//! so the pane stays alive. The launching environment sets
-//! `CLAUDE_CODE_PLUGIN_DIRS`, as an operator's would.
+//! three isolation variables, distinguishing unset from empty, then reads
+//! stdin so the pane stays alive. The launching environment sets
+//! `CLAUDE_CODE_PLUGIN_DIRS` and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true`,
+//! as an operator's would.
 //!
 //! Skips if tmux is unavailable.
 
@@ -43,7 +44,7 @@ const OPERATOR_PLUGIN_DIRS: &str = "/operator/plugins";
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// What every isolated launch hands the CLI, after its argv.
-const ISOLATED_ENV: &str = "|MEM=1|PLUG=";
+const ISOLATED_ENV: &str = "|MEM=1|PLUG=|SUGG=false";
 
 fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
@@ -91,9 +92,10 @@ fn stub() -> Stub {
     let log_dir = TempDir::new().expect("stub log dir");
     let log = log_dir.path().join("stub.log");
     let script = format!(
-        "#!/bin/sh\nprintf '{MARKER}%s|MEM=%s|PLUG=%s\\n' \"$*\" \
+        "#!/bin/sh\nprintf '{MARKER}%s|MEM=%s|PLUG=%s|SUGG=%s\\n' \"$*\" \
          \"${{CLAUDE_CODE_DISABLE_AUTO_MEMORY-unset}}\" \
-         \"${{CLAUDE_CODE_PLUGIN_DIRS-unset}}\" >> '{log}'\n\
+         \"${{CLAUDE_CODE_PLUGIN_DIRS-unset}}\" \
+         \"${{CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION-unset}}\" >> '{log}'\n\
          while IFS= read -r line; do :; done\n",
         log = log.display()
     );
@@ -183,7 +185,7 @@ fn claude_settings_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Runs `git paw <args>` in `repo` with the stub on `PATH` and the operator's
-/// plugin directories in the environment.
+/// plugin directories and prompt-suggestion setting in the environment.
 fn paw(
     repo: &Path,
     home: &Path,
@@ -197,6 +199,7 @@ fn paw(
         .env("HOME", home)
         .env("PATH", &st.path_env)
         .env("CLAUDE_CODE_PLUGIN_DIRS", OPERATOR_PLUGIN_DIRS)
+        .env("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true")
         .env_remove("XDG_DATA_HOME")
         .args(args)
         .timeout(Duration::from_secs(60))
@@ -288,7 +291,7 @@ fn start_and_add_launch_claude_workers_with_identical_isolation() {
         );
         assert!(
             launch.ends_with(ISOLATED_ENV),
-            "auto memory off and the operator's plugin dirs emptied: {launch}"
+            "auto memory off, the operator's plugin dirs emptied and prompt suggestions off: {launch}"
         );
     }
     let isolation = |l: &str| {

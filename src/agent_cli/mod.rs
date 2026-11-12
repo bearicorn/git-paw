@@ -351,11 +351,15 @@ impl CliProvider for ClaudeProvider {
     /// `CLAUDE_CODE_PLUGIN_DIRS` loads plugins whatever the setting sources
     /// unless it is emptied, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns off
     /// the auto memory every worktree of a repository shares.
+    /// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (verified 2026-11-12,
+    /// `worker-prompt-suggestions-off`) keeps an idle worker's input box
+    /// empty, so a lone Enter from git-paw cannot submit a predicted message.
     fn operator_isolation(&self) -> OperatorIsolation {
         OperatorIsolation {
             env: &[
                 ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
                 ("CLAUDE_CODE_PLUGIN_DIRS", ""),
+                ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
             ],
             args: "--setting-sources project,local",
         }

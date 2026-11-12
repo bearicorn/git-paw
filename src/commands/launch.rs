@@ -1706,7 +1706,7 @@ mod permission_seeding_removed_tests {
 
         assert_eq!(
             start_command,
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --permission-mode acceptEdits"
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local --permission-mode acceptEdits"
         );
         assert_eq!(
             attached.pane.launch_command,
