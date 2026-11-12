@@ -598,8 +598,13 @@ fn a_supervised_launch_refreshes_a_stale_root_helper_script() {
     fs::write(root.join(".git-paw/config.toml"), EXPORT_CONFIG).expect("config");
     let (ok, init_out, _) = run_paw(root, home.path(), &tmux_env, &["init"]);
     assert!(ok, "init failed:\n{init_out}");
-    let sweep = root.join(".git-paw/scripts/sweep.sh");
-    fs::write(&sweep, "#!/usr/bin/env bash\necho unknown subcommand\n").expect("stale sweep");
+    let sweeps = [
+        root.join(".git-paw/skills/orchestrator/scripts/sweep.sh"),
+        root.join(".git-paw/scripts/sweep.sh"),
+    ];
+    for sweep in &sweeps {
+        fs::write(sweep, "#!/usr/bin/env bash\necho unknown subcommand\n").expect("stale sweep");
+    }
 
     let (ok, stdout, stderr) = run_paw(
         root,
@@ -614,7 +619,14 @@ fn a_supervised_launch_refreshes_a_stale_root_helper_script() {
         .find(|(name, _)| *name == "sweep.sh")
         .map(|(_, content)| content)
         .expect("sweep.sh is bundled");
-    assert_eq!(fs::read_to_string(&sweep).unwrap(), bundled);
-    let mode = fs::metadata(&sweep).unwrap().permissions().mode();
-    assert_eq!(mode & 0o111, 0o111, "sweep.sh stays executable");
+    for sweep in &sweeps {
+        assert_eq!(
+            fs::read_to_string(sweep).unwrap(),
+            bundled,
+            "{}",
+            sweep.display()
+        );
+        let mode = fs::metadata(sweep).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "{} stays executable", sweep.display());
+    }
 }

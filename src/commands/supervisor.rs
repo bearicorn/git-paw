@@ -677,20 +677,15 @@ pub fn supervisor(
             .unwrap_or_else(|| agent_cli.clone()),
     )?;
 
-    // Resolve the coordination skill once for all agent panes.
     let worktree_inputs = crate::skills::WorktreeInputs {
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let coordination_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", repo_root)?;
-
-    // Resolve the docs-fetch skill once, gated on an explicitly-configured
-    // `docs_base_url`. Left unset (the default points at git-paw's own site),
-    // the skill is not injected — a consumer only gets it once they have
-    // pointed git-paw at their own docs, keeping the exported skill agnostic.
-    let docs_fetch_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch", repo_root)?;
+    // Resolve the worktree package selection once: the same packages are
+    // provisioned into each worktree and injected into its managed block.
+    // `docs-fetch` is selected only for an explicitly-configured
+    // `docs_base_url`, keeping the exported skill agnostic by default.
+    let worktree_packages = crate::skills::resolve_worktree_packages(worktree_inputs, repo_root)?;
 
     // Peer branches for the inter-agent rules block. Held as a slice rather
     // than a pre-rendered string: `build_inter_agent_rules` interpolates each
@@ -736,8 +731,7 @@ pub fn supervisor(
             broker_config: &broker_config,
             agent_cli: &branch_cli,
             approval: agent_approval,
-            coordination_template: coordination_template.as_ref(),
-            docs_fetch_template: docs_fetch_template.as_ref(),
+            packages: &worktree_packages,
             gate_commands: &gate_commands,
             session_backends: &session_backends,
             inter_agent_rules_peers: Some(&branch_refs),
@@ -1100,10 +1094,10 @@ pub fn revive_for_drive(
     Ok((state, broker_config))
 }
 
-/// Refreshes the exported skills (`.git-paw/skills/orchestrator/SKILL.md` and
-/// `.git-paw/skills/cli-setup/SKILL.md`, with the same session-independent
-/// inputs `git paw init` uses, so neither lags the config or the binary) and
-/// the bundled root helper scripts under `.git-paw/scripts/`, and
+/// Installs the bundled packages at the repository root
+/// (`.git-paw/skills/<package>/`, with the same session-independent inputs
+/// `git paw init` uses, so none lags the config or the binary) with their
+/// helpers' compatibility copies under `.git-paw/scripts/`, and
 /// writes the orchestrator's session context into the repo-root sidecar
 /// `.git-paw/AGENTS.local.md`: the session's name and broker URL, the helpers,
 /// the drive-loop directive when `unattended`, and the governance section,
@@ -1121,9 +1115,9 @@ fn write_orchestrator_context(
     unattended: bool,
     orchestrator_cli: &str,
 ) -> Result<(), PawError> {
-    crate::init::export_skills(repo_root, config)?;
-    // The skill teaches the helpers' subcommands, so the helpers must match it.
-    crate::init::refresh_root_scripts(repo_root)?;
+    // Install the root packages — the orchestrator skill teaches the helpers'
+    // subcommands, so skill and helpers are refreshed together.
+    crate::init::refresh_root_scripts(repo_root, config)?;
     let template = crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL, repo_root)?;
     let assignment = crate::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),
@@ -1143,6 +1137,7 @@ fn write_orchestrator_context(
             unattended,
             &config.governance,
         )),
+        skill_packages: Vec::new(),
         inter_agent_rules: None,
     };
     crate::agents::setup_worktree_agents_md(repo_root, repo_root, &assignment)

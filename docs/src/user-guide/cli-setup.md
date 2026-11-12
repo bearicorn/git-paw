@@ -62,12 +62,15 @@ differently configured repositories plan byte-identical entries.
 
 That is **twelve** allow entries in total.
 
-Each entry names the helper by its relative invocation path, like
-`Bash(.git-paw/scripts/broker.sh *)`. No entry names an interpreter, an
-absolute path, a directory wildcard or `curl`.
+Each entry names the helper by its relative package invocation path,
+`.git-paw/skills/<package>/scripts/<helper>`, derived from the bundled package
+registry — like `Bash(.git-paw/skills/coordination/scripts/broker.sh *)`. No
+entry names the deprecated compatibility path `.git-paw/scripts/<helper>`
+(nothing bundled invokes it), an interpreter, an absolute path, a directory
+wildcard or `curl`.
 
 `sweep.sh events` is granted — as
-`Bash(.git-paw/scripts/sweep.sh events *)` — because it only reads the
+`Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)` — because it only reads the
 broker's log and status to serve the
 [event long poll](coordination.md#the-bundled-helper-verb). It sends no
 keystroke and publishes no verdict.
@@ -78,15 +81,18 @@ What is withheld, and why:
   is a read-anywhere and exfiltration primitive; `find` only fetches the one
   configured index.
 - **`sweep.sh approve`** presses keys in another pane. It also gets an
-  explicit **ask** rule, so it prompts even if some broader rule of your own
-  would otherwise allow it.
+  explicit **ask** rule — at the package path *and* at the compatibility path
+  `.git-paw/scripts/sweep.sh`, because the compatibility copy still runs — so
+  it prompts even if some broader rule of your own would otherwise allow it.
 - **`sweep.sh tell`** types a message into another agent's input. A
   pre-approved `tell` would let one agent relay text into a peer's pane
   without anyone seeing it, so it is never granted and gets its own **ask**
-  rule, `Bash(.git-paw/scripts/sweep.sh tell *)`, like `approve`. A broad
-  allow rule you wrote yourself, such as `Bash(.git-paw/scripts/sweep.sh *)`,
-  covers `tell` too and lets it run silently wherever that `ask` rule is
-  missing; `git paw doctor` reports such a rule as grant residue.
+  rules, `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)` and
+  `Bash(.git-paw/scripts/sweep.sh tell *)`, like `approve`. A broad allow rule
+  you wrote yourself, such as `Bash(.git-paw/scripts/sweep.sh *)` or
+  `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)`, covers `tell` too
+  and lets it run silently wherever those `ask` rules are missing;
+  `git paw doctor` reports such a rule as grant residue.
 - **`sweep.sh verified` and `feedback-gate`** publish supervisor verdicts, and
   **`conflict-ack`** writes feedback into other agents' inboxes. The target
   file reaches worker sessions as well as the supervisor's, so granting these
@@ -110,14 +116,19 @@ alone — it writes these in the same file and the same replacement:
 
 | Rule | Where | Why |
 |---|---|---|
-| `Edit(**/.git-paw/scripts/**)` | deny | refuses the CLI's file-editing tools on any helper directory, at any depth |
+| `Edit(**/.git-paw/skills/**)` | deny | refuses the CLI's file-editing tools on any installed skill package — the granted helpers under its `scripts/` included — at any depth |
+| `Edit(**/.git-paw/scripts/**)` | deny | the same for any compatibility helper directory, because the copies still run |
 | `Edit(**/.git-paw/config.toml)` | ask | the helpers read this file (the broker address), so a change to it always prompts |
 
-The fact gate confirmed both against the installed CLI, including that the
-deny rule also blocks the filesystem commands `acceptEdits` auto-approves
-(`sed -i`, `cp`, `mv`, `rm`, `touch`, and `cd`-prefixed forms). `git paw
-doctor` additionally warns when a granted helper no longer matches the copy
-the binary bundles.
+The whole package directory is denied, not just its `scripts/`: nothing an
+agent should edit lives there. The fact gate confirmed both deny rules against
+the installed CLI (Claude Code 2.1.322), including that they block the Edit
+and Write tools and every filesystem command `acceptEdits` auto-approves
+(`cp`, `mv`, `rm`, `touch`, `mkdir`, a `printf` redirect, plus `sed -i` and
+`cd`-prefixed forms) against a package helper, its `_paw_common.sh`, a package
+`SKILL.md`, a worker's package copy and a compatibility copy.
+`git paw doctor` additionally warns when a helper at a path an applied allow
+entry names no longer matches the copy the binary bundles.
 
 ## Using it
 
@@ -172,7 +183,9 @@ what was recorded, and still of a shape the item produces. Anything else — an
 entry you edited, an entry someone added to the record by hand — is reported
 and dropped from the record, never removed from your file. The protection
 rules stay as long as any allow entry still names a path under
-`.git-paw/scripts/`, including one you added yourself.
+`.git-paw/scripts/` or `.git-paw/skills/`, including one you added yourself.
+Undo accepts entries at either path shape, so a record written by v0.17.0 –
+v0.19.0 (which granted `.git-paw/scripts/…`) undoes cleanly.
 
 Undo removes entries, not containers: an `allow`/`ask`/`deny` list that setup
 created and undo emptied is left in place, empty. An empty list grants
@@ -181,6 +194,34 @@ it created.
 
 A file git-paw created is deleted only when nothing but its own skeleton is
 left; if you added a key of your own, the file stays.
+
+### Upgrading from v0.19.0 or earlier
+
+The helpers moved into their skill packages: the grant table now names
+`.git-paw/skills/<package>/scripts/<helper>`, and the old
+`.git-paw/scripts/<helper>` is a deprecated compatibility copy (see
+[Installed packages](skill-templates.md#installed-packages)). An allowlist
+applied by an earlier version still grants the old paths, which agents no
+longer call, so:
+
+- `git paw doctor` reports the applied setup **out of date**;
+- until you re-apply, every helper call at the package path prompts (and is
+  escalated under `--unattended`);
+- git-paw never rewrites your recorded grants itself.
+
+Re-apply when you are ready:
+
+```bash
+git paw setup-cli claude --undo
+git paw setup-cli claude --allowlist
+```
+
+`--undo` removes the old-path entries and their protection; the new plan adds
+the package-path entries, both deny rules and the ask rules at both paths. A
+CLI allow rule you wrote by hand for `.git-paw/scripts/…` should name
+`.git-paw/skills/<package>/scripts/…` instead. Review any "don't ask again"
+rule a CLI saved for `.git-paw/scripts/…` — it keeps granting the
+compatibility copy; `git paw doctor` lists the wide ones.
 
 ### Upgrading from 0.17.0 or earlier
 
@@ -212,8 +253,11 @@ confirmed against an installed copy of that CLI.
   and the command exits `2`. `--undo` keeps working, so entries written by an
   earlier version can still be removed.
 
-The `claude` allowlist item ships **verified**, against Claude Code 2.1.220
-(2026-10-15). `git paw doctor` reports the current status.
+The `claude` allowlist item ships **verified**, against Claude Code 2.1.322
+(2026-11-12), for the package-path entries and both deny rules. A
+confirmation made only for the pre-package `.git-paw/scripts/` entries (as
+v0.17.0–v0.19.0's, against 2.1.220) would not count for them; the fact gate
+was re-run for this release. `git paw doctor` reports the current status.
 
 Claude Code variants (a wrapper binary registered under another name) are
 covered by `git paw setup-cli claude`: the target settings file belongs to the
@@ -251,6 +295,21 @@ Read these before applying the item:
   the same file when you answer "don't ask again"; a write that lands between
   git-paw's re-read and its rename would be lost. git-paw detects the change
   and stops rather than clobbering it.
+- **Re-run setup soon after upgrading.** Until you run `--undo` then
+  `--allowlist`, an allowlist applied by v0.19.0 or earlier carries only the
+  old `Edit(**/.git-paw/scripts/**)` deny rule. If you answer "don't ask
+  again" to a prompt for a package-path helper in that window, the CLI saves
+  a grant for `.git-paw/skills/…` that no deny rule protects, so an agent in
+  an edit-accepting mode could rewrite that helper and have the grant run it.
+  Re-apply the item (which adds `Edit(**/.git-paw/skills/**)`) before
+  approving package-path prompts durably, and review any grant you saved
+  meanwhile.
+- **Durable grants on the old path keep working.** A "don't ask again" rule
+  or a hand-written rule for `.git-paw/scripts/…` still grants the
+  compatibility copy, which still runs. The re-applied item keeps
+  `Edit(**/.git-paw/scripts/**)` so the copies stay protected, and
+  `git paw doctor` lists the wide ones; review and remove what you did not
+  intend — git-paw edits none of them.
 - **A grant is not a judgement about safety.** git-paw decides nothing about
   your prompts. What runs without one is decided entirely by the agent CLI's
   own permission system and the rules in its settings.

@@ -255,7 +255,11 @@ fn the_plan_names_the_main_checkout_file_and_its_entries() {
         out.contains(&sandbox.settings().display().to_string()),
         "the plan names the absolute target path: {out}"
     );
-    assert!(out.contains("Bash(.git-paw/scripts/broker.sh *)"), "{out}");
+    assert!(
+        out.contains("Bash(.git-paw/skills/coordination/scripts/broker.sh *)"),
+        "{out}"
+    );
+    assert!(out.contains("Edit(**/.git-paw/skills/**)"), "{out}");
     assert!(out.contains("Edit(**/.git-paw/scripts/**)"), "{out}");
     assert!(
         out.contains(&sandbox.record().display().to_string()),
@@ -459,7 +463,7 @@ fn yes_applies_the_plan_records_it_and_leaves_git_status_clean() {
     assert!(
         allow
             .iter()
-            .any(|v| v == "Bash(.git-paw/scripts/sweep.sh events *)"),
+            .any(|v| v == "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)"),
         "the read-only events grant must be written; got {allow:?}"
     );
     assert!(
@@ -468,6 +472,13 @@ fn yes_applies_the_plan_records_it_and_leaves_git_status_clean() {
             .expect("deny")
             .iter()
             .any(|v| v == "Edit(**/.git-paw/scripts/**)")
+    );
+    assert!(
+        written["permissions"]["deny"]
+            .as_array()
+            .expect("deny")
+            .iter()
+            .any(|v| v == "Edit(**/.git-paw/skills/**)")
     );
 
     let record: serde_json::Value =
@@ -498,7 +509,8 @@ fn unrelated_settings_keep_their_value_and_order() {
     assert_eq!(written["permissions"]["deny"][0], "y");
     assert_eq!(written["permissions"]["allow"][0], "z");
     assert_eq!(
-        written["permissions"]["allow"][1], "Bash(.git-paw/scripts/broker.sh *)",
+        written["permissions"]["allow"][1],
+        "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
         "git-paw's entries follow the user's"
     );
     assert!(
@@ -578,7 +590,9 @@ fn undo_deletes_a_file_it_created_and_leaves_nothing_behind() {
 #[test]
 fn an_entry_the_user_already_had_is_never_claimed_by_undo() {
     let sandbox = Sandbox::new();
-    sandbox.write_settings(r#"{"permissions":{"allow":["Bash(.git-paw/scripts/broker.sh *)"]}}"#);
+    sandbox.write_settings(
+        r#"{"permissions":{"allow":["Bash(.git-paw/skills/coordination/scripts/broker.sh *)"]}}"#,
+    );
     sandbox
         .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
         .assert()
@@ -599,7 +613,7 @@ fn an_entry_the_user_already_had_is_never_claimed_by_undo() {
         .collect();
     assert_eq!(
         allow,
-        vec!["Bash(.git-paw/scripts/broker.sh *)"],
+        vec!["Bash(.git-paw/skills/coordination/scripts/broker.sh *)"],
         "the entry the user wrote themselves survives undo"
     );
 }

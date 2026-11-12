@@ -6,12 +6,18 @@
 //! repository root — never from a command argument, from the consumer's
 //! configuration or from repository content.
 
-/// Directory, relative to a session's working directory, that git-paw's
-/// bundled helper scripts are invoked from.
+/// The deprecated compatibility directory, relative to a session's working
+/// directory, that every installed helper is also copied to.
 ///
-/// Agents call the helpers by this relative path, which is what makes a
-/// path-scoped allow rule possible in the first place.
-pub const HELPER_DIR: &str = ".git-paw/scripts";
+/// Nothing bundled invokes a helper here, so no allow entry names it; the ask
+/// rules and the protection still cover it because the copies still run, and
+/// undo and doctor still recognise entries written for it by v0.17.0–v0.19.0.
+pub const HELPER_DIR: &str = crate::init::COMPAT_SCRIPTS_DIR;
+
+/// The directory, relative to a session's working directory, that the bundled
+/// packages — and with them the helpers' invocation paths
+/// (`.git-paw/skills/<package>/scripts/<helper>`) — are installed under.
+pub const PACKAGE_DIR: &str = crate::skills::INSTALL_DIR;
 
 /// A setup item: one coherent change git-paw can make to an agent CLI's own
 /// configuration.
@@ -170,13 +176,14 @@ pub const SWEEP_NEVER_GRANTED: &[&str] = &[
     "classify",
 ];
 
-/// The `sweep.sh` subcommands that are pinned to the CLI's "always ask" rules.
+/// The `sweep.sh` subcommands that are pinned to the CLI's "always ask" rules,
+/// at the package path and at the compatibility path alike.
 ///
 /// Both send keystrokes to another pane: `approve` answers a prompt and
 /// `tell` types a message. An ask rule wins over any matching allow rule,
-/// including a broader `sweep.sh *` grant a user may already have, so pinning
-/// them here means each always reaches a human (gate F4 confirmed this in
-/// every permission mode tested).
+/// including a broader `sweep.sh *` grant a user may already have at either
+/// path, so pinning them here means each always reaches a human (gate F4
+/// confirmed this in every permission mode tested for the pre-package path).
 pub const SWEEP_ASK_SUBCOMMANDS: &[&str] = &["approve", "tell"];
 
 /// A rule the allowlist item writes to protect the helpers it grants
@@ -206,8 +213,16 @@ pub enum ProtectionKind {
 /// grant run arbitrary code. The grants are never planned without them.
 pub const PROTECTION_RULES: &[ProtectionRule] = &[
     ProtectionRule {
-        // Refuses the CLI's file-editing tools on any helper-script directory
-        // at any depth under the session's working directory.
+        // Refuses the CLI's file-editing tools on any installed skill package
+        // — the granted helpers under its `scripts/` included — at any depth
+        // under the session's working directory. The whole package directory
+        // is denied: nothing an agent should edit lives there.
+        value: "Edit(**/.git-paw/skills/**)",
+        kind: ProtectionKind::Deny,
+    },
+    ProtectionRule {
+        // The same refusal for any compatibility helper-script directory: the
+        // copies still run, so they need the same protection.
         value: "Edit(**/.git-paw/scripts/**)",
         kind: ProtectionKind::Deny,
     },
@@ -260,29 +275,40 @@ impl CliSetupFacts {
 
 /// The `claude` row.
 ///
-/// **Evidence.** Every fact below was confirmed by the change's fact gate
-/// (`design.md`, "Fact gate procedure") against Claude Code 2.1.220 on
-/// macOS 15.7.7 (arm64) on 2026-10-15, outcome O1 — every blocking step
-/// passed. In particular:
+/// **Evidence.** Every fact below was confirmed for the package-path entries
+/// and both deny rules by `skill-package-deploy`'s re-run of the fact gate
+/// (`design.md`, "Fact gate re-run") against Claude Code 2.1.322 on macOS
+/// (arm64) on 2026-11-12, driving `claude -p --output-format stream-json`
+/// with only the local settings loaded and prompts disabled — every blocking
+/// step passed. (`cli-setup-consent` first confirmed the pre-package
+/// `.git-paw/scripts/` entries against Claude Code 2.1.220 on 2026-10-15.) In
+/// particular:
 ///
 /// - a session whose working directory is a nested worktree reads the **main
 ///   checkout's** `.claude/settings.local.json`, and runs that worktree's own
-///   helper copy (F1a); the rule also works for a session at the root (F1e);
+///   package copy (F1a); the rule also works for a session at the root (F1e);
 ///   with no settings file the same invocation is denied (F1c, control);
 /// - the space form matches both a bare invocation and an argument-bearing one
-///   (F2a/F2b2/F2c1), so no extra exact-form entries are needed, and it does
-///   not bleed into a longer verb (F2c5, `snapshotx` refused);
-/// - environment prefixes, `env`/`bash` wrappers, extra compound segments and
-///   command substitutions do not ride on a grant (F2d1–F2d4, F3b–F3e);
-/// - the `approve` ask rule wins over the matching allow rules in `manual`,
-///   `acceptEdits` and `auto` (F4);
-/// - [`PROTECTION_RULES`] hold: the deny rule blocks the Edit **and** Write
-///   tools, at any depth, from a worker's working directory and from the root
-///   session reaching into a worker's copy (F5a–F5e), and it also blocks every
-///   filesystem command `acceptEdits` auto-approves — `sed -i`, `cp`, `mv`,
-///   `rm`, `touch`, a `printf` redirect and both `cd`-prefixed forms (F6-1…9),
-///   while an ordinary file outside the denied directory is still edited
-///   without a prompt (F5g/F6-ctl, controls).
+///   (F2a/F2b2/F2c1–F2c3), so no extra exact-form entries are needed, and it
+///   does not bleed into a longer verb (F2c5, `snapshotx` refused) or a
+///   withheld subcommand (F2c6 `docs-fetch.sh get`, F2c7 `sweep.sh verified`);
+/// - environment prefixes, `env`/`bash`/`sh` wrappers, extra compound segments,
+///   command substitutions and a pipe into `sh` do not ride on a grant
+///   (F2d1–F2d4, F3b–F3e);
+/// - the `approve` and `tell` ask rules win over a matching broad allow rule,
+///   at the package path and at the compatibility path, in `manual`,
+///   `acceptEdits` and `auto` (F4; the broad rules themselves allow other
+///   subcommands, F4-ctl/F4-ctl2);
+/// - [`PROTECTION_RULES`] hold: the deny rules block the Edit **and** Write
+///   tools on a package helper, its `_paw_common.sh`, a package `SKILL.md` and
+///   a compatibility copy, at any depth, from a worker's working directory and
+///   from the root session reaching into a worker's copy (F5a–F5f), and they
+///   block every filesystem command `acceptEdits` auto-approves on 2.1.322 —
+///   `cp`, `mv`, `rm`, `touch`, `mkdir` and a `printf` redirect — against each
+///   of those targets, plus `sed -i` and both `cd`-prefixed forms (F6-1…20);
+///   an ordinary file is still edited without a prompt (F5g/F6-ctl), and
+///   without the deny rules the same writes to a package go through unprompted
+///   (no-deny controls), so the refusals are the rules' doing.
 pub const CLAUDE: CliSetupFacts = CliSetupFacts {
     identity: "claude",
     items: &[SetupItem::Allowlist],
@@ -292,7 +318,7 @@ pub const CLAUDE: CliSetupFacts = CliSetupFacts {
     ask_key_path: &["permissions", "ask"],
     deny_key_path: &["permissions", "deny"],
     verified: true,
-    verified_with: "Claude Code 2.1.220, 2026-10-15",
+    verified_with: "Claude Code 2.1.322, 2026-11-12",
 };
 
 /// The per-CLI setup fact table.
@@ -310,9 +336,11 @@ pub fn row_for(identity: &str) -> Option<&'static CliSetupFacts> {
     FACT_TABLE.iter().find(|row| row.identity == identity)
 }
 
-/// Returns the invocation path a rule names for one bundled helper.
+/// Returns the invocation path a rule names for one bundled helper: its
+/// package path, derived from the package registry.
 fn helper_path(script: &str) -> String {
-    format!("{HELPER_DIR}/{script}")
+    crate::skills::helper_invocation_path(script)
+        .unwrap_or_else(|| format!("{PACKAGE_DIR}/{script}"))
 }
 
 /// Returns the `permissions.allow` entries the allowlist item plans, in grant
@@ -339,12 +367,17 @@ pub fn planned_allow_entries() -> Vec<String> {
 }
 
 /// Returns the `permissions.ask` entries the allowlist item plans: the pinned
-/// keystroke subcommands, then the protection rules that prompt.
+/// keystroke subcommands at the package path, then at the compatibility path,
+/// then the protection rules that prompt.
 #[must_use]
 pub fn planned_ask_entries() -> Vec<String> {
-    let mut entries: Vec<String> = SWEEP_ASK_SUBCOMMANDS
+    let mut entries: Vec<String> = [helper_path("sweep.sh"), format!("{HELPER_DIR}/sweep.sh")]
         .iter()
-        .map(|sub| format!("Bash({HELPER_DIR}/sweep.sh {sub} *)"))
+        .flat_map(|path| {
+            SWEEP_ASK_SUBCOMMANDS
+                .iter()
+                .map(move |sub| format!("Bash({path} {sub} *)"))
+        })
         .collect();
     entries.extend(
         PROTECTION_RULES
@@ -496,23 +529,25 @@ mod tests {
         assert_eq!(
             planned,
             vec![
-                "Bash(.git-paw/scripts/broker.sh *)",
-                "Bash(.git-paw/scripts/docs-fetch.sh find *)",
-                "Bash(.git-paw/scripts/sweep.sh snapshot *)",
-                "Bash(.git-paw/scripts/sweep.sh capture *)",
-                "Bash(.git-paw/scripts/sweep.sh status *)",
-                "Bash(.git-paw/scripts/sweep.sh worktrees-status *)",
-                "Bash(.git-paw/scripts/sweep.sh inbox *)",
-                "Bash(.git-paw/scripts/sweep.sh detect-stuck *)",
-                "Bash(.git-paw/scripts/sweep.sh stuck-eval *)",
-                "Bash(.git-paw/scripts/sweep.sh status-publish *)",
-                "Bash(.git-paw/scripts/sweep.sh learn *)",
-                "Bash(.git-paw/scripts/sweep.sh events *)",
+                "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
+                "Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh find *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh snapshot *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh capture *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh status *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh worktrees-status *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh inbox *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh detect-stuck *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh stuck-eval *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh status-publish *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh learn *)",
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)",
             ]
         );
         assert_eq!(planned.len(), 12, "the grant table is twelve allow entries");
         let ask = planned_ask_entries();
         for keystroke in [
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)",
+            "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)",
             "Bash(.git-paw/scripts/sweep.sh approve *)",
             "Bash(.git-paw/scripts/sweep.sh tell *)",
         ] {
@@ -530,24 +565,27 @@ mod tests {
     #[test]
     fn the_read_only_events_subcommand_is_granted() {
         assert!(
-            planned_allow_entries()
-                .contains(&"Bash(.git-paw/scripts/sweep.sh events *)".to_string()),
+            planned_allow_entries().contains(
+                &"Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)".to_string()
+            ),
             "events must be granted read-only"
         );
         assert!(
-            !planned_ask_entries()
-                .contains(&"Bash(.git-paw/scripts/sweep.sh events *)".to_string()),
+            planned_ask_entries()
+                .iter()
+                .all(|e| !e.contains("sweep.sh events")),
             "events sends no keystroke, so it must not be pinned to ask"
         );
     }
 
     #[test]
     fn the_keystroke_subcommand_is_asked_not_allowed() {
-        assert!(
-            planned_ask_entries()
-                .contains(&"Bash(.git-paw/scripts/sweep.sh approve *)".to_string()),
-            "approve must be pinned to the ask rules"
-        );
+        for path in [".git-paw/skills/orchestrator/scripts", ".git-paw/scripts"] {
+            assert!(
+                planned_ask_entries().contains(&format!("Bash({path}/sweep.sh approve *)")),
+                "approve must be pinned to the ask rules at {path}"
+            );
+        }
     }
 
     /// `cli-setup` scenario "The message-typing tell subcommand always
@@ -555,10 +593,12 @@ mod tests {
     /// allow entry names it.
     #[test]
     fn the_message_typing_tell_subcommand_always_prompts() {
-        assert!(
-            planned_ask_entries().contains(&"Bash(.git-paw/scripts/sweep.sh tell *)".to_string()),
-            "tell must be pinned to the ask rules"
-        );
+        for path in [".git-paw/skills/orchestrator/scripts", ".git-paw/scripts"] {
+            assert!(
+                planned_ask_entries().contains(&format!("Bash({path}/sweep.sh tell *)")),
+                "tell must be pinned to the ask rules at {path}"
+            );
+        }
         assert!(
             SWEEP_NEVER_GRANTED.contains(&"tell"),
             "tell must be listed as never granted"
@@ -584,20 +624,31 @@ mod tests {
                 !entry.contains("docs-fetch.sh get"),
                 "{entry} grants the read-anywhere subcommand"
             );
-            assert!(
-                !entry.starts_with("Bash(.git-paw/scripts/sweep.sh *"),
-                "{entry} is a whole-script sweep.sh grant"
-            );
+            for prefix in [
+                "Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *",
+                "Bash(.git-paw/scripts/sweep.sh *",
+            ] {
+                assert!(
+                    !entry.starts_with(prefix),
+                    "{entry} is a whole-script sweep.sh grant"
+                );
+            }
         }
     }
 
     #[test]
     fn every_allow_entry_is_a_path_scoped_bundled_helper_invocation() {
         for entry in planned_allow_entries() {
-            let named = init::bundled_scripts()
-                .iter()
-                .any(|(name, _)| entry.starts_with(&format!("Bash(.git-paw/scripts/{name}")));
-            assert!(named, "{entry} does not name a bundled helper");
+            let named = crate::skills::bundled_packages().iter().any(|package| {
+                package.helpers().any(|helper| {
+                    entry.starts_with(&format!(
+                        "Bash(.git-paw/skills/{}/scripts/{}",
+                        package.name,
+                        helper.file_name()
+                    ))
+                })
+            });
+            assert!(named, "{entry} does not name a bundled package helper");
 
             assert!(!entry.contains("curl"), "{entry} names a network client");
             assert!(!entry.contains("bash "), "{entry} names an interpreter");
@@ -609,9 +660,35 @@ mod tests {
         }
     }
 
+    // `cli-setup` scenario "The compatibility path is never allowed".
+    #[test]
+    fn the_compatibility_path_is_never_allowed() {
+        for entry in planned_allow_entries() {
+            assert!(!entry.starts_with("Bash(.git-paw/scripts/"), "{entry}");
+        }
+    }
+
+    // The row is verified against the CLI release the fact gate was re-run
+    // on for the package-path entries and both deny rules.
+    #[test]
+    fn the_claude_row_is_verified_for_the_package_paths() {
+        const { assert!(CLAUDE.verified) };
+        assert!(
+            CLAUDE.verified_with.contains("2.1.322"),
+            "{}",
+            CLAUDE.verified_with
+        );
+    }
+
     #[test]
     fn protection_rules_accompany_the_grants() {
-        assert!(planned_deny_entries().contains(&"Edit(**/.git-paw/scripts/**)".to_string()));
+        assert_eq!(
+            planned_deny_entries(),
+            [
+                "Edit(**/.git-paw/skills/**)",
+                "Edit(**/.git-paw/scripts/**)"
+            ]
+        );
         assert!(planned_ask_entries().contains(&"Edit(**/.git-paw/config.toml)".to_string()));
     }
 

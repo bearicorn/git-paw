@@ -18,10 +18,14 @@ fn resolve(name: &str) -> Result<git_paw::skills::SkillTemplate, git_paw::skills
     git_paw::skills::resolve_from(name, &git_paw::skills::SkillRoots::default())
 }
 
-/// The raw orchestrator template, frontmatter included.
+/// The raw orchestrator template, frontmatter included, with the helper
+/// placeholders rendered to their package paths as every renderer does — a
+/// requirement naming a helper is checked against the path the orchestrator
+/// is told to run (`skill-packages` *Requirements naming the legacy deployed
+/// helper path are satisfied by the package path*).
 fn template() -> String {
     git_paw::skills::bundled_package("orchestrator")
-        .map(|p| p.skill_md.content.to_string())
+        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
         .expect("orchestrator.md is at the expected path")
 }
 
@@ -121,8 +125,8 @@ fn skill_carries_no_session_specific_value() {
 fn verdicts_route_through_the_helper() {
     let skill = template();
     for verb in [
-        ".git-paw/scripts/sweep.sh verified",
-        ".git-paw/scripts/sweep.sh feedback-gate",
+        ".git-paw/skills/orchestrator/scripts/sweep.sh verified",
+        ".git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate",
         "sweep.sh conflict-ack",
     ] {
         assert!(skill.contains(verb), "verdict path must name `{verb}`");
@@ -172,8 +176,9 @@ fn skill_teaches_the_helper_subcommands() {
         "advanced-main",
     ] {
         assert!(
-            skill.contains(&format!(".git-paw/scripts/sweep.sh {verb}"))
-                || skill.contains(&format!("`sweep.sh {verb}")),
+            skill.contains(&format!(
+                ".git-paw/skills/orchestrator/scripts/sweep.sh {verb}"
+            )) || skill.contains(&format!("`sweep.sh {verb}")),
             "the skill must teach `sweep.sh {verb}`"
         );
     }
@@ -188,7 +193,7 @@ fn stalled_worker_is_told_to_use_its_own_helper() {
         .expect("stall message present");
     let line_end = skill[stall..].find('\n').map_or(skill.len(), |i| stall + i);
     let message = &skill[stall..line_end];
-    assert!(message.contains(".git-paw/scripts/broker.sh blocked"));
+    assert!(message.contains(".git-paw/skills/coordination/scripts/broker.sh blocked"));
     assert!(!message.contains("http") && !message.contains("/publish"));
 }
 

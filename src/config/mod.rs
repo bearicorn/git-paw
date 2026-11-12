@@ -1196,7 +1196,7 @@ worktree_placement = "child"
 # approval = "manual"  # level of the drive loop's headless orchestrator invocations (default: agent_approval); changes no pane command
 # verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
 #
-# Stuck/bloat detection thresholds, read by .git-paw/scripts/sweep.sh. Each is
+# Stuck/bloat detection thresholds, read by .git-paw/skills/orchestrator/scripts/sweep.sh. Each is
 # optional; omit to use the documented default shown.
 # no_progress_window_seconds = 1500           # flag no-progress after ~25 min with no checkbox/commit movement
 # context_bloat_threshold_k = 250             # flag context-bloat when the CLI hints at clearing >= this many k tokens

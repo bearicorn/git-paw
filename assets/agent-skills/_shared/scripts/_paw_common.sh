@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared preamble for the bundled git-paw helper scripts — binary-managed
-# (installed by `git paw init`) and sourced by the sibling `broker.sh`,
-# `sweep.sh`, and `docs-fetch.sh`; edit `assets/scripts/_paw_common.sh`, never a
-# deployed copy.
+# (installed into each helper-shipping package's `.git-paw/skills/<package>/scripts/`
+# and the compatibility copy `.git-paw/scripts/`) and sourced by the sibling
+# `broker.sh`, `sweep.sh`, and `docs-fetch.sh`; edit
+# `assets/agent-skills/_shared/scripts/_paw_common.sh`, never an installed copy.
 #
 # Sourcing this file resolves the project root, the `.git-paw` directory and its
 # config path, and a Python 3 interpreter, then defines the discovery helpers the
@@ -16,7 +17,9 @@
 #
 # Provides:
 #   PROJECT_ROOT / PAW_DIR / CONFIG_TOML / PY  resolved at source time
+#   MAIN_ROOT                                  the main working tree (session state)
 #   repo_root                                  git top-level, empty when none
+#   main_root                                  main working tree of the repository
 #   discover_broker_url                        [broker] bind + port
 #   discover_docs_base_url                     top-level docs_base_url
 #   discover_prompt_profile_field <f> <def> [cli]  resolved CLI prompt-shape profile field
@@ -39,6 +42,32 @@ fi
 
 PAW_DIR="${PROJECT_ROOT}/.git-paw"
 CONFIG_TOML="${PAW_DIR}/config.toml"
+
+# The repository's main working tree — the checkout that owns the git common
+# directory — for the main checkout and every linked worktree alike. Session
+# state (the discovery files under `.git-paw/sessions/`, sweep.sh's progress,
+# dedup and approve-claim files) lives there, so a helper run from inside an
+# agent's worktree finds the same session as one run at the root. PROJECT_ROOT
+# keeps meaning the current checkout (broker.sh derives its agent id from it).
+# `--path-format` needs git >= 2.31; older git prints the common dir relative to
+# the current directory. Anything that is not `<main>/.git` (a submodule's
+# `.git/modules/<name>`, say) falls back to PROJECT_ROOT.
+main_root() {
+  local common
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=""
+  if [[ "${common}" != /* || ! -d "${common}" ]]; then
+    common=$(git rev-parse --git-common-dir 2>/dev/null) || common=""
+    [[ -n "${common}" && "${common}" != /* ]] && common="$(pwd)/${common}"
+  fi
+  if [[ -n "${common}" && -d "${common}" && "$(basename "${common}")" == ".git" ]]; then
+    (cd "${common}/.." 2>/dev/null && pwd -P)
+  else
+    printf '%s\n' "${PROJECT_ROOT}"
+  fi
+}
+
+MAIN_ROOT=$(main_root)
+[[ -n "${MAIN_ROOT}" ]] || MAIN_ROOT="${PROJECT_ROOT}"
 
 # Locate a Python 3 interpreter for JSON / TOML shaping.
 if command -v python3 >/dev/null 2>&1; then

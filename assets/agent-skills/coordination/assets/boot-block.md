@@ -8,8 +8,8 @@ stderr, when a publish is rejected.
 These instructions ensure reliable coordination. Follow them exactly before starting your assigned task.
 
 All broker interaction goes through the bundled helper at
-`.git-paw/scripts/broker.sh` — it resolves the broker URL and shapes the JSON
-for you, so you only pass simple arguments. Run `.git-paw/scripts/broker.sh --help`
+`{{BROKER_HELPER}}` — it resolves the broker URL and shapes the JSON
+for you, so you only pass simple arguments. Run `{{BROKER_HELPER}} --help`
 to see every subcommand.
 
 ### 1. REGISTER: Immediate status publication
@@ -17,7 +17,7 @@ to see every subcommand.
 As your very first action, publish your working status with a "booting" message:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status booting
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} status booting
 ```
 
 This makes you visible in the dashboard immediately.
@@ -31,7 +31,7 @@ When you finish your task, commit your work via `git commit`. The git-paw post-c
 **Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), publish `agent.artifact { status: "done" }` manually with the helper below. Add `--exports a,b` to list public API items exposed by this artifact, and `--files a,b` to list the files touched.
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} artifact --exports "" --files ""
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} artifact --exports "" --files ""
 ```
 
 ### 3. BLOCKED: Dependency waiting notification
@@ -39,7 +39,7 @@ When you finish your task, commit your work via `git commit`. The git-paw post-c
 When you realize you are waiting on another agent or external state, publish blocked status immediately:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} blocked "<describe what you need>" "<agent-id or resource>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} blocked "<describe what you need>" "<agent-id or resource>"
 ```
 
 Replace `<describe what you need>` and `<agent-id or resource>` with specific details.
@@ -49,10 +49,10 @@ Replace `<describe what you need>` and `<agent-id or resource>` with specific de
 **IMPORTANT**: If you are uncertain about what is wanted, DO NOT guess or make assumptions. Publish a question and WAIT for the answer before continuing:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} question "<your specific question>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} question "<your specific question>"
 ```
 
-**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. Check for new messages before proceeding (`.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll`).
+**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. Check for new messages before proceeding (`{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll`).
 
 ### PASTE HANDLING
 

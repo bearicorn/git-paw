@@ -30,6 +30,8 @@ shaping live inside the helper or the MCP server.
     arguments appropriate to the event
   - Appropriate message content for the event type
 
+Test: `skills::tests::boot_block_all_four_events_call_helper_no_raw_curl`, `skills::tests::boot_block_contains_pre_expanded_helper_invocations`
+
 #### Scenario: Boot block contains no raw broker curl
 
 - **WHEN** the rendered boot block is examined in either form
@@ -39,16 +41,22 @@ shaping live inside the helper or the MCP server.
 - **AND** in the helper form those events SHALL be expressed as
   `.git-paw/skills/coordination/scripts/broker.sh` invocations instead
 
+Test: `skills::tests::boot_block_uses_helper_not_raw_broker_url`, `skills::tests::boot_block_mcp_form_calls_publish_tools_no_helper_script`
+
 #### Scenario: The boot-block template carries no literal helper path
 
 - **WHEN** the bundled boot-block templates are inspected before rendering
 - **THEN** they SHALL name the broker helper only through its registry placeholder
+
+Test: `skills::tests::no_bundled_template_carries_a_literal_helper_path`
 
 #### Scenario: QUESTION event emphasizes waiting
 
 - **WHEN** the QUESTION section is examined
 - **THEN** it SHALL contain the phrase "DO NOT continue until you receive an answer!"
 - **AND** the instruction SHALL be in bold or uppercase for emphasis
+
+Test: `skills::tests::boot_block_question_section_emphasizes_waiting`
 
 #### Scenario: DONE section leads with commit-first instruction
 
@@ -58,6 +66,8 @@ shaping live inside the helper or the MCP server.
 - **AND** the commit-first instruction SHALL appear before the manual `agent.artifact { status: "done" }` helper invocation in the section body
 - **AND** the section SHALL state that the post-commit hook auto-publishes `agent.artifact { status: "committed" }` on each commit, so the agent does not need to publish manually for tasks that produce code changes
 
+Test: `skills::tests::boot_block_done_section_leads_with_commit_instruction`, `skills::tests::boot_block_done_section_names_committed_status_published_by_hook`
+
 #### Scenario: DONE section scopes manual done to code-less tasks
 
 - **GIVEN** the rendered boot block produced by the boot-block builder for any branch
@@ -66,9 +76,13 @@ shaping live inside the helper or the MCP server.
 - **AND** it SHALL enumerate representative code-less task types (for example: docs-only updates handled outside this worktree, planning notes, exploration tasks)
 - **AND** it SHALL contain an emphasised (bold or uppercase) warning that the agent SHALL NOT publish manual `done` when the worktree has uncommitted changes, and SHALL commit instead
 
+Test: `skills::tests::boot_block_done_section_scopes_manual_done_to_code_less_tasks`, `skills::tests::boot_block_done_section_warns_against_manual_done_with_uncommitted_changes`
+
 #### Scenario: DONE section retains the manual done fallback for code-less tasks
 
 - **GIVEN** the helper form of the rendered boot block for any branch
 - **WHEN** the DONE section body is examined
 - **THEN** it SHALL include a complete, copy-pasteable `.git-paw/skills/coordination/scripts/broker.sh artifact` invocation publishing `agent.artifact` with `status: "done"`
 - **AND** the published message SHALL use the same JSON shape as in prior boot-block versions (type `agent.artifact`, payload fields `status`, `exports`, `modified_files`) so code-less agents have an unchanged fallback path
+
+Test: `skills::tests::boot_block_done_section_retains_manual_done_helper`

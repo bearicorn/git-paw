@@ -1,6 +1,6 @@
 ## BOOT INSTRUCTIONS - DO NOT REMOVE
 
-**Run each helper call bare, exactly as shown** — whenever you run the bundled helper `.git-paw/scripts/broker.sh` (to poll your inbox), add no `; echo "exit=$?"`, no `&& echo`, and no pipe, so a permission rule matching the helper's path matches every call.
+**Run each helper call bare, exactly as shown** — whenever you run the bundled helper `{{BROKER_HELPER}}` (to poll your inbox), add no `; echo "exit=$?"`, no `&& echo`, and no pipe, so a permission rule matching the helper's path matches every call.
 
 These instructions ensure reliable coordination. Follow them exactly before starting your assigned task.
 
@@ -38,7 +38,7 @@ Replace `<describe what you need>` and `<agent-id or resource>` with specific de
 
 Call the `publish_question` tool with `{"question": "<your specific question>"}`.
 
-**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. The MCP publish surface has no poll/inbox tool, so check for new messages via `.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll` before proceeding.
+**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. The MCP publish surface has no poll/inbox tool, so check for new messages via `{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll` before proceeding.
 
 ### PASTE HANDLING
 

@@ -79,8 +79,9 @@ State after v0.19.0 that this change builds on (verified 2026-11-11):
 ### D1 — Install layout: `SKILL.md` + `scripts/` + `references/`, never `assets/`
 
 `.git-paw/skills/<name>/SKILL.md` is rendered with the same inputs the sidecar uses for that
-location (worktree: the agent's branch and session broker URL; repo root: current branch,
-configured broker URL, `[supervisor]` gate commands — the inputs MCP `get_skill` and v0.18.0's
+location (worktree: the agent's branch and session broker URL; repo root: the orchestrator's
+reserved agent id `supervisor` — never the current branch, so a branch switch leaves the root skills
+current — configured broker URL, `[supervisor]` gate commands — the inputs MCP `get_skill` and v0.18.0's
 orchestrator export already use). `scripts/` are written `0o755`. `references/` are rendered like
 `SKILL.md`. A package's `assets/` are render-time inputs (boot-block templates, per-CLI fragments)
 and are not installed. Every install writes each file that is missing or differs and leaves an
@@ -141,10 +142,12 @@ the user, see Open Questions).
   old form, and protection is removed only when no allow entry under either `.git-paw/scripts/` or
   `.git-paw/skills/` remains. A v0.17.0–v0.19.0 record therefore undoes cleanly.
 - **Doctor's grant checks.** The broad-grant advisory's shape 8 (`is_broad`) recognises a helper
-  word at either `.git-paw/skills/<pkg>/scripts/` or `.git-paw/scripts/`, and `MAX_WORD` grows to
-  keep the longest package path (48 characters) whole, as *A wide helper grant is listed* requires
-  verbatim listing. The grant-residue check already matches a helper by its file name whatever path
-  names it, so it needs no spec change; its rendering inherits the larger `MAX_WORD`. The
+  word at either `.git-paw/skills/<pkg>/scripts/` or `.git-paw/scripts/`, and a word that is
+  exactly a bundled helper path (up to the 48-character package path) is printed whole, as *A wide
+  helper grant is listed* requires verbatim listing. `MAX_WORD` stays at 32: raising it to 48 would
+  echo 16 more characters of a token embedded in a URL (the `a_credential_inside_the_second_word…`
+  regression). The grant-residue check already matches a helper by its file name whatever path
+  names it, so it needs no spec change; its rendering inherits the helper-path exemption. The
   modified-helper drift check (`helper_paths`) walks the paths the applied allow entries name.
 - **Migration is the user's.** A record written before this change no longer matches the plan, so
   doctor's existing out-of-date rule (`preflight-diagnostics` *Doctor reports CLI setup state*)
@@ -241,7 +244,8 @@ matches the binary's again, so the cross-process approval exclusion spans a work
 `PROJECT_ROOT` keeps meaning "the current checkout", which `broker.sh` needs to derive the agent id
 from the worktree branch. Resolution depends on git, not on where the script lives, so it holds for
 the package path and the compatibility copy alike. `--path-format` needs git ≥ 2.31; on an older
-git the helper resolves the relative common dir against `PROJECT_ROOT` itself.
+git the helper resolves the relative common dir against the current directory (`$(pwd)`), which is
+what git prints it relative to.
 
 ## Risks / Trade-offs
 
@@ -290,3 +294,83 @@ compatibility copies keep the old path working.
   a one-line follow-up.
 - When is the compatibility copy removed? Recommendation: at v1.0.0 under the deprecation policy,
   with `doctor` warning one release ahead.
+
+## Implementation record
+
+### Fact gate re-run (task 4.1) — every blocking step passed; the `claude` row stays verified
+
+Re-run on 2026-11-12 against **Claude Code 2.1.322** (macOS, arm64) in scratch repositories under
+the worktree's git-ignored `target/fact-gate/`, as `worker-operator-isolation` did for its gate.
+Each probe was one `claude -p --output-format stream-json --verbose --setting-sources local
+--permission-prompts none --strict-mcp-config --model haiku` run told to make exactly one tool
+call; the outcome was read from the result's `permission_denials` and the matching `tool_result`,
+and cross-checked on disk (a marker log the fake helpers append to, file hashes before and after,
+and the absence of each probe's side-effect file). The repository's `.claude/settings.local.json`
+held exactly the planned entries: the twelve package-path allow entries, the `approve` / `tell` ask
+rules at both paths, `Edit(**/.git-paw/config.toml)` (ask) and both deny rules. Fake helpers were
+installed at every package path and compatibility path, in the main checkout and in a nested
+worktree at `.git-paw/worktrees/feat-x`.
+
+| Step | Probe (cwd) | Expected | Observed |
+|------|-------------|----------|----------|
+| F1a | `.git-paw/skills/coordination/scripts/broker.sh status …` (nested worktree) | allowed, worktree copy runs | allowed, worktree copy ran |
+| F1e | same (root) | allowed | allowed |
+| F1c | same in a repository with no settings file (control) | refused | refused |
+| F2a / F2b2 | `…/sweep.sh snapshot`, `… snapshot --all` | allowed | allowed |
+| F2c1–F2c3 | `…/broker.sh --agent feat-x status …`, `…/docs-fetch.sh find …`, `…/sweep.sh events --since 0` | allowed | allowed |
+| F2c5–F2c7 | `…/sweep.sh snapshotx`, `…/docs-fetch.sh get file:///etc/hosts`, `…/sweep.sh verified feat-x` | refused | refused |
+| F2d1–F2d4 | `FOO=1 …`, `env …`, `bash …`, `sh …` before a granted call | refused | refused |
+| F3b–F3e | granted call `&& touch`, `; touch`, `$(touch …)`, `\| sh` | refused, no side effect | refused, no side effect |
+| F4 (×12) | `approve` / `tell` at the package and the compatibility path, in `manual`, `acceptEdits`, `auto`, with broad `Bash(<path>/sweep.sh *)` allow rules added at both paths | refused | refused |
+| F4-ctl / F4-ctl2 | `capture` at each path under the broad rules | allowed | allowed |
+| F5a–F5f | Edit/Write (acceptEdits) on a package helper (from the worker), a new file in a package (Write), the worker's package copy (from the root), a package `_paw_common.sh`, a package `SKILL.md`, a compatibility copy | refused, unchanged | refused, unchanged |
+| F5g | Edit `notes.txt` (control) | allowed | allowed |
+| F6-1…F6-20 | acceptEdits Bash: `sed -i`, `cp`, `mv`, `rm`, `touch`, `mkdir`, `printf >`, `cd … && sed -i`, `cd … && rm` on the package helper; `printf >`/`cp`/`sed -i` on `_paw_common.sh`, a package `SKILL.md`, the worker's copy (from the root and from the worker) and a compatibility copy | refused, unchanged | refused, unchanged |
+| F6-ctl | `printf 'edited' > notes.txt` (control) | allowed | allowed |
+
+Controls for F6 (ordinary files in throwaway repositories): on 2.1.322 `acceptEdits` auto-approves
+`cp`, `mv`, `rm`, `touch`, `mkdir` and a `printf` redirect, but **not** `sed -i` or `cd`-prefixed
+forms (those prompt anyway). A first F6 control written with `sed -i` was refused for that reason
+and was replaced by the `printf` control; every auto-approved verb was then probed against every
+protected target. No-deny controls: in the control repository (no settings file) the same
+`printf >` on a package helper, `rm` of a package `SKILL.md` and an Edit of a package
+`_paw_common.sh` all went through unprompted under `acceptEdits`, and in the gated repository a
+`printf >` to `.git-paw/ctl-note.txt` (outside both denied directories) was allowed — so every
+refusal above is the deny rules' doing.
+
+Outcome: O1, every blocking step passed. `facts::CLAUDE` stays `verified = true`, now
+`verified_with = "Claude Code 2.1.322, 2026-11-12"`, with the evidence in its doc comment.
+
+### `MAX_WORD` (task 4.5)
+
+See D4: the 48-character package path is kept whole by exempting exact bundled helper paths from
+truncation rather than by raising `MAX_WORD`, which would weaken the credential mitigation.
+
+### Security-and-safety review (task 4.6)
+
+- **Verified, not assumed.** The package-path entries and both deny rules passed the re-run fact
+  gate above before the row was marked verified.
+- **No new grant.** The allow table is the same twelve entries — same helpers, same subcommands —
+  at the package paths. The compatibility path loses its allow entries; only the `approve` / `tell`
+  ask rules are planned there, which can only add prompts.
+- **Protection widened.** `Edit(**/.git-paw/skills/**)` (deny) joins `Edit(**/.git-paw/scripts/**)`;
+  the whole package directory is denied, not just `scripts/`, so a package `SKILL.md` an agent
+  re-reads cannot be rewritten silently either. Protection is planned in the same replacement as
+  the grants, and undo keeps it while any allow entry under either root remains.
+- **git-paw never rewrites a recorded grant.** `init`, `start`, provisioning and doctor leave the
+  settings file and the record byte-identical (tests: `installing_packages_leaves_setup_grants_untouched`,
+  doctor's read-only checks). Migration is the user's `--undo` then `--allowlist`.
+- **Atomic writes.** The temporary file is created with `O_CREAT|O_EXCL` (`create_new`) and mode
+  `0o600` in the target's own directory — no cross-directory rename, no predictable path outside
+  `.git-paw/`, and a planted file or symlink at the temporary name fails the open instead of being
+  followed. The final mode is set on the open handle before the rename; the temporary is removed on
+  any error. The symlink refusal on every target and on every directory on the way stays.
+- **Session state from the main checkout.** `_paw_common.sh` resolves `MAIN_ROOT` from the git
+  common directory and falls back to the current checkout for anything that is not `<main>/.git`
+  (a submodule). The approve claim path is the binary's again, so the cross-process approval
+  exclusion spans the root, every worktree and the drive loop. `broker.sh` keeps deriving its agent
+  id from the current worktree, so a worker cannot publish as another agent by running the root's
+  copy.
+- **Doctor output.** Exact helper paths are printed whole; any other long word is still cut, so a
+  token in a URL is not echoed.
+

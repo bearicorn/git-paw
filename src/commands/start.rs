@@ -261,15 +261,18 @@ pub fn start(
 
     let mut worktree_entries = Vec::new();
 
-    // Resolve the coordination skill once when the worktree package
-    // selection includes it (broker enabled). The bare path injects no
-    // docs-fetch skill.
+    // Install the bundled packages at the repository root before any pane
+    // (a fresh clone gets its root helpers without `git paw init`); only
+    // missing or differing files are written.
+    crate::init::refresh_root_scripts(&repo_root, &config)?;
+
+    // Resolve the worktree package selection once: the same packages are
+    // provisioned into each worktree and injected into its managed block.
     let worktree_inputs = crate::skills::WorktreeInputs {
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let skill_content =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", &repo_root)?;
+    let worktree_packages = crate::skills::resolve_worktree_packages(worktree_inputs, &repo_root)?;
 
     let worktree_runtime = config.worktree_runtime();
 
@@ -325,40 +328,32 @@ pub fn start(
             out.line(&format!("  {branch}: {summary}"));
         }
 
-        // Provision the bundled helper scripts the agent's boot block invokes
-        // into this worktree's `.git-paw/scripts/` (idempotent, executable),
-        // with the same gates `attach_agent` uses — `broker.sh` when the broker
-        // is enabled, `docs-fetch.sh` when `docs_base_url` is configured. A
-        // fresh worktree checkout has none (the directory is gitignored), so
-        // without this the agent's relative `.git-paw/scripts/broker.sh` call
-        // fails until it hand-copies from `assets/`.
-        crate::init::provision_worktree_helpers(
-            &wt.path,
-            broker_config.enabled,
-            config.docs_base_url.is_some(),
-        )?;
-
-        // Inject AGENTS.md with skill content when broker is enabled.
-        // Non-supervisor `start` flow has no resolved spec backends —
-        // pass `&[]` so SPEC_PATH_DOCTRINE renders its sentinel. The
-        // coordination skill does not reference the placeholder today,
-        // but keeping the call shape uniform avoids future drift.
-        let rendered_skill = skill_content.as_ref().map(|tmpl| {
-            crate::skills::render(
-                tmpl,
-                branch,
-                &broker_config.url(),
-                &project,
-                &crate::skills::GateCommands::default(),
-                &[],
-            )
-        });
+        // Provision the selected packages — the helper the agent's boot block
+        // invokes included — into this worktree's `.git-paw/skills/` (with
+        // the `.git-paw/scripts/` compatibility copies), rendered for this
+        // agent, and inject the same packages' skill text. A fresh worktree
+        // checkout has none (the directories are gitignored). The bare path
+        // has no resolved spec backends, so SPEC_PATH_DOCTRINE renders its
+        // sentinel.
+        let broker_url = broker_config.url();
+        let render_inputs = crate::skills::RenderInputs {
+            branch,
+            root: false,
+            broker_url: &broker_url,
+            project: &project,
+            gates: crate::skills::GateCommands::default(),
+            backends: &[],
+        };
+        crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
+        let rendered_skill =
+            crate::skills::render_worktree_skills(&worktree_packages, &render_inputs);
         let assignment = crate::agents::WorktreeAssignment {
             branch: branch.clone(),
             cli: cli.clone(),
             spec_content: None,
             owned_files: None,
             skill_content: rendered_skill,
+            skill_packages: worktree_packages.iter().map(|r| r.package).collect(),
             inter_agent_rules: None,
         };
         crate::agents::setup_worktree_agents_md(&repo_root, &wt.path, &assignment)?;
@@ -770,15 +765,17 @@ fn launch_spec_session(
         repo_root,
     );
 
-    // Resolve the coordination skill once when the worktree package
-    // selection includes it (broker enabled). The spec-driven path injects no
-    // docs-fetch skill.
+    // Install the bundled packages at the repository root before any pane,
+    // as the bare path does.
+    crate::init::refresh_root_scripts(repo_root, config)?;
+
+    // Resolve the worktree package selection once: the same packages are
+    // provisioned into each worktree and injected into its managed block.
     let worktree_inputs = crate::skills::WorktreeInputs {
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let skill_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", repo_root)?;
+    let worktree_packages = crate::skills::resolve_worktree_packages(worktree_inputs, repo_root)?;
 
     let mut worktree_entries = Vec::new();
 
@@ -843,31 +840,25 @@ fn launch_spec_session(
             out.line(&format!("  {branch}: {summary}"));
         }
 
-        // Same seam as `start` / `attach_agent`: provision the bundled
-        // helper scripts the agent's boot block invokes into this worktree's
-        // `.git-paw/scripts/`, gated on the broker being enabled (`broker.sh`)
-        // and `docs_base_url` being configured (`docs-fetch.sh`).
-        crate::init::provision_worktree_helpers(
-            &wt.path,
-            broker_config.enabled,
-            config.docs_base_url.is_some(),
-        )?;
-
-        // Set up AGENTS.md with spec + skill content
-        let rendered_skill = skill_template.as_ref().map(|tmpl| {
-            crate::skills::render(
-                tmpl,
-                branch,
-                &broker_config.url(),
-                project,
-                &config
-                    .supervisor
-                    .as_ref()
-                    .map(|s| s.gate_commands())
-                    .unwrap_or_default(),
-                &session_backends,
-            )
-        });
+        // Same seam as `start` / `attach_agent`: provision the selected
+        // packages into this worktree, rendered for this agent, and inject
+        // the same packages' skill text.
+        let broker_url = broker_config.url();
+        let render_inputs = crate::skills::RenderInputs {
+            branch,
+            root: false,
+            broker_url: &broker_url,
+            project,
+            gates: config
+                .supervisor
+                .as_ref()
+                .map(|s| s.gate_commands())
+                .unwrap_or_default(),
+            backends: &session_backends,
+        };
+        crate::init::provision_worktree_helpers(&wt.path, &worktree_packages, &render_inputs)?;
+        let rendered_skill =
+            crate::skills::render_worktree_skills(&worktree_packages, &render_inputs);
 
         let spec_content = spec_by_branch
             .get(branch.as_str())
@@ -882,6 +873,7 @@ fn launch_spec_session(
             spec_content,
             owned_files,
             skill_content: rendered_skill,
+            skill_packages: worktree_packages.iter().map(|r| r.package).collect(),
             inter_agent_rules: None,
         };
         crate::agents::setup_worktree_agents_md(repo_root, &wt.path, &assignment)?;

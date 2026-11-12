@@ -156,8 +156,8 @@ It never modifies or removes a section, a key, or a commented example you have
 already set, so your customised settings survive verbatim. Once `[supervisor]`
 and every top-level default key are present the config is left untouched, and
 — if nothing else needed creating — init reports
-`Already initialized. Nothing to do.` (The bundled `.git-paw/scripts/` helpers,
-the exported `.git-paw/skills/` and the `AGENTS.md` pointer section are
+`Already initialized. Nothing to do.` (The bundled skill packages under `.git-paw/skills/`,
+their `.git-paw/scripts/` compatibility copies and the `AGENTS.md` pointer section are
 refreshed on every run; each is reported as `Updated` only when its content
 changed, and any such change closes with `Initialized git-paw.` instead.)
 
@@ -946,9 +946,9 @@ branch_refresh = false
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
 | `manual_approvals_log` | `true` | When `true`, every live permission prompt the `--unattended` drive loop escalates for a human decision is appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). Applies to `--unattended` runs only — an attended session runs no drive loop and records nothing. On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
-| `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
-| `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
-| `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
+| `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/skills/orchestrator/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
+| `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/skills/orchestrator/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
+| `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/skills/orchestrator/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
 | `branch_refresh` | `false` | When `true`, the [unattended drive loop](../user-guide/supervisor.md#unattended-mode---unattended) rebases an idle, clean worker branch onto the default branch after a successful merge — see [Branch refresh](../user-guide/supervisor.md#branch-refresh-opt-in) for the full precondition gate list. Default off: history is rewritten under a live agent only on explicit opt-in |
 | `learnings` | `false` | Master switch for [learnings mode](#learnings-mode-tuning): when `true` (and the broker is enabled), the session's friction signals are appended to `.git-paw/session-learnings.md`. Tuned by the `[supervisor.learnings_config]` sub-table |
 | `auto_revert` | `false` | Used by [opsx role gating](#opsx-role-gating) in `block` mode: when `true`, the supervisor reverts a coding agent's archive commit without first confirming with you. Default off — a revert always asks first |
@@ -1271,7 +1271,7 @@ There are **no configuration fields for the qualitative signals**
 prose, not in `[supervisor.learnings_config]` — to tune how readily the
 supervisor publishes a category, edit your local copy of the supervisor
 skill rather than a config value. The supervisor publishes each qualitative
-learning through the bundled `.git-paw/scripts/sweep.sh learn` helper, so no
+learning through the bundled `.git-paw/skills/orchestrator/scripts/sweep.sh learn` helper, so no
 broad `curl` allowlist grant is required.
 
 See the [Learnings Mode chapter](../user-guide/learnings.md) for the

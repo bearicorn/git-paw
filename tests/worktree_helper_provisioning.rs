@@ -1,6 +1,11 @@
 //! E2E coverage for `broker-agent-helper`'s *Helpers provisioned into agent
-//! worktrees* requirement: EVERY launch path that creates an agent worktree
-//! SHALL leave an executable `<worktree>/.git-paw/scripts/broker.sh` behind
+//! worktrees* and `skill-packages`' *Every launch path installs the
+//! worktree's selected packages* requirements: EVERY launch path that creates
+//! an agent worktree SHALL install exactly the selected packages under
+//! `<worktree>/.git-paw/skills/` — an executable
+//! `.git-paw/skills/coordination/scripts/broker.sh` and, with `docs_base_url`
+//! set, the `docs-fetch` package — with the `.git-paw/scripts/` compatibility
+//! copies, rendered for that agent, and inject the same packages' skills,
 //! before the agent boots.
 //!
 //! One test per path — the supervisor launch and `git paw add` (both already
@@ -75,15 +80,26 @@ fn rename_repo_basename(tr: &TestRepo, new_basename: &str) -> PathBuf {
     renamed
 }
 
-/// Writes a `.git-paw/config.toml` with the broker enabled on a free port and
-/// `cat` as the CLI, plus any `extra` sections appended verbatim.
+/// The `docs_base_url` the launch-path tests configure, so every path is
+/// checked for the `docs-fetch` package and skill as well.
+const DOCS_URL: &str = "https://docs.example.test";
+
+/// Writes a `.git-paw/config.toml` with the broker enabled on a free port,
+/// `cat` as the CLI and `docs_base_url` set, plus any `extra` sections
+/// appended verbatim.
 fn write_config(repo: &Path, extra: &str) {
+    write_config_with(repo, &format!("docs_base_url = \"{DOCS_URL}\"\n"), extra);
+}
+
+/// [`write_config`] with `top` (top-level keys) in place of `docs_base_url`.
+fn write_config_with(repo: &Path, top: &str, extra: &str) {
     let paw_dir = repo.join(".git-paw");
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
     let port = find_free_port();
     let config = format!(
         r#"
 default_cli = "cat"
+{top}
 
 [broker]
 enabled = true
@@ -134,13 +150,28 @@ fn agent_worktrees(repo: &Path, session: &str) -> Vec<PathBuf> {
     file.agents.into_iter().map(|a| a.worktree_path).collect()
 }
 
-/// Asserts `<worktree>/.git-paw/scripts/broker.sh` exists, is executable, and
-/// carries the bundled helper's content (not a stale or empty placeholder).
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Asserts the coordination package is provisioned into `worktree`: an
+/// executable `.git-paw/skills/coordination/scripts/broker.sh` carrying the
+/// bundled helper beside its `_paw_common.sh` preamble, and its byte-identical
+/// compatibility copy at `.git-paw/scripts/broker.sh`.
 fn assert_broker_helper_provisioned(worktree: &Path) {
-    let helper = worktree.join(".git-paw").join("scripts").join("broker.sh");
+    let scripts = worktree.join(".git-paw/skills/coordination/scripts");
+    let helper = scripts.join("broker.sh");
     assert!(
-        helper.exists(),
-        "agent worktree must carry the bundled broker helper at {}",
+        is_executable(&helper),
+        "agent worktree must carry an executable bundled broker helper at {}",
         helper.display()
     );
     let contents = fs::read_to_string(&helper).expect("read provisioned broker.sh");
@@ -148,28 +179,88 @@ fn assert_broker_helper_provisioned(worktree: &Path) {
         contents.contains("Agent-side broker helper"),
         "provisioned helper must be the bundled broker.sh; got:\n{contents}"
     );
-    // The shared preamble each helper sources must land alongside it.
-    let common = worktree
-        .join(".git-paw")
-        .join("scripts")
-        .join("_paw_common.sh");
     assert!(
-        common.exists(),
-        "the shared preamble broker.sh sources must be provisioned at {}",
-        common.display()
+        scripts.join("_paw_common.sh").is_file(),
+        "the shared preamble broker.sh sources must be provisioned beside it"
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&helper)
-            .expect("stat provisioned broker.sh")
-            .permissions()
-            .mode();
-        assert!(
-            mode & 0o111 != 0,
-            "provisioned broker.sh must be executable; mode is {mode:o}"
-        );
-    }
+    let compat = worktree.join(".git-paw/scripts/broker.sh");
+    assert!(is_executable(&compat), "{}", compat.display());
+    assert_eq!(
+        fs::read(&compat).expect("read compatibility copy"),
+        contents.as_bytes(),
+        "the compatibility copy is byte-identical"
+    );
+}
+
+/// Scenarios "A worktree receives exactly its selected packages", "The
+/// worktree's SKILL.md is rendered for that agent", "docs-fetch helper
+/// provisioned only when configured" and "The docs-fetch skill is injected on
+/// every launch path that provisions it": with the broker on and
+/// `docs_base_url` set (`docs`), the worktree holds exactly `coordination`
+/// and `docs-fetch`, never `orchestrator`; its `SKILL.md` names the agent;
+/// and the managed block indexes and inlines the same packages. Also
+/// "An invocation of the old path still works".
+fn assert_selected_packages(worktree: &Path, docs: bool) {
+    assert_broker_helper_provisioned(worktree);
+    let skills = worktree.join(".git-paw/skills");
+    assert!(
+        !skills.join("orchestrator").exists(),
+        "no root-only package"
+    );
+    assert!(!skills.join("cli-setup").exists(), "no root-only package");
+    let docs_helper = skills.join("docs-fetch/scripts/docs-fetch.sh");
+    assert_eq!(
+        is_executable(&docs_helper),
+        docs,
+        "{}",
+        docs_helper.display()
+    );
+    assert_eq!(
+        worktree.join(".git-paw/scripts/docs-fetch.sh").exists(),
+        docs,
+        "the docs-fetch compatibility copy follows the selection"
+    );
+
+    let head = StdCommand::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .expect("git rev-parse");
+    let branch_id =
+        git_paw::broker::messages::slugify_branch(String::from_utf8_lossy(&head.stdout).trim());
+    let skill = fs::read_to_string(skills.join("coordination/SKILL.md")).expect("SKILL.md");
+    assert!(skill.starts_with("---\nname: coordination\n"), "{skill}");
+    assert!(!skill.contains("{{BRANCH_ID}}") && !skill.contains("{{BROKER_HELPER}}"));
+    assert!(
+        skill.contains(&format!("--agent {branch_id} ")),
+        "SKILL.md must be rendered for the agent ({branch_id}); got:\n{skill}"
+    );
+
+    let sidecar = fs::read_to_string(worktree.join(".git-paw/AGENTS.local.md")).expect("sidecar");
+    assert!(sidecar.contains("## Skills\n"), "{sidecar}");
+    assert!(sidecar.contains("## Coordination Skills"), "{sidecar}");
+    assert_eq!(
+        sidecar.contains("## Consulting git-paw Documentation"),
+        docs,
+        "the docs-fetch skill is injected exactly when it is provisioned"
+    );
+    assert_eq!(
+        sidecar.contains("`.git-paw/skills/docs-fetch/scripts/docs-fetch.sh`"),
+        docs
+    );
+
+    let help = StdCommand::new("bash")
+        .arg(".git-paw/scripts/broker.sh")
+        .arg("--help")
+        .current_dir(worktree)
+        .output()
+        .expect("run the compatibility copy");
+    assert!(
+        help.status.success(),
+        "`.git-paw/scripts/broker.sh --help` must still work; stderr:\n{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(String::from_utf8_lossy(&help.stderr).contains("usage:"));
 }
 
 /// Spec scenario "start provisions the broker helper into each worktree" —
@@ -209,7 +300,7 @@ fn supervisor_launch_provisions_broker_helper_into_each_worktree() {
     let worktrees = agent_worktrees(&repo, &session_name);
     assert_eq!(worktrees.len(), 1, "expected one agent worktree");
     for wt in &worktrees {
-        assert_broker_helper_provisioned(wt);
+        assert_selected_packages(wt, true);
     }
 }
 
@@ -266,7 +357,7 @@ fn add_provisions_broker_helper_into_the_new_worktree() {
     let worktrees = agent_worktrees(&repo, &session_name);
     assert_eq!(worktrees.len(), 2, "expected the added agent in the roster");
     for wt in &worktrees {
-        assert_broker_helper_provisioned(wt);
+        assert_selected_packages(wt, true);
     }
 }
 
@@ -314,7 +405,7 @@ fn bare_launch_provisions_broker_helper_into_each_worktree() {
     let worktrees = agent_worktrees(&repo, &session_name);
     assert_eq!(worktrees.len(), 2, "expected both agent worktrees");
     for wt in &worktrees {
-        assert_broker_helper_provisioned(wt);
+        assert_selected_packages(wt, true);
     }
 }
 
@@ -361,7 +452,7 @@ fn spec_driven_launch_provisions_broker_helper_into_each_worktree() {
         "expected the spec-driven agent worktree"
     );
     for wt in &worktrees {
-        assert_broker_helper_provisioned(wt);
+        assert_selected_packages(wt, true);
     }
 }
 
@@ -379,7 +470,7 @@ fn re_attaching_a_surviving_worktree_refreshes_the_helper() {
     let tmux_env = tmux_test_env();
     let project = unique_project_name("refresh");
     let repo = rename_repo_basename(&tr, &project);
-    write_config(&repo, "");
+    write_config_with(&repo, "", "");
 
     let session_name = format!("paw-{project}");
     let home = TempDir::new().expect("home tempdir");
@@ -405,8 +496,10 @@ fn re_attaching_a_surviving_worktree_refreshes_the_helper() {
         .into_iter()
         .next()
         .expect("one agent worktree");
-    let helper = worktree.join(".git-paw").join("scripts").join("broker.sh");
+    let helper = worktree.join(".git-paw/skills/coordination/scripts/broker.sh");
     fs::write(&helper, "# clobbered\n").expect("clobber provisioned helper");
+    fs::write(worktree.join(".git-paw/scripts/broker.sh"), "# clobbered\n")
+        .expect("clobber the compatibility copy");
 
     // A second launch against the surviving worktree: a fresh HOME means no
     // saved session receipt, so this takes the same bare launch path again.
@@ -429,5 +522,5 @@ fn re_attaching_a_surviving_worktree_refreshes_the_helper() {
         String::from_utf8_lossy(&out2.stderr)
     );
 
-    assert_broker_helper_provisioned(&worktree);
+    assert_selected_packages(&worktree, false);
 }

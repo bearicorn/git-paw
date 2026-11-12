@@ -87,6 +87,10 @@ pub enum Command {
         about = "Launch a new session or reattach to an existing one",
         long_about = "Smart start: reattaches if a session is active, recovers if stopped/crashed, \
                       or launches a new interactive session.\n\n\
+                      Before any agent pane, every start installs the bundled skill packages at \
+                      the repository root under .git-paw/skills/ (rewriting only files that are \
+                      missing or differ from a render of the current config), and each agent \
+                      worktree gets its selected packages under its own .git-paw/skills/.\n\n\
                       A session left with no agents (every one removed with `git paw remove`) \
                       never silently drops a launch selection (`--branches`, `--specs`, \
                       `--from-all-specs`): a stopped one is replaced by a fresh session running \
@@ -670,8 +674,10 @@ pub enum Command {
         about = "Initialize .git-paw/ directory and configuration",
         long_about = "Creates the .git-paw/ directory with a default config and sets up \
                       .gitignore for logs.\n\n\
-                      Also installs the bundled helpers under .git-paw/scripts/, exports the \
-                      orchestrator skill (rendered with your gate commands) to \
+                      Also installs every bundled skill package under .git-paw/skills/<package>/ \
+                      (its rendered SKILL.md and its helpers under scripts/, with deprecated \
+                      compatibility copies under .git-paw/scripts/), among them the orchestrator \
+                      skill (rendered with your gate commands) at \
                       .git-paw/skills/orchestrator/SKILL.md and the cli-setup skill beside it \
                       (.git-paw/skills/ is gitignored), and adds an orchestrator pointer section \
                       to the root AGENTS.md. A re-run reports a file as updated only when its \
@@ -2064,6 +2070,18 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    /// `skill-package-deploy`: `git paw init --help` and `git paw start --help`
+    /// name the installed package directory.
+    #[test]
+    fn init_and_start_help_name_the_installed_packages() {
+        for sub in ["init", "start"] {
+            let help = Cli::try_parse_from(["git-paw", sub, "--help"])
+                .unwrap_err()
+                .to_string();
+            assert!(help.contains(".git-paw/skills/"), "{sub}: {help}");
+        }
     }
 
     /// `orchestrator-skill-export`: `git paw init --help` names the exported

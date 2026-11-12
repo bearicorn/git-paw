@@ -129,6 +129,10 @@ pub struct WorktreeAssignment {
     pub owned_files: Option<Vec<String>>,
     /// Optional rendered skill content to inject into the assignment section.
     pub skill_content: Option<String>,
+    /// The skill packages provisioned into this worktree, in selection order;
+    /// the managed block indexes them in a `## Skills` section before the
+    /// inlined skill bodies. Empty: no index.
+    pub skill_packages: Vec<&'static crate::skills::BundledPackage>,
     /// Optional inter-agent rules block (file ownership, never-push, proactive
     /// status publishing, peer-dependency escalation) injected by the
     /// supervisor. When `None`, the generated section omits the
@@ -226,6 +230,11 @@ fn generate_section(assignment: &WorktreeAssignment, for_worker: bool) -> String
         }
     }
 
+    if !assignment.skill_packages.is_empty() {
+        section.push('\n');
+        section.push_str(&skills_index(&assignment.skill_packages));
+    }
+
     if let Some(ref skill) = assignment.skill_content {
         section.push('\n');
         section.push_str(skill);
@@ -248,6 +257,26 @@ fn generate_section(assignment: &WorktreeAssignment, for_worker: bool) -> String
     section.push_str(END_MARKER);
     section.push('\n');
     section
+}
+
+/// The generated `## Skills` index of the provisioned `packages`: one entry
+/// per package with its name, frontmatter description, installed `SKILL.md`
+/// path and helper package path, all taken from the registry.
+fn skills_index(packages: &[&crate::skills::BundledPackage]) -> String {
+    let mut index = String::from("## Skills\n\n");
+    for package in packages {
+        let _ = writeln!(
+            index,
+            "- **{}** — {}",
+            package.name,
+            package.description().trim()
+        );
+        let _ = writeln!(index, "  - Skill: `{}`", package.skill_md_path());
+        for helper in package.helper_paths() {
+            let _ = writeln!(index, "  - Helper: `{helper}`");
+        }
+    }
+    index
 }
 
 /// Worktree-relative path of the gitignored **sidecar** instruction file that
@@ -984,6 +1013,7 @@ mod tests {
             spec_content: Some("SPEC BODY".to_string()),
             owned_files: Some(vec!["src/lib.rs".to_string()]),
             skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         });
         let spec_pos = with_task.find("### Spec").expect("spec heading rendered");
@@ -1006,6 +1036,7 @@ mod tests {
             spec_content: None,
             owned_files: None,
             skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         });
         assert!(
@@ -1297,6 +1328,7 @@ mod tests {
             spec_content: spec.map(ToString::to_string),
             owned_files: files.map(|v| v.into_iter().map(ToString::to_string).collect()),
             skill_content: None,
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         }
     }
@@ -1312,6 +1344,7 @@ mod tests {
             spec_content: spec.map(ToString::to_string),
             owned_files: files.map(|v| v.into_iter().map(ToString::to_string).collect()),
             skill_content: skill.map(ToString::to_string),
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         }
     }
@@ -2002,6 +2035,7 @@ mod tests {
             skill_content: Some(
                 "Agent ID: feat-http-broker\nURL: http://127.0.0.1:9119\n".to_string(),
             ),
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         };
         let section = generate_worktree_section(&assignment);
@@ -2074,6 +2108,7 @@ mod tests {
             spec_content: baseline.spec_content.clone(),
             owned_files: baseline.owned_files.clone(),
             skill_content: None,
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         };
         assert_eq!(
@@ -2185,7 +2220,7 @@ mod tests {
             .content;
         assert!(content.contains("agent.blocked"));
         assert!(content.contains("agent.artifact"));
-        assert!(content.contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll"));
+        assert!(content.contains("{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll"));
     }
 
     #[test]
@@ -2745,6 +2780,7 @@ mod tests {
             spec_content: None,
             owned_files: None,
             skill_content: None,
+            skill_packages: Vec::new(),
             inter_agent_rules: None,
         });
         assert!(
@@ -2796,5 +2832,63 @@ mod tests {
             section.contains("and you are that root session, you are its orchestrator"),
             "the orchestrator claim should be conditional on being the root session"
         );
+    }
+
+    fn section_for(broker: bool, docs: bool) -> String {
+        let packages = crate::skills::packages_for_worktree(crate::skills::WorktreeInputs {
+            broker_enabled: broker,
+            docs_base_url_configured: docs,
+        });
+        generate_worktree_section(&WorktreeAssignment {
+            branch: "feat/x".to_string(),
+            cli: "claude".to_string(),
+            spec_content: None,
+            owned_files: None,
+            skill_content: (!packages.is_empty())
+                .then(|| "## Coordination Skills\n\nINLINED BODY\n".to_string()),
+            skill_packages: packages,
+            inter_agent_rules: None,
+        })
+    }
+
+    // boot-agents-md / Scenario: Index lists the coordination package.
+    #[test]
+    fn index_lists_the_coordination_package() {
+        let section = section_for(true, false);
+        let index = section.find("## Skills\n").expect("a skills index");
+        let entry = &section[index..];
+        assert!(entry.contains("**coordination**"), "{section}");
+        assert!(
+            entry.contains("`.git-paw/skills/coordination/SKILL.md`"),
+            "{section}"
+        );
+        assert!(
+            entry.contains("`.git-paw/skills/coordination/scripts/broker.sh`"),
+            "{section}"
+        );
+        let description = crate::skills::bundled_package("coordination")
+            .unwrap()
+            .description();
+        assert!(entry.contains(description.trim()), "{section}");
+        assert!(index < section.find("## Coordination Skills").unwrap());
+        assert!(index < section.find(END_MARKER).unwrap());
+        let index_body = &section[index..section.find("## Coordination Skills").unwrap()];
+        assert_eq!(index_body.matches("\n- **").count(), 1, "{section}");
+    }
+
+    // boot-agents-md / Scenario: Index follows the selection.
+    #[test]
+    fn index_follows_the_selection() {
+        let section = section_for(true, true);
+        let coordination = section.find("- **coordination**").expect("coordination");
+        let docs = section.find("- **docs-fetch**").expect("docs-fetch");
+        assert!(coordination < docs, "{section}");
+        assert!(section.contains("`.git-paw/skills/docs-fetch/scripts/docs-fetch.sh`"));
+    }
+
+    // boot-agents-md / Scenario: No packages, no index.
+    #[test]
+    fn no_packages_no_index() {
+        assert!(!section_for(false, false).contains("## Skills"));
     }
 }

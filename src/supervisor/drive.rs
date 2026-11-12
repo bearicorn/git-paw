@@ -2972,11 +2972,12 @@ impl LearningSink for SweepLearningSink {
         if !self.seen.insert(key) {
             return; // already recorded in-session
         }
-        let script = self
-            .repo_root
-            .join(".git-paw")
-            .join("scripts")
-            .join("sweep.sh");
+        // The orchestrator package's helper at the repository root, never
+        // its `.git-paw/scripts/` compatibility copy.
+        let Some(rel) = crate::skills::helper_invocation_path("sweep.sh") else {
+            return;
+        };
+        let script = self.repo_root.join(rel);
         if !script.exists() {
             return;
         }
@@ -11699,7 +11700,7 @@ mod tests {
     #[test]
     fn a_hung_learning_is_dropped_at_the_bound() {
         let repo = tempfile::tempdir().expect("temp repo root");
-        let scripts = repo.path().join(".git-paw/scripts");
+        let scripts = repo.path().join(".git-paw/skills/orchestrator/scripts");
         std::fs::create_dir_all(&scripts).unwrap();
         std::fs::write(scripts.join("sweep.sh"), "sleep 1\ntouch late.txt\n").unwrap();
         let mut sink = SweepLearningSink {
@@ -11725,12 +11726,18 @@ mod tests {
         );
     }
 
-    /// Scenario "A learning carries the session's recorded broker".
+    /// Scenario "A learning carries the session's recorded broker", and
+    /// skill-packages / Scenario "The drive loop records learnings through
+    /// the package helper": the package-path `sweep.sh` runs, never the
+    /// `.git-paw/scripts/` compatibility copy.
     #[test]
     fn a_fast_learning_runs_with_the_session_broker_url() {
         let url = "http://127.0.0.1:4242";
         let repo = tempfile::tempdir().expect("temp repo root");
-        let scripts = repo.path().join(".git-paw/scripts");
+        let compat = repo.path().join(".git-paw/scripts");
+        std::fs::create_dir_all(&compat).unwrap();
+        std::fs::write(compat.join("sweep.sh"), "touch compat-ran.txt\n").unwrap();
+        let scripts = repo.path().join(".git-paw/skills/orchestrator/scripts");
         std::fs::create_dir_all(&scripts).unwrap();
         std::fs::write(
             scripts.join("sweep.sh"),
@@ -11749,5 +11756,6 @@ mod tests {
         let learned = std::fs::read_to_string(repo.path().join("learned.txt"))
             .expect("the learning ran to completion");
         assert_eq!(learned, format!("learn|{url}\n"));
+        assert!(!repo.path().join("compat-ran.txt").exists());
     }
 }

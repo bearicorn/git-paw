@@ -41,7 +41,7 @@ broker URL, the helper paths, any `[governance]` documents and, under
 `--unattended`, the drive-loop directive — into the gitignored sidecar
 `.git-paw/AGENTS.local.md`, and prints both paths with the attach hint. The
 orchestrator reads them and drives the run through the bundled helpers
-(`.git-paw/scripts/sweep.sh`, `broker.sh`) or the MCP server. See
+(`.git-paw/skills/orchestrator/scripts/sweep.sh`, `broker.sh`) or the MCP server. See
 [Driving the session from your own agent](#driving-the-session-from-your-own-agent). Its
 roster row (`supervisor`) appears on the dashboard once it publishes its own
 `agent.status`; the launcher never publishes on its behalf.
@@ -80,7 +80,7 @@ name `orchestrator` (or its alias `supervisor`).
 **The surfaces it uses.**
 
 - **Follow the session** by blocking on the broker's event cursor — the MCP
-  `wait_for_events` tool or `.git-paw/scripts/sweep.sh events` — carrying the
+  `wait_for_events` tool or `.git-paw/skills/orchestrator/scripts/sweep.sh events` — carrying the
   returned cursor forward, and inspect when an event or a `stalled` wave says
   to. `get_session_status`, `sweep.sh status` and `sweep.sh inbox` read the
   roster and the orchestrator's inbox. A sampled pane capture can miss a
@@ -400,13 +400,15 @@ revoked or taken over exits `session-torn-down` on its next poll without acting
 > running — and you would end up with two loops driving the same panes. Stop
 > that older `--unattended` process before re-attaching to its session.
 
-> **Upgrading the helpers.** A supervised launch — fresh, or a drive loop
-> bound to an existing session — refreshes `.git-paw/scripts/` along with the
-> exported skill, so the helpers always match the subcommands the skill
-> teaches. A script is rewritten only when its content differs from the
-> running binary's; like `git paw init`, this overwrites local edits there.
-> If a script path is a symlink or `.git-paw/scripts/` is not writable, the
-> launch stops with an error naming the path, as `git paw init` does.
+> **Upgrading the helpers.** Every `git paw start` — and a drive loop bound
+> to an existing session — re-installs the root skill packages under
+> `.git-paw/skills/` with their `.git-paw/scripts/` compatibility copies, so
+> the helpers always match the subcommands the orchestrator skill teaches. A
+> file is rewritten only when its content differs from what the running binary
+> renders; like `git paw init`, this overwrites local edits there. Each file is
+> replaced atomically, so a `sweep.sh` already running keeps reading the old
+> script. If an install path is a symlink or not writable, the launch stops
+> with an error naming the path, as `git paw init` does.
 
 ### Session-instance lifecycle
 
@@ -664,7 +666,7 @@ With `auto_loopback = true`, each poll the loop:
    `agent.feedback` from the supervisor whose errors carry a `[<gate>]` tag
    naming one of `gate_tags` (default: `[testing]`, `[regression]`,
    `[spec audit]`, `[doc audit]`, `[security audit]`, `[scope]`) — the shape
-   `.git-paw/scripts/sweep.sh feedback-gate` publishes. A passing gate
+   `.git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate` publishes. A passing gate
    publishes `agent.verified` instead, so only failures start a cycle. Other
    traffic on the same channel — conflict-detector warnings, peer feedback — is
    never mistaken for a gate verdict. The tag vocabulary is configurable (see
@@ -901,12 +903,12 @@ degrade gracefully: a supervisor that hasn't published a phase renders with
 its plain status, exactly as in v0.5.0.)
 
 The supervisor emits these phase-tagged statuses through the bundled
-`.git-paw/scripts/sweep.sh status-publish` helper — `--phase <phase>` sets the
+`.git-paw/skills/orchestrator/scripts/sweep.sh status-publish` helper — `--phase <phase>` sets the
 label and `--detail '<json-object>'` carries the structured body, while the
 plain `status-publish <message>` form (no flags) publishes the v0.5.0 shape
 unchanged. The helper shapes the `agent.status` payload internally, so the
 supervisor never hand-rolls the JSON. Because the helper always lives at the
-stable path `.git-paw/scripts/sweep.sh`, a permission rule in your agent CLI
+stable path `.git-paw/skills/orchestrator/scripts/sweep.sh`, a permission rule in your agent CLI
 scoped to that exact path covers every phase without a broad HTTP-client rule.
 
 Every `sweep.sh` publish verb — `status-publish`, `verified`, `feedback-gate`,
@@ -981,7 +983,7 @@ re-reads it after `git paw add` or `git paw remove` — the roster changes and
 tmux renumbers panes on layout changes. The roster can also be read through
 the helpers or the MCP `get_session_status` tool.
 
-The bundled `.git-paw/scripts/sweep.sh` invokes this command on every sweep
+The bundled `.git-paw/skills/orchestrator/scripts/sweep.sh` invokes this command on every sweep
 iteration. If the helper is missing for any reason, the supervisor falls
 back to invoking `tmux display-message` directly — this is the documented
 escape hatch.
@@ -996,7 +998,7 @@ via `pane_current_path` first.
 The bundled supervisor skill hardens three behaviours so a multi-agent
 session runs without the human approving the supervisor's every command:
 
-- **Use `.git-paw/scripts/sweep.sh` for pane work; never inline loops.**
+- **Use `.git-paw/skills/orchestrator/scripts/sweep.sh` for pane work; never inline loops.**
   Ad-hoc `for p in <panes>; do tmux send-keys -t ...:0.$p ...; done` loops
   trip the `simple_expansion` permission gate on each iteration, so one
   sweep becomes one approval prompt per pane. The helper does the explicit
@@ -1022,10 +1024,10 @@ in `send-keys` mode, an answer to an agent's question, a stall nudge, a
 paste-buffer re-send — goes through one helper verb:
 
 ```bash
-.git-paw/scripts/sweep.sh tell feat-auth "rebase onto main before continuing"
+.git-paw/skills/orchestrator/scripts/sweep.sh tell feat-auth "rebase onto main before continuing"
 
 # Or pipe the message in, so it is in no process's arguments at all:
-printf '%s' "rebase onto main before continuing" | .git-paw/scripts/sweep.sh tell feat-auth
+printf '%s' "rebase onto main before continuing" | .git-paw/skills/orchestrator/scripts/sweep.sh tell feat-auth
 ```
 
 It passes the message on stdin to the hidden `git paw __send`, which types it
@@ -1070,7 +1072,7 @@ It refuses, typing nothing, when:
 `git paw setup-cli` never grants `sweep.sh tell`, and pins it to an `ask`
 rule, so your CLI asks before every call — see
 [Per-CLI Setup](cli-setup.md). A broad rule you wrote yourself, such as
-`Bash(.git-paw/scripts/sweep.sh *)`, would let `tell` run without that prompt
+`Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)`, would let `tell` run without that prompt
 in a setup without the `ask` rule; `git paw doctor` lists such a rule as grant
 residue.
 
@@ -1472,9 +1474,9 @@ only through the root-side `sweep.sh` verbs, which fetch it with
 `git paw __authority` and send it as `X-Paw-Authority`:
 
 ```bash
-.git-paw/scripts/sweep.sh verified <agent-id> "<summary>"
-.git-paw/scripts/sweep.sh feedback-gate <agent-id> <gate> "<message>"
-.git-paw/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> ["<note>"]
+.git-paw/skills/orchestrator/scripts/sweep.sh verified <agent-id> "<summary>"
+.git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate <agent-id> <gate> "<message>"
+.git-paw/skills/orchestrator/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> ["<note>"]
 ```
 
 A raw `curl …/publish` of either message gets `403 {"error":"authority required"}`,
@@ -1542,7 +1544,7 @@ conflict events, permission patterns) into a markdown file you can review
 after the run. The supervisor also records *qualitative* learnings it reasons out over
 the run — recurring failure shapes, doc gaps, ADR drift, scope mistakes, and
 **tooling friction** with git-paw itself — publishing each through the bundled
-`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper (never
+`.git-paw/skills/orchestrator/scripts/sweep.sh learn <category> <title> <body-json>` helper (never
 a raw HTTP request). It captures them opportunistically during each sweep and again in
 a session-end synthesis pass. See [Learnings Mode](learnings.md) for the file
 format, the category set, and how to opt in.

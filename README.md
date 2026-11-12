@@ -75,7 +75,7 @@ Walkthroughs: [same CLI](docs/src/quick-start-same-cli.md), [per-branch CLI](doc
 
 | Command | What it does |
 |---------|--------------|
-| `init` | Create `.git-paw/`, config and `.gitignore` entries; install the helper scripts; export the orchestrator and cli-setup skills; add the orchestrator pointer to `AGENTS.md`. A re-run backfills new config fields. |
+| `init` | Create `.git-paw/`, config and `.gitignore` entries; install every bundled skill package under `.git-paw/skills/` (the orchestrator and cli-setup skills, and every helper); add the orchestrator pointer to `AGENTS.md`. A re-run backfills new config fields. |
 | `start` | Launch, reattach or recover a session: interactive, `--cli`/`--branches`, `--preset` or spec-driven. |
 | `add` / `remove` | Attach or detach one branch and its agent pane in a live session. |
 | `pause` / `stop` | Pause keeps CLI panes for a fast resume; stop ends the session and keeps worktrees and state. |
