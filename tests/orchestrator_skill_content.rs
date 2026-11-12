@@ -999,3 +999,63 @@ fn every_pre_move_gate_sentence_survives_in_the_package() {
         "expected the whole gate text, checked {sentences} sentences"
     );
 }
+
+// ---------------------------------------------------------------------------
+// agent-profiles: delegate profiles in the delegation section (skill-agent).
+// ---------------------------------------------------------------------------
+
+// skill-agent / Scenario: Delegate profiles come first
+#[test]
+fn delegate_profiles_come_first() {
+    let s = section("### Delegating gates");
+    assert!(s.contains("`git paw delegate --list`"));
+    assert!(s.contains(
+        "use the first one available, in this order: a delegate profile, then your cli's own isolated subagents, then inline"
+    ));
+    let delegate = s
+        .find("delegate profiles first")
+        .expect("delegate profiles");
+    let subagents = s
+        .find("otherwise, when your cli can run isolated subagents")
+        .expect("subagents");
+    let inline = s.find("without subagent support").expect("inline");
+    assert!(delegate < subagents && subagents < inline);
+}
+
+// skill-agent / Scenario: A delegate profile is used when the CLI has no subagents
+#[test]
+fn a_delegate_profile_is_used_when_the_cli_has_no_subagents() {
+    let s = section("### Delegating gates");
+    assert!(s.contains(
+        "so with a matching one configured you delegate even when your cli has no subagents"
+    ));
+    assert!(s.contains("but only when no matching delegate profile is configured either"));
+}
+
+// skill-agent / Scenario: Gates map to auditor roles
+#[test]
+fn gates_map_to_auditor_roles() {
+    let s = section("### Delegating gates");
+    for mapping in [
+        "`spec-auditor` for the spec audit",
+        "`doc-auditor` for the doc audit",
+        "`security-auditor` for the security audit",
+        "`explorer` for broad read-only exploration",
+    ] {
+        assert!(s.contains(mapping), "missing {mapping}");
+    }
+    assert!(s.contains("`git paw delegate <name> --task"));
+    assert!(s.contains("the branch, the re-resolved tip and the change id"));
+}
+
+// skill-agent / Scenario: Publishing stays with the orchestrator
+#[test]
+fn publishing_stays_with_the_orchestrator() {
+    let s = section("### Delegating gates");
+    assert!(s.contains("at most four read-only delegates run at once"));
+    assert!(s.contains("a delegate's standard output is its verdict (or its map)"));
+    assert!(s.contains("a delegate never publishes"));
+    assert!(s.contains(
+        "you publish `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`"
+    ));
+}
