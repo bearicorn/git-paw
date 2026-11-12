@@ -1,8 +1,8 @@
 ## 1. Config seam (no behaviour change without profiles)
 
-- [ ] 1.1 New `src/config/profiles.rs`: `ProfileName` (validated newtype), `ProfileKind { Worker, Delegate }`, `ProfileEntry` (`kind`, `description`, `cli`, `args`, `skill`, `approval`, `timeout_seconds`), effective-approval / effective-timeout accessors; `PawConfig.profiles` and `PawConfig.default_profile` with `#[serde(default, skip_serializing_if = …)]`; `merged_with` merges `profiles` by name and `default_profile` like `default_cli`; doc comments on every public item
-- [ ] 1.2 Load-time validation with errors naming `profiles.<name>` and the key; unit table tests for "A worker and a delegate profile load", "Missing or unknown kind is rejected", "A multi-line description is rejected", "A full-auto delegate is rejected", "A delegate without a role skill is rejected", "The orchestrator skill is not a profile role", "Timeout rules", "An invalid profile name is rejected", "The repository entry replaces the global entry"
-- [ ] 1.3 Round-trip test: a config without profiles serializes byte-identically; existing config tests green unchanged
+- [x] 1.1 New `src/config/profiles.rs`: `ProfileName` (validated newtype), `ProfileKind { Worker, Delegate }`, `ProfileEntry` (`kind`, `description`, `cli`, `args`, `skill`, `approval`, `timeout_seconds`), effective-approval / effective-timeout accessors; `PawConfig.profiles` and `PawConfig.default_profile` with `#[serde(default, skip_serializing_if = …)]`; `merged_with` merges `profiles` by name and `default_profile` like `default_cli`; doc comments on every public item
+- [x] 1.2 Load-time validation with errors naming `profiles.<name>` and the key; unit table tests for "A worker and a delegate profile load", "Missing or unknown kind is rejected", "A multi-line description is rejected", "A full-auto delegate is rejected", "A delegate without a role skill is rejected", "The orchestrator skill is not a profile role", "Timeout rules", "An invalid profile name is rejected", "The repository entry replaces the global entry"
+- [x] 1.3 Round-trip test: a config without profiles serializes byte-identically; existing config tests green unchanged
 
 ## 2. Worker choice through every selection path
 

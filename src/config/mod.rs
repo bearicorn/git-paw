@@ -4,7 +4,7 @@
 //! and per-repo (`.git-paw/config.toml`) files. Supports custom CLI definitions,
 //! presets, and programmatic add/remove of custom CLIs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,7 @@ mod broker;
 mod cli;
 mod dashboard;
 mod layout;
+mod profiles;
 mod prompt_profile;
 mod specs;
 mod supervisor;
@@ -30,6 +31,7 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
+pub use profiles::{DEFAULT_DELEGATE_TIMEOUT_SECONDS, ProfileEntry, ProfileKind, ProfileName};
 pub use prompt_profile::{
     CliPromptProfile, CliPromptProfileOverride, CompiledPromptProfile, InvalidPattern,
     claude_prompt_profile, resolve_prompt_profile,
@@ -376,6 +378,15 @@ pub struct PawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_spec_cli: Option<String>,
 
+    /// Default worker profile: pre-selected in the picker ahead of
+    /// `default_cli`, and the session-wide fallback before `default_cli`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "profiles::deserialize_default_profile"
+    )]
+    pub default_profile: Option<ProfileName>,
+
     /// Prefix for spec-derived branch names (default: `"spec/"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_prefix: Option<String>,
@@ -391,6 +402,14 @@ pub struct PawConfig {
     /// Named presets keyed by name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub presets: HashMap<String, Preset>,
+
+    /// Agent profiles keyed by name (`[profiles.<name>]`), validated at load.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "profiles::deserialize_profiles"
+    )]
+    pub profiles: BTreeMap<ProfileName, ProfileEntry>,
 
     /// Spec scanning configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,6 +522,11 @@ impl PawConfig {
             presets.insert(k.clone(), v.clone());
         }
 
+        let mut profiles = self.profiles.clone();
+        for (k, v) in &overlay.profiles {
+            profiles.insert(k.clone(), v.clone());
+        }
+
         Self {
             default_cli: overlay
                 .default_cli
@@ -512,6 +536,10 @@ impl PawConfig {
                 .default_spec_cli
                 .clone()
                 .or_else(|| self.default_spec_cli.clone()),
+            default_profile: overlay
+                .default_profile
+                .clone()
+                .or_else(|| self.default_profile.clone()),
             branch_prefix: overlay
                 .branch_prefix
                 .clone()
@@ -519,6 +547,7 @@ impl PawConfig {
             mouse: overlay.mouse.or(self.mouse),
             clis,
             presets,
+            profiles,
             specs: overlay.specs.clone().or_else(|| self.specs.clone()),
             logging: overlay.logging.clone().or_else(|| self.logging.clone()),
             dashboard: overlay.dashboard.clone().or_else(|| self.dashboard.clone()),
@@ -640,6 +669,29 @@ impl PawConfig {
             .name
             .clone()
             .unwrap_or_else(|| "git-paw".to_string())
+    }
+
+    /// Returns the profile named `name`, if one is configured.
+    #[must_use]
+    pub fn profile(&self, name: &str) -> Option<&ProfileEntry> {
+        self.profiles
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .map(|(_, v)| v)
+    }
+
+    /// Worker profiles in name order.
+    pub fn worker_profiles(&self) -> impl Iterator<Item = (&ProfileName, &ProfileEntry)> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| p.kind == ProfileKind::Worker)
+    }
+
+    /// Delegate profiles in name order.
+    pub fn delegate_profiles(&self) -> impl Iterator<Item = (&ProfileName, &ProfileEntry)> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| p.kind == ProfileKind::Delegate)
     }
 
     /// Returns a preset by name, if it exists.
