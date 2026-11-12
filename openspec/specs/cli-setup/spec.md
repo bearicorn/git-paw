@@ -165,8 +165,8 @@ the command SHALL report that there is nothing to do, write nothing and exit `0`
 - **GIVEN** a repository with no `.claude/settings.local.json` at its root
 - **WHEN** `git paw setup-cli claude --allowlist --dry-run` is run
 - **THEN** stdout SHALL name the absolute path of `<repo>/.claude/settings.local.json` as created
-- **AND** it SHALL list the entry `Bash(.git-paw/scripts/broker.sh *)` under `permissions.allow`
-- **AND** it SHALL list the entry `Edit(**/.git-paw/scripts/**)` under `permissions.deny`
+- **AND** it SHALL list the entry `Bash(.git-paw/skills/coordination/scripts/broker.sh *)` under `permissions.allow`
+- **AND** it SHALL list the entries `Edit(**/.git-paw/skills/**)` and `Edit(**/.git-paw/scripts/**)` under `permissions.deny`
 - **AND** it SHALL name the setup-record file
 
 Test: `tests/cli_setup_e2e.rs::the_plan_names_the_main_checkout_file_and_its_entries, cli_setup::render::tests::a_verified_plan_renders_exactly_the_golden`
@@ -281,53 +281,64 @@ Test: `tests/cli_setup_e2e.rs::yes_applies_the_plan_records_it_and_leaves_git_st
 ### Requirement: Allowlist entries are path-scoped to git-paw's helper scripts
 
 For the `claude` row, the allowlist item SHALL add to `permissions.allow` only entries that name a
-git-paw helper script by its relative invocation path under `.git-paw/scripts/`, from a fixed grant
-table keyed by the names of the helper scripts the binary bundles:
+git-paw helper script by its package invocation path — `.git-paw/skills/<package>/scripts/<helper>`,
+relative and derived from the bundled package registry (`skill-packages`) — from a fixed grant table
+keyed by the names of the helper scripts the binary bundles:
 
-- `broker.sh`: every subcommand, as `Bash(.git-paw/scripts/broker.sh *)`;
-- `docs-fetch.sh`: only `find`, as `Bash(.git-paw/scripts/docs-fetch.sh find *)`;
-- `sweep.sh`: only the subcommands that send no keystrokes and publish no verdict — `snapshot`,
-  `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`,
-  `learn` and `events` — each as `Bash(.git-paw/scripts/sweep.sh <subcommand> *)`; `events` is
-  granted read-only, because it only reads the broker's log and status and sends no keystroke and
-  publishes nothing;
+- `broker.sh` (`coordination` package): every subcommand, as
+  `Bash(.git-paw/skills/coordination/scripts/broker.sh *)`;
+- `docs-fetch.sh` (`docs-fetch` package): only `find`, as
+  `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh find *)`;
+- `sweep.sh` (`orchestrator` package): only the subcommands that send no keystrokes and publish no
+  verdict — `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`,
+  `stuck-eval`, `status-publish`, `learn` and `events` — each as
+  `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh <subcommand> *)`; `events` is granted
+  read-only, because it only reads the broker's log and status and sends no keystroke and publishes
+  nothing;
 - `_paw_common.sh`: no entry (it is sourced, never invoked).
 
-The item SHALL add `Bash(.git-paw/scripts/sweep.sh approve *)` and
-`Bash(.git-paw/scripts/sweep.sh tell *)` to `permissions.ask`, so the keystroke-sending `approve` and
-`tell` subcommands always prompt even when another rule would allow them. The item SHALL NOT add an
-allow entry for `sweep.sh approve`, `sweep.sh tell`, `sweep.sh verified`, `sweep.sh feedback-gate`,
-`sweep.sh conflict-ack`, `sweep.sh answer` or `sweep.sh advanced-main`, for `docs-fetch.sh get`, an
-interpreter-prefixed form, an absolute-path form, a wildcard over a directory, or any entry naming a
-command other than a git-paw helper script. Every bundled helper script SHALL appear in the grant
-table, either with its granted subcommands or as granted nothing, and every `sweep.sh` subcommand
-SHALL be either granted or listed as never granted.
+The item SHALL NOT add an allow entry naming the deprecated compatibility path
+`.git-paw/scripts/<helper>`; nothing bundled invokes it.
+
+The item SHALL add `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)` and
+`Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)` to `permissions.ask`, together with the
+same two rules at the compatibility path (`Bash(.git-paw/scripts/sweep.sh approve *)` and
+`Bash(.git-paw/scripts/sweep.sh tell *)`), so the keystroke-sending `approve` and `tell`
+subcommands always prompt at either path even when another rule would allow them. The item SHALL NOT
+add an allow entry for `sweep.sh approve`, `sweep.sh tell`, `sweep.sh verified`,
+`sweep.sh feedback-gate`, `sweep.sh conflict-ack`, `sweep.sh answer` or `sweep.sh advanced-main`, for
+`docs-fetch.sh get`, an interpreter-prefixed form, an absolute-path form, a wildcard over a directory,
+or any entry naming a command other than a git-paw helper script. Every bundled helper script SHALL
+appear in the grant table, either with its granted subcommands or as granted nothing, and every
+`sweep.sh` subcommand SHALL be either granted or listed as never granted.
 
 #### Scenario: The allow entries are exactly the grant table
 
 - **WHEN** the allowlist item is planned for `claude`
 - **THEN** its `permissions.allow` entries SHALL be exactly the twelve grant-table entries
-- **AND** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh approve *)` and `Bash(.git-paw/scripts/sweep.sh tell *)`
+- **AND** its `permissions.ask` entries SHALL include `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)`, `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)`, `Bash(.git-paw/scripts/sweep.sh approve *)` and `Bash(.git-paw/scripts/sweep.sh tell *)`
 
 Test: `cli_setup::facts::tests::allow_entries_are_exactly_the_grant_table, cli_setup::plan::tests::allow_entries_are_exactly_the_grant_table`
 
 #### Scenario: The read-only events subcommand is granted
 
 - **WHEN** the allowlist item is planned for `claude`
-- **THEN** its `permissions.allow` entries SHALL include `Bash(.git-paw/scripts/sweep.sh events *)`
+- **THEN** its `permissions.allow` entries SHALL include `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)`
+
+Test: `cli_setup::facts::tests::the_read_only_events_subcommand_is_granted`
 
 #### Scenario: Keystroke and verdict subcommands are never allowed
 
 - **WHEN** the allowlist item is planned for `claude`
 - **THEN** no `permissions.allow` entry SHALL name `sweep.sh approve`, `sweep.sh tell`, `sweep.sh verified`, `sweep.sh feedback-gate` or `docs-fetch.sh get`
-- **AND** no `permissions.allow` entry SHALL begin `Bash(.git-paw/scripts/sweep.sh *`
+- **AND** no `permissions.allow` entry SHALL begin `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *` or `Bash(.git-paw/scripts/sweep.sh *`
 
 Test: `cli_setup::facts::tests::no_allow_entry_names_a_keystroke_or_verdict_subcommand, cli_setup::facts::tests::the_keystroke_subcommand_is_asked_not_allowed`
 
 #### Scenario: The message-typing tell subcommand always prompts
 
 - **WHEN** the allowlist item is planned for `claude`
-- **THEN** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh tell *)`
+- **THEN** its `permissions.ask` entries SHALL include `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)` and `Bash(.git-paw/scripts/sweep.sh tell *)`
 - **AND** the grant table SHALL list `sweep.sh tell` as never granted
 
 Test: `cli_setup::facts::tests::the_message_typing_tell_subcommand_always_prompts`
@@ -335,10 +346,17 @@ Test: `cli_setup::facts::tests::the_message_typing_tell_subcommand_always_prompt
 #### Scenario: Every planned allow entry names a bundled helper
 
 - **WHEN** the allowlist item is planned
-- **THEN** every `permissions.allow` entry SHALL begin `Bash(.git-paw/scripts/` followed by the name of a helper the binary bundles
+- **THEN** every `permissions.allow` entry SHALL begin `Bash(.git-paw/skills/<package>/scripts/` followed by the name of a helper that registered package bundles
 - **AND** no entry SHALL contain `curl`, `bash `, a leading `/` path, or `Bash(*`
 
 Test: `cli_setup::facts::tests::every_allow_entry_is_a_path_scoped_bundled_helper_invocation`
+
+#### Scenario: The compatibility path is never allowed
+
+- **WHEN** the allowlist item is planned for `claude`
+- **THEN** no `permissions.allow` entry SHALL begin `Bash(.git-paw/scripts/`
+
+Test: `cli_setup::facts::tests::the_compatibility_path_is_never_allowed`
 
 #### Scenario: The grant table covers every helper and subcommand
 
@@ -354,19 +372,26 @@ Because an allowed helper runs without a prompt, the allowlist item SHALL, in th
 same write, add the protection rules the fact row declares, so that an agent session anywhere in the
 repository cannot change what a granted entry runs without a prompt:
 
-- `Edit(**/.git-paw/scripts/**)` in `permissions.deny`, refusing the CLI's file-editing tools on any
-  helper-script directory at any depth under the session's working directory;
+- `Edit(**/.git-paw/skills/**)` in `permissions.deny`, refusing the CLI's file-editing tools on any
+  installed skill package — the granted helpers under its `scripts/` included — at any depth under
+  the session's working directory;
+- `Edit(**/.git-paw/scripts/**)` in `permissions.deny`, refusing the same tools on any compatibility
+  helper-script directory at any depth;
 - `Edit(**/.git-paw/config.toml)` in `permissions.ask`, so a change to the configuration the helpers
   read (for example the broker address) always prompts.
 
 The allowlist entries SHALL NOT be planned without these protection rules, and the fact row SHALL be
 marked verified only after the protection has been confirmed against the CLI for the file-editing
-tools and for the filesystem commands the CLI auto-approves in its edit-accepting mode.
+tools and for the filesystem commands the CLI auto-approves in its edit-accepting mode. That
+confirmation SHALL cover the package-path entries and both deny rules above; a confirmation made
+only for the pre-package `.git-paw/scripts/` entries and rule SHALL NOT count, and without a
+confirmation that covers them the item is plan-only (*An item whose facts are unverified is
+plan-only*).
 
 #### Scenario: Protection is planned with the grants
 
 - **WHEN** the allowlist item is planned for `claude`
-- **THEN** the plan SHALL list `Edit(**/.git-paw/scripts/**)` under `permissions.deny`
+- **THEN** the plan SHALL list `Edit(**/.git-paw/skills/**)` and `Edit(**/.git-paw/scripts/**)` under `permissions.deny`
 - **AND** it SHALL list `Edit(**/.git-paw/config.toml)` under `permissions.ask`
 - **AND** the protection entries SHALL be written in the same file replacement as the allow entries
 
@@ -402,7 +427,7 @@ Test: `tests/cli_setup_e2e.rs::unrelated_settings_keep_their_value_and_order, cl
 
 #### Scenario: An entry the user already had is not claimed
 
-- **GIVEN** `permissions.allow` already contains `Bash(.git-paw/scripts/broker.sh *)`
+- **GIVEN** `permissions.allow` already contains `Bash(.git-paw/skills/coordination/scripts/broker.sh *)`
 - **WHEN** the allowlist item is applied
 - **THEN** that entry SHALL appear exactly once
 - **AND** the setup record SHALL NOT list it
@@ -508,14 +533,16 @@ Test: `cli_setup::shell::tests::writing_the_record_leaves_git_status_clean_at_th
 the named items when item flags are given and covering every recorded item otherwise, and SHALL apply
 it through the same plan output and confirmation gate as setup. An entry SHALL be removed only when it
 is still present, equal to its recorded value, and of a shape its item produces: in the item's declared
-target file, an allow or ask value `Bash(.git-paw/scripts/<name>…)` naming a helper-script file name, or
-a file-tool rule whose path lies under `.git-paw/`; in the shared `info/exclude` file, the anchored
-exclusion line for the item's target file. A recorded entry that is absent, changed or not of a valid
-shape SHALL NOT be removed from disk; it SHALL be reported and dropped from the record. Protection entries SHALL
-be removed only when, after the removal, the file holds no allow entry naming a path under
-`.git-paw/scripts/`. A file git-paw created SHALL be deleted only when what remains equals the empty
-structure git-paw created, and a directory git-paw created SHALL be removed only when it is empty. Undo
-SHALL NOT modify any other content and SHALL NOT touch entries recorded for another CLI.
+target file, an allow or ask value `Bash(.git-paw/scripts/<name>…)` or
+`Bash(.git-paw/skills/<package>/scripts/<name>…)` naming a helper-script file name, or a file-tool rule
+whose path lies under `.git-paw/`; in the shared `info/exclude` file, the anchored exclusion line for
+the item's target file. A recorded entry that is absent, changed or not of a valid shape SHALL NOT be
+removed from disk; it SHALL be reported and dropped from the record. Protection entries SHALL be
+removed only when, after the removal, the file holds no allow entry naming a path under
+`.git-paw/scripts/` or `.git-paw/skills/`. A file git-paw created SHALL be deleted only when what
+remains equals the empty structure git-paw created, and a directory git-paw created SHALL be removed
+only when it is empty. Undo SHALL NOT modify any other content and SHALL NOT touch entries recorded
+for another CLI.
 
 #### Scenario: Undo removes only recorded entries
 
@@ -568,6 +595,23 @@ Test: `cli_setup::undo::tests::a_forged_entry_is_reported_dropped_and_left_on_di
 - **AND** `Edit(**/.git-paw/scripts/**)` SHALL remain in `permissions.deny`
 
 Test: `cli_setup::undo::tests::protection_is_kept_while_an_edited_helper_grant_remains, cli_setup::shell::tests::protection_survives_a_remaining_helper_grant`
+
+#### Scenario: Entries recorded before the package move are undone
+
+- **GIVEN** a setup record written by an earlier version whose `claude` allowlist entries name `.git-paw/scripts/` paths, all still present and unchanged
+- **WHEN** `git paw setup-cli claude --undo --yes` is run
+- **THEN** those entries and their protection rules SHALL be removed
+- **AND** no other entry in the file SHALL change
+
+Test: `cli_setup::undo::tests::entries_recorded_before_the_package_move_are_undone`, `tests/doctor_e2e.rs::entries_applied_before_the_package_move_are_out_of_date`
+
+#### Scenario: Package-path entries are undone
+
+- **GIVEN** recorded allowlist entries naming `.git-paw/skills/<package>/scripts/` paths and both deny rules, all unchanged
+- **WHEN** `git paw setup-cli claude --undo --yes` is run
+- **THEN** the allow, ask and deny entries git-paw recorded SHALL be removed
+
+Test: `cli_setup::undo::tests::package_path_entries_are_undone`, `cli_setup::undo::tests::protection_is_kept_while_a_package_path_grant_remains`
 
 #### Scenario: Another CLI's entries are untouched
 
