@@ -1260,6 +1260,37 @@ mod tests {
         }
     }
 
+    /// `core-memory-isolation` scenario "The orchestrator one-shot is
+    /// unchanged": operator isolation is a worker facet, never the
+    /// orchestrator's.
+    #[test]
+    fn the_orchestrator_one_shot_is_unchanged() {
+        for cfg in [
+            "[supervisor]\ncli = \"claude\"\n",
+            "[supervisor]\ncli = \"opus\"\n[clis.opus]\ncommand = \"claude\"\n\
+             family = \"claude\"\nargs = \"--model opus\"\n",
+        ] {
+            let invocation = resolve(&config(cfg)).invocation.expect("resolvable");
+            let spec = HandoffSetup {
+                invocation,
+                ..setup()
+            }
+            .spawn_spec_with_session(&question("feat-x", "which?"), Some("abc"));
+            assert!(
+                !spec.args.iter().any(|a| a == "--setting-sources"),
+                "{:?}",
+                spec.args
+            );
+            for (name, _) in &spec.env {
+                assert!(
+                    name != "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && name != "CLAUDE_CODE_PLUGIN_DIRS",
+                    "{:?}",
+                    spec.env
+                );
+            }
+        }
+    }
+
     /// Spec scenarios "An ambiguous question spawns a one-shot with context
     /// on stdin" and "No credential in the invocation's argv or environment"
     /// (spawn half).

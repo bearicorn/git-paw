@@ -448,7 +448,7 @@ mod tests {
         let clis = HashMap::new();
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Manual, &clis),
-            "claude --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
 
@@ -457,7 +457,10 @@ mod tests {
     fn entry_without_an_id_launches_fresh() {
         let e = entry("claude", None);
         let clis = HashMap::new();
-        assert_eq!(recovery_command(&e, ApprovalLevel::Manual, &clis), "claude");
+        assert_eq!(
+            recovery_command(&e, ApprovalLevel::Manual, &clis),
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local"
+        );
     }
 
     /// Spec scenario "CLI without a resume template launches fresh".
@@ -481,7 +484,7 @@ mod tests {
         let clis = HashMap::new();
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &clis),
-            "claude --permission-mode acceptEdits"
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits"
         );
     }
 
@@ -509,6 +512,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         assert_eq!(
@@ -523,7 +527,7 @@ mod tests {
         let e = entry("claude", Some("abc-123"));
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &HashMap::new()),
-            "claude --permission-mode acceptEdits --resume abc-123"
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
         );
     }
 
@@ -542,7 +546,7 @@ mod tests {
         )]);
         assert_eq!(
             recovery_command(&e, ApprovalLevel::Auto, &clis),
-            "claude --model sonnet --permission-mode acceptEdits --resume abc-123"
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --permission-mode acceptEdits --resume abc-123"
         );
     }
 
@@ -638,7 +642,7 @@ mod tests {
                 (
                     "feat/a",
                     Path::new("/repo/.git-paw/worktrees/feat-a"),
-                    "claude"
+                    "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local"
                 ),
                 (
                     "feat/b",

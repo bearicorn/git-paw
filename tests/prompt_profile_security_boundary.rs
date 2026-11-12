@@ -73,6 +73,7 @@ fn clis_with_adversarial_profile() -> std::collections::HashMap<String, CustomCl
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     clis

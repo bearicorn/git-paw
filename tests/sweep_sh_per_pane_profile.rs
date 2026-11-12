@@ -278,6 +278,7 @@ fn mycli_clis() -> HashMap<String, CustomCli> {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     )])
 }

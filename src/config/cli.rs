@@ -138,6 +138,15 @@ pub struct CustomCli {
     /// [`Self::args`] and before the approval flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_args: Option<String>,
+    /// Launch this CLI's workers with the operator's full agent-CLI
+    /// configuration, skipping its provider family's operator isolation
+    /// (`cli-provider`). Default `false`: workers launch isolated.
+    ///
+    /// Set it for a setup that needs the operator's user-level settings to
+    /// work at all, such as a proxy endpoint or model provider in the user
+    /// settings' `env` block.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_operator_config: bool,
 }
 
 /// Resolves the headless (one-shot, stdin-reading) arguments for `cli`,
@@ -221,6 +230,7 @@ pub fn add_custom_cli_to(
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
 

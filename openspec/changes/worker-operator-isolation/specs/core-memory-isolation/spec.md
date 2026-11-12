@@ -12,11 +12,15 @@ By default, every coding-agent worker git-paw launches SHALL run with its CLI fa
 - **THEN** the worker's CLI SHALL be started with the `user` setting source excluded (`--setting-sources project,local`), so it loads neither that plugin nor that hook
 - **AND** its environment SHALL carry `CLAUDE_CODE_PLUGIN_DIRS=` (empty), so it loads none of the plugins, nor their hooks, that the inherited variable points at
 
+Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_workers_with_identical_isolation` (Claude Code behaviour: design D5)
+
 #### Scenario: A worker does not write the shared auto memory
 
 - **GIVEN** a claude-family worker launched with default configuration
 - **WHEN** the worker's CLI is started
 - **THEN** its environment SHALL carry `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, so its auto memory is off and nothing is written under the repository's shared memory directory
+
+Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_workers_with_identical_isolation` (Claude Code behaviour: design D5)
 
 #### Scenario: Repository settings still apply to an isolated worker
 
@@ -24,6 +28,8 @@ By default, every coding-agent worker git-paw launches SHALL run with its CLI fa
 - **WHEN** a claude-family worker is launched with default configuration
 - **THEN** its setting sources SHALL still include `project` and `local`, so that rule still applies to the worker
 - **AND** git-paw SHALL NOT have read or written any Claude Code settings file
+
+Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_workers_with_identical_isolation` (Claude Code behaviour: design D5)
 
 ### Requirement: Operator isolation is not applied to the orchestrator
 
@@ -35,3 +41,5 @@ The operator's own driving session and the drive loop's headless orchestrator on
 - **WHEN** the one-shot is spawned
 - **THEN** its argv SHALL NOT contain `--setting-sources`
 - **AND** its added environment SHALL contain neither `CLAUDE_CODE_DISABLE_AUTO_MEMORY` nor `CLAUDE_CODE_PLUGIN_DIRS`
+
+Test: `supervisor::escalation::tests::the_orchestrator_one_shot_is_unchanged`

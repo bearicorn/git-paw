@@ -31,6 +31,7 @@ fn entry(command: &str) -> CustomCli {
         args: None,
         sandbox: None,
         sandbox_args: None,
+        inherit_operator_config: false,
     }
 }
 
@@ -404,19 +405,19 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "claude",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "claude",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local",
         ),
         (
             "claude",
             ApprovalLevel::FullAuto,
             LaunchSession::Assign("u1"),
-            "claude --dangerously-skip-permissions --session-id u1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --dangerously-skip-permissions --session-id u1",
         ),
         (
             "claude",
             ApprovalLevel::Auto,
             LaunchSession::Resume("u1"),
-            "claude --permission-mode acceptEdits --resume u1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume u1",
         ),
         (
             "codex",
@@ -429,13 +430,13 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "sonnet",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "claude --model sonnet",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local",
         ),
         (
             "sonnet",
             ApprovalLevel::FullAuto,
             LaunchSession::Resume("u2"),
-            "claude --model sonnet --dangerously-skip-permissions --resume u2",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --dangerously-skip-permissions --resume u2",
         ),
         // A configured command is one shell word.
         (
@@ -502,11 +503,11 @@ fn two_profiles_of_one_executable_keep_their_own_args() {
     let level = ApprovalLevel::Manual;
     assert_eq!(
         CliProfile::resolve("sonnet", &map).launch_command(&level, LaunchSession::None),
-        "claude --model sonnet"
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local"
     );
     assert_eq!(
         CliProfile::resolve("opus", &map).launch_command(&level, LaunchSession::None),
-        "claude --model opus"
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local"
     );
 }
 
@@ -518,7 +519,7 @@ fn an_identity_with_trailing_flags_keeps_its_base_cli_facets() {
     assert_eq!(profile.family(), CliFamily::Claude);
     assert_eq!(
         profile.launch_command(&ApprovalLevel::FullAuto, LaunchSession::Assign("abc")),
-        "claude --model x --dangerously-skip-permissions --session-id abc"
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x --setting-sources project,local --dangerously-skip-permissions --session-id abc"
     );
 }
 
@@ -530,6 +531,91 @@ fn recovery_carries_approval_flags_then_resume_args() {
     let flags = cmd.find("--permission-mode acceptEdits").expect("flags");
     let resume = cmd.find("--resume abc").expect("resume");
     assert!(flags < resume, "{cmd}");
+}
+
+/// Scenario "The claude family declares its isolation".
+#[test]
+fn the_claude_family_declares_its_isolation() {
+    let isolation = CliFamily::Claude.provider().operator_isolation();
+    assert_eq!(isolation.args, "--setting-sources project,local");
+    assert_eq!(
+        isolation.env,
+        &[
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+            ("CLAUDE_CODE_PLUGIN_DIRS", ""),
+        ]
+    );
+}
+
+/// Scenario "A family without isolation facts contributes nothing".
+#[test]
+fn a_family_without_isolation_facts_contributes_nothing() {
+    for family in CliFamily::ALL {
+        if family != CliFamily::Claude {
+            assert_eq!(
+                family.provider().operator_isolation(),
+                OperatorIsolation::NONE,
+                "{family}"
+            );
+        }
+    }
+    let mut agent = entry("/opt/agent");
+    agent.args = Some("--quiet".to_string());
+    let map = clis(&[("agent", agent)]);
+    assert_eq!(
+        CliProfile::resolve("agent", &map)
+            .launch_command(&ApprovalLevel::Manual, LaunchSession::None),
+        "/opt/agent --quiet"
+    );
+}
+
+/// Scenario "A claude worker is launched isolated".
+#[test]
+fn a_claude_worker_is_launched_isolated() {
+    let mut opus = entry("claude");
+    opus.family = Some("claude".to_string());
+    opus.args = Some("--model opus".to_string());
+    let map = clis(&[("opus", opus)]);
+    assert_eq!(
+        CliProfile::resolve("opus", &map)
+            .launch_command(&ApprovalLevel::Auto, LaunchSession::Assign("abc")),
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
+         --setting-sources project,local --permission-mode acceptEdits --session-id abc"
+    );
+}
+
+/// Scenario "Recovery keeps the isolation".
+#[test]
+fn recovery_keeps_the_isolation() {
+    let cmd = CliProfile::resolve("claude", &HashMap::new())
+        .launch_command(&ApprovalLevel::Manual, LaunchSession::Resume("u9"));
+    assert!(
+        cmd.starts_with("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude"),
+        "{cmd}"
+    );
+    let sources = cmd
+        .find("--setting-sources project,local")
+        .expect("sources");
+    let resume = cmd.find("--resume u9").expect("resume");
+    assert!(sources < resume, "{cmd}");
+}
+
+/// Scenario "Opting out restores the previous launch".
+#[test]
+fn opting_out_restores_the_previous_launch() {
+    let mut claude = entry("claude");
+    claude.inherit_operator_config = true;
+    let map = clis(&[("claude", claude)]);
+    let cmd = CliProfile::resolve("claude", &map)
+        .launch_command(&ApprovalLevel::Manual, LaunchSession::None);
+    assert_eq!(cmd, "claude");
+    for absent in [
+        "--setting-sources",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "CLAUDE_CODE_PLUGIN_DIRS",
+    ] {
+        assert!(!cmd.contains(absent), "{cmd}");
+    }
 }
 
 // --- Sandbox declarations (worker-sandbox-mode) ---
@@ -779,7 +865,10 @@ fn a_known_name_may_point_at_another_install() {
     assert!(
         profile
             .launch_command(&ApprovalLevel::Manual, LaunchSession::None)
-            .starts_with(&*alt_claude.to_string_lossy())
+            .starts_with(&format!(
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= {}",
+                alt_claude.to_string_lossy()
+            ))
     );
 }
 

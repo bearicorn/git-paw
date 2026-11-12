@@ -691,6 +691,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         assert_eq!(
@@ -724,6 +725,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         assert_eq!(
@@ -775,6 +777,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         let resolved = resolve_prompt_profile("mycli", &clis);
@@ -821,6 +824,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         assert_eq!(
@@ -852,6 +856,7 @@ mod tests {
                 args: None,
                 sandbox: None,
                 sandbox_args: None,
+                inherit_operator_config: false,
             },
         );
         assert_eq!(

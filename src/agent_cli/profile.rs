@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
-use super::{CliFamily, DialogMarker, SandboxMode, roster_entry};
+use super::{CliFamily, DialogMarker, OperatorIsolation, SandboxMode, roster_entry};
 use crate::config::{
     ApprovalLevel, CliPromptProfile, CompiledPromptProfile, CustomCli, SESSION_ID_PLACEHOLDER,
     default_compiled_prompt_profile, launch_command, merge_prompt_profile,
@@ -373,8 +373,26 @@ impl CliProfile {
         self.family.provider().reports_cost()
     }
 
-    /// The pane command for one launch: the executable, the CLI's `args`,
-    /// [`Self::launch_sandbox_args`], the approval flags for `level`, then
+    /// The operator isolation a worker launch applies: the family's
+    /// [`OperatorIsolation`], or none when the entry sets
+    /// `inherit_operator_config`.
+    #[must_use]
+    pub fn operator_isolation(&self) -> OperatorIsolation {
+        if self
+            .entry
+            .as_ref()
+            .is_some_and(|e| e.inherit_operator_config)
+        {
+            OperatorIsolation::NONE
+        } else {
+            self.family.provider().operator_isolation()
+        }
+    }
+
+    /// The pane command for one launch: the operator-isolation environment
+    /// assignments, the executable, the CLI's `args`, the isolation
+    /// arguments, [`Self::launch_sandbox_args`], the approval flags for
+    /// `level`, then
     /// the session-id arguments (fresh launch) or resume arguments
     /// (recovery). An empty part contributes no separator.
     ///
@@ -389,9 +407,18 @@ impl CliProfile {
         };
         let approval = self.approval_flags(level);
         let sandbox = self.launch_sandbox_args(level);
-        let mut command = self.base_command.clone();
+        let isolation = self.operator_isolation();
+        let mut command = String::new();
+        for (name, value) in isolation.env {
+            command.push_str(name);
+            command.push('=');
+            command.push_str(value);
+            command.push(' ');
+        }
+        command.push_str(&self.base_command);
         for part in [
             self.args().unwrap_or_default(),
+            isolation.args,
             sandbox.as_deref().unwrap_or_default(),
             &approval,
             session_args.as_deref().unwrap_or_default(),

@@ -11,11 +11,15 @@ Each provider family SHALL declare its operator-isolation launch environment and
 - **THEN** the arguments SHALL be `--setting-sources project,local`
 - **AND** the environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_PLUGIN_DIRS=` (empty), in that order
 
+Test: `agent_cli::tests::the_claude_family_declares_its_isolation`
+
 #### Scenario: A family without isolation facts contributes nothing
 
 - **GIVEN** `[clis.agent] command = "/opt/agent"`, `args = "--quiet"` and no `family` (so `generic`)
 - **WHEN** its worker pane command is built at `agent_approval = "manual"`
 - **THEN** the command SHALL be exactly `/opt/agent --quiet`, with no assignment before the executable
+
+Test: `agent_cli::tests::a_family_without_isolation_facts_contributes_nothing`
 
 ### Requirement: Operator isolation is placed by the launch builder
 
@@ -27,6 +31,8 @@ The launch builder SHALL write the isolation environment as `NAME=value` assignm
 - **WHEN** the pane command of a worker using `opus` is built for a fresh launch assigned the session id `abc`
 - **THEN** it SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id abc`
 
+Test: `agent_cli::tests::a_claude_worker_is_launched_isolated`
+
 #### Scenario: Recovery keeps the isolation
 
 - **GIVEN** a stopped session whose entry has `cli = "claude"`, no `[clis.claude]` entry, and a recorded session id
@@ -34,11 +40,15 @@ The launch builder SHALL write the isolation environment as `NAME=value` assignm
 - **THEN** the pane command SHALL start with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude`
 - **AND** it SHALL contain `--setting-sources project,local` before `--resume <id>`
 
+Test: `agent_cli::tests::recovery_keeps_the_isolation`, `tests/worker_operator_isolation_e2e.rs::recovery_through_start_keeps_the_isolation`
+
 #### Scenario: Start and add stay identical
 
 - **GIVEN** the same claude-family CLI, approval level and configuration
 - **WHEN** one worker is launched by `git paw start` and another by `git paw add`
 - **THEN** both pane commands SHALL carry the same isolation environment and arguments
+
+Test: `tests/worker_operator_isolation_e2e.rs::start_and_add_launch_claude_workers_with_identical_isolation`
 
 ### Requirement: A CLI may inherit the operator's configuration
 
@@ -50,8 +60,12 @@ The launch builder SHALL write the isolation environment as `NAME=value` assignm
 - **WHEN** a worker using `claude` is launched
 - **THEN** its pane command SHALL contain none of `--setting-sources`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY` and `CLAUDE_CODE_PLUGIN_DIRS`
 
+Test: `agent_cli::tests::opting_out_restores_the_previous_launch`
+
 #### Scenario: An existing config round-trips without the key
 
 - **GIVEN** a config whose `[clis.*]` entries have no `inherit_operator_config`
 - **WHEN** it is loaded and written back
 - **THEN** the written file SHALL NOT contain `inherit_operator_config`
+
+Test: `config::tests::an_existing_config_round_trips_without_the_inherit_operator_config_key`

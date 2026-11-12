@@ -251,6 +251,32 @@ pub trait CliProvider: Sync {
     fn reports_cost(&self) -> bool {
         false
     }
+
+    /// What keeps a worker from loading the operator's personal configuration
+    /// and extensions and from writing memory the operator's sessions share.
+    /// Empty for a family with no verified facts.
+    fn operator_isolation(&self) -> OperatorIsolation {
+        OperatorIsolation::NONE
+    }
+}
+
+/// A family's operator-isolation launch facts (`cli-provider`): environment
+/// assignments placed before the executable and arguments placed after the
+/// CLI's `args`. Every value is a compile-time constant, so nothing in it
+/// needs quoting. An entry with an empty value clears a variable the worker
+/// would otherwise inherit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorIsolation {
+    /// `(NAME, value)` pairs, in launch order.
+    pub env: &'static [(&'static str, &'static str)],
+    /// Arguments, or `""` for none.
+    pub args: &'static str,
+}
+
+impl OperatorIsolation {
+    /// No isolation: the Null Object every family without verified facts
+    /// returns.
+    pub const NONE: Self = Self { env: &[], args: "" };
 }
 
 /// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
@@ -318,6 +344,21 @@ impl CliProvider for ClaudeProvider {
     }
     fn mcp_capable(&self) -> bool {
         true
+    }
+    /// Verified against Claude Code 2.1.322 on 2026-11-12
+    /// (`worker-operator-isolation` design D5): `--setting-sources
+    /// project,local` drops the user settings layer, an inherited
+    /// `CLAUDE_CODE_PLUGIN_DIRS` loads plugins whatever the setting sources
+    /// unless it is emptied, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns off
+    /// the auto memory every worktree of a repository shares.
+    fn operator_isolation(&self) -> OperatorIsolation {
+        OperatorIsolation {
+            env: &[
+                ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+                ("CLAUDE_CODE_PLUGIN_DIRS", ""),
+            ],
+            args: "--setting-sources project,local",
+        }
     }
     /// Session transcripts, verified against Claude Code 2.1.322 on
     /// 2026-11-10 (`tests/fixtures/claude_usage/README.md`).

@@ -2661,6 +2661,7 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     let profile = crate::config::resolve_prompt_profile("mycli", &clis);
@@ -2708,6 +2709,7 @@ fn gate_pane_resolves_profile_by_identity_and_relaunches_command() {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
 
@@ -3023,6 +3025,7 @@ fn a_claude_family_pane_answers_the_trust_dialog_from_its_provider() {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     let screen = "Do you trust the files in this folder?\n\u{276f} 1. Yes, proceed\n  2. No, exit";
@@ -3073,6 +3076,7 @@ fn a_profile_override_cannot_declare_a_dialog() {
             args: None,
             sandbox: None,
             sandbox_args: None,
+            inherit_operator_config: false,
         },
     );
     let screen = format!("{heading}\n\u{276f} 1. Yes, I accept\n  2. No");
