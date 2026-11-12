@@ -25,7 +25,7 @@ my-project/
 
 ## Bundled skills
 
-git-paw embeds four skills. Every one except `cli-setup` can be overridden by a
+git-paw embeds eight skills. Every one except `cli-setup` can be overridden by a
 `.agents/skills/<name>/SKILL.md` in your repository or a
 `<config_dir>/git-paw/agent-skills/<name>/SKILL.md` of your own (see
 [Skill Resolution](#skill-resolution)); a repository override with one of these
@@ -37,6 +37,25 @@ names replaces the bundled skill:
 | `orchestrator` (alias `supervisor`) | The orchestrator's role: following the session, the five verification gates, merge orchestration. |
 | `docs-fetch` | How to look things up through the bundled docs helper. |
 | `cli-setup` | The consent rules for [`git paw setup-cli`](cli-setup.md) — when an agent may and may not run the command that writes an agent CLI's own settings. |
+| `explorer` | Delegate role: a broad read-only sweep that returns a map of paths with a one-line role each, never file contents. |
+| `spec-auditor` | Delegate role: runs the spec audit gate and returns its compressed verdict; never publishes. |
+| `doc-auditor` | Delegate role: runs the doc audit gate and returns its compressed verdict; never publishes. |
+| `security-auditor` | Delegate role: runs the security audit gate and returns its compressed verdict; never publishes. |
+
+The four delegate role skills are the role skills of [delegate
+profiles](agent-profiles.md#delegate-profiles) run by `git paw delegate`. Like
+`orchestrator` and `cli-setup` they are installed at the repository root only
+and never reach a worktree. Each auditor carries no copy of its gate's
+procedure: it includes the orchestrator package's
+`references/gates/<gate>.md` through a `{{GATE_REFERENCE:<gate>}}` inclusion
+resolved when the skill is rendered, so every gate procedure has one source.
+
+**Role skills.** Any skill can be an agent profile's `skill`: a worker
+profile's role skill is written into the worker's managed block after the
+coordination skill (under `## Role skill: <name>`) and rendered with the same
+inputs; a delegate profile's role skill follows the delegate framing on the
+delegate's standard input. Role skills resolve like every skill — repository,
+user, then bundled — but `orchestrator` / `supervisor` is never a profile role.
 
 The `cli-setup` skill exists because that command changes what a CLI will do
 without asking the human again. Its rules are deliberately restrictive: the

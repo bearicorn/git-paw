@@ -111,12 +111,18 @@ impl SpecBackend for MarkdownBackend {
                 .and_then(|fields| fields.get("paw_cli"))
                 .filter(|s| !s.is_empty())
                 .cloned();
+            let profile = frontmatter
+                .as_ref()
+                .and_then(|fields| fields.get("paw_profile"))
+                .filter(|s| !s.is_empty())
+                .cloned();
 
             entries.push(SpecEntry {
                 id,
                 backend: SpecBackendKind::Markdown,
                 branch: String::new(), // filled in by scan_specs
                 cli,
+                profile,
                 prompt: body.to_string(),
                 owned_files: None,
             });
@@ -197,6 +203,20 @@ mod tests {
         fm.push_str("---\n");
         fm.push_str(body);
         fm
+    }
+
+    /// `paw_profile` is read next to `paw_cli` (`cli-resolution`).
+    #[test]
+    fn scan_reads_paw_profile_next_to_paw_cli() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_spec(
+            tmp.path(),
+            "a.md",
+            "---\npaw_status: pending\npaw_profile: routine\n---\nbody\n",
+        );
+        let entries = MarkdownBackend.scan(tmp.path()).unwrap();
+        assert_eq!(entries[0].profile.as_deref(), Some("routine"));
+        assert_eq!(entries[0].cli, None);
     }
 
     #[test]

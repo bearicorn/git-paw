@@ -1278,3 +1278,22 @@ fn a_package_file_under_assets_cli_is_read_as_its_familys_fragment() {
         "a vendor name outside a fragment directory fails the per-file audit"
     );
 }
+
+/// `cli-agent-profiles` scenario "The framing is an audited asset": the
+/// delegate framing ships to every consumer's delegate runs, so it SHALL name
+/// no vendor product, model or project toolchain.
+#[test]
+fn delegate_framing_passes_no_leak_audit() {
+    let framing = git_paw::delegate::framing(
+        "explorer",
+        std::path::Path::new("/repo"),
+        git_paw::config::ApprovalLevel::Manual,
+    );
+    assert_no_forbidden_tokens(&framing, "delegate-framing");
+    for model in ["opus", "sonnet", "haiku", "gpt-", "gemini"] {
+        assert!(
+            !framing.to_lowercase().contains(model),
+            "the framing names a model: {model}"
+        );
+    }
+}

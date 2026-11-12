@@ -40,6 +40,7 @@ $ git paw
 
 - **Parallel worktrees in tmux** — one worktree and pane per branch, with presets, `--dry-run` and session logs. See [Introduction](docs/src/introduction.md).
 - **Per-branch CLIs** — Claude on one branch, Codex on another; a `[clis.<name>]` entry with `family` inherits a known CLI's flags, resume and MCP form. See [Provider families](docs/src/supported-clis.md#provider-families).
+- **Agent profiles** — name what an agent is for: a worker profile pins a CLI's model args, approval level and role skill for `--profile`, specs and the picker; a delegate profile runs a one-shot headless auditor or explorer through `git paw delegate`. See [Agent profiles](docs/src/user-guide/agent-profiles.md).
 - **Spec-driven launch** — one worktree per pending spec from OpenSpec, Spec Kit, Superpowers or plain Markdown (`--from-all-specs`, `--specs`). See [Spec-driven launch](docs/src/user-guide/spec-driven-launch.md).
 - **Runtime isolation** — per-worktree env files, port blocks and `on_create` / `on_remove` hooks, so agents run dev servers side by side. See [Runtime isolation](docs/src/user-guide/runtime-isolation.md).
 - **Orchestrator mode** — your own agent drives the session through the exported skill, the broker and the dashboard, with conflict detection, verified sends (`sweep.sh tell`) and opt-in learnings. See [Orchestrator quick start](docs/src/quick-start-orchestrator.md), [Conflict detection](docs/src/user-guide/conflict-detection.md) and [Learnings](docs/src/user-guide/learnings.md).
@@ -76,8 +77,9 @@ Walkthroughs: [same CLI](docs/src/quick-start-same-cli.md), [per-branch CLI](doc
 | Command | What it does |
 |---------|--------------|
 | `init` | Create `.git-paw/`, config and `.gitignore` entries; install every bundled skill package under `.git-paw/skills/` (the orchestrator and cli-setup skills, and every helper); add the orchestrator pointer to `AGENTS.md`. A re-run backfills new config fields. |
-| `start` | Launch, reattach or recover a session: interactive, `--cli`/`--branches`, `--preset` or spec-driven. |
-| `add` / `remove` | Attach or detach one branch and its agent pane in a live session. |
+| `start` | Launch, reattach or recover a session: interactive, `--cli`/`--profile`/`--branches`, `--preset` or spec-driven. |
+| `add` / `remove` | Attach or detach one branch and its agent pane in a live session (`add --profile` picks a worker profile). |
+| `delegate` | Run a delegate profile once, headless, at the repository root, and print its compact result. |
 | `pause` / `stop` | Pause keeps CLI panes for a fast resume; stop ends the session and keeps worktrees and state. |
 | `purge` | Remove the session, worktrees and state; delete only merged branches git-paw created. |
 | `status` | Show the session, branches, CLIs and state (`--json` adds per-worker usage). |

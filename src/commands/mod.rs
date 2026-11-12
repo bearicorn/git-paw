@@ -37,6 +37,7 @@ pub mod authority;
 pub mod broker_host;
 pub mod clis;
 pub mod completions;
+pub mod delegate;
 pub mod entry_points;
 pub mod helpers;
 pub mod launch;

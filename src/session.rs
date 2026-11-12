@@ -238,6 +238,16 @@ pub struct WorktreeEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_slot: Option<u16>,
 
+    /// The worker profile this worktree's agent was launched with
+    /// (`[profiles.<name>]`); `cli` still records the CLI id it resolved to.
+    ///
+    /// `None` for a worker launched with a plain CLI, and on every state file
+    /// written before this field existed. Omitted from JSON when `None`, so a
+    /// session launched without profiles serializes byte-identically to
+    /// prior versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
     /// The worker CLI's assigned session/conversation identifier, when the
     /// CLI resolved a `session_id_args` template at launch
     /// (`worker-session-id-capture`).
@@ -1162,6 +1172,7 @@ mod tests {
                     branch: "feature/auth".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-auth"),
                     cli: "claude".to_string(),
+                    profile: None,
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
@@ -1174,6 +1185,7 @@ mod tests {
                     branch: "fix/api".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-fix-api"),
                     cli: "gemini".to_string(),
+                    profile: None,
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
@@ -1186,6 +1198,7 @@ mod tests {
                     branch: "feature/logging".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-logging"),
                     cli: "claude".to_string(),
+                    profile: None,
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
@@ -1431,6 +1444,66 @@ mod tests {
         assert!(
             !written.contains("cli_session_id"),
             "absent id must not be serialized; got:\n{written}"
+        );
+    }
+
+    // -- profile: additive optional field (session-state, agent profiles) --
+
+    /// Spec scenario "The profile round-trips": the entry keeps both the
+    /// profile and the CLI it resolved to.
+    #[test]
+    fn saved_session_round_trips_profile_intact() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.worktrees[0].profile = Some("routine".into());
+        session.worktrees[0].cli = "beta".into();
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+
+        assert_eq!(loaded.worktrees[0].profile.as_deref(), Some("routine"));
+        assert_eq!(loaded.worktrees[0].cli, "beta");
+        assert_eq!(loaded.worktrees[1].profile, None);
+    }
+
+    /// Spec scenario "Older session files load with None" (profile).
+    #[test]
+    fn state_file_without_profile_loads_with_none() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/Users/test/code/legacy",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T13:20:00Z",
+            "status": "active",
+            "worktrees": [
+                {
+                    "branch": "feature/auth",
+                    "worktree_path": "/Users/test/code/legacy-feature-auth",
+                    "cli": "claude",
+                    "branch_created": false
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("legacy session should load");
+        assert_eq!(loaded.worktrees[0].profile, None);
+    }
+
+    /// An entry launched without a profile serializes as before.
+    #[test]
+    fn absent_profile_is_omitted_from_serialized_state() {
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !written.contains("\"profile\""),
+            "an absent profile must not be serialized; got:\n{written}"
         );
     }
 

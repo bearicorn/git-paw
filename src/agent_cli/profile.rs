@@ -33,6 +33,9 @@ pub struct CliProfile {
     base_command: String,
     entry: Option<CustomCli>,
     family: CliFamily,
+    /// A worker or delegate profile's `args`, placed right after the CLI's
+    /// own `args`.
+    profile_args: Option<String>,
 }
 
 impl CliProfile {
@@ -60,6 +63,7 @@ impl CliProfile {
             id,
             entry,
             family,
+            profile_args: None,
         }
     }
 
@@ -73,7 +77,22 @@ impl CliProfile {
             id,
             entry: None,
             family,
+            profile_args: None,
         }
+    }
+
+    /// This record with an agent profile's `args`, which every launch places
+    /// immediately after the CLI's own `args`. Blank arguments add nothing.
+    #[must_use]
+    pub fn with_profile_args(mut self, args: Option<&str>) -> Self {
+        self.profile_args = args.filter(|a| !a.trim().is_empty()).map(str::to_string);
+        self
+    }
+
+    /// The agent profile's `args` this record launches with, if any.
+    #[must_use]
+    pub fn profile_args(&self) -> Option<&str> {
+        self.profile_args.as_deref()
     }
 
     /// The CLI id: the `[clis.<name>]` key or known binary name.
@@ -173,6 +192,90 @@ impl CliProfile {
             .filter(|args| !contains_words(&approval, args))
     }
 
+    /// The first word of `args` that would widen this CLI's permissions or
+    /// switch its sandbox off, or `None`. Best-effort defence in depth: a
+    /// profile's `args` are operator-trusted configuration, like
+    /// `[clis.<id>].args`, and no denylist over arbitrary arguments is
+    /// complete. Denied, with quotes stripped and both `flag value` and
+    /// `flag=value` forms:
+    ///
+    /// - any flag of the `auto` or `full-auto` approval rows (the
+    ///   `approval_args` override included), any sandbox-disabling flag and
+    ///   the family's own delegate denylist, whatever the value;
+    /// - a config override (`-c key=value`) of a denied key;
+    /// - any permission-bypass value, compared case-insensitively, alone or
+    ///   as the value of `key=value`.
+    #[must_use]
+    pub fn widening_arg(&self, args: &str) -> Option<String> {
+        let rows = format!(
+            "{} {}",
+            self.approval_flags(&ApprovalLevel::Auto),
+            self.approval_flags(&ApprovalLevel::FullAuto)
+        );
+        let provider = self.family.provider();
+        let flags: Vec<&str> = rows
+            .split_whitespace()
+            .filter(|w| w.starts_with('-'))
+            .chain(provider.sandbox_disabling_flags().iter().copied())
+            .chain(provider.delegate_denied_flags().iter().copied())
+            .collect();
+        let (config_flags, denied_keys) = provider.denied_config_overrides();
+        let bypass = provider.permission_bypass_values();
+        let unquote = |w: &str| w.trim_matches(|c| c == '"' || c == '\'').to_string();
+        let words: Vec<String> = args.split_whitespace().map(unquote).collect();
+        let is_bypass = |value: &str| {
+            let value = unquote(value);
+            bypass.iter().any(|b| b.eq_ignore_ascii_case(&value))
+        };
+        let denied_key = |pair: &str| {
+            let key = unquote(pair.split_once('=').map_or(pair, |(k, _)| k)).to_ascii_lowercase();
+            denied_keys.iter().any(|d| match d.strip_suffix(".*") {
+                Some(table) => key == table || key.starts_with(&format!("{table}.")),
+                None => key == *d,
+            })
+        };
+        // A single-dash short option with its value attached (`-sX`,
+        // `-anever`, `-ckey=value`): the two-character flag and the rest.
+        let attached = |word: &str| -> Option<(String, String)> {
+            (word.len() > 2 && word.starts_with('-') && !word.starts_with("--"))
+                .then(|| (word[..2].to_string(), word[2..].to_string()))
+        };
+        for (i, word) in words.iter().enumerate() {
+            if let Some((short, rest)) = attached(word) {
+                let rest = rest.strip_prefix('=').unwrap_or(&rest);
+                if flags.contains(&short.as_str()) {
+                    return Some(word.clone());
+                }
+                if config_flags.contains(&short.as_str())
+                    && (denied_key(rest)
+                        || rest.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v)))
+                {
+                    return Some(word.clone());
+                }
+            }
+            let (name, inline) = match word.split_once('=') {
+                Some((n, v)) if n.starts_with('-') => (n, Some(v)),
+                _ => (word.as_str(), None),
+            };
+            if flags.contains(&name) {
+                return Some(word.clone());
+            }
+            if config_flags.contains(&name)
+                && inline
+                    .or_else(|| words.get(i + 1).map(String::as_str))
+                    .is_some_and(|pair| {
+                        denied_key(pair) || pair.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v))
+                    })
+            {
+                return Some(word.clone());
+            }
+            if is_bypass(word) || word.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v)) {
+                return Some(word.clone());
+            }
+        }
+        None
+    }
+
     /// Refuses a launch that would switch off a declared native sandbox: the
     /// effective approval flags for `level` — built-in row or `approval_args`
     /// override alike — carry one of the family's sandbox-disabling flags, or
@@ -207,6 +310,16 @@ impl CliProfile {
             .find(|flag| words.contains(flag))
         {
             return refuse(format!("contain `{flag}`, which turns that sandbox off"));
+        }
+        if let Some(word) = words.iter().find(|w| {
+            let value = w.rsplit_once('=').map_or(**w, |(_, v)| v);
+            self.family
+                .provider()
+                .permission_bypass_values()
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(value))
+        }) {
+            return refuse(format!("contain `{word}`, which turns that sandbox off"));
         }
         if let Some(args) = self.native_sandbox_args()
             && let Some(name) = args.split_whitespace().next()
@@ -390,7 +503,8 @@ impl CliProfile {
     }
 
     /// The pane command for one launch: `env` with the operator-isolation
-    /// assignments (when the family has any), the executable, the CLI's `args`, the isolation
+    /// assignments (when the family has any), the executable, the CLI's `args`,
+    /// the agent profile's `args` ([`Self::with_profile_args`]), the isolation
     /// arguments, [`Self::launch_sandbox_args`], the approval flags for
     /// `level`, then
     /// the session-id arguments (fresh launch) or resume arguments
@@ -423,6 +537,7 @@ impl CliProfile {
         command.push_str(&self.base_command);
         for part in [
             self.args().unwrap_or_default(),
+            self.profile_args().unwrap_or_default(),
             isolation.args,
             sandbox.as_deref().unwrap_or_default(),
             &approval,
@@ -519,6 +634,13 @@ impl Resolved {
     #[must_use]
     pub fn warning(&self) -> Option<&str> {
         self.warning.as_deref()
+    }
+
+    /// This resolution with an agent profile's `args` on its record
+    /// ([`CliProfile::with_profile_args`]).
+    pub fn with_profile_args(mut self, args: Option<&str>) -> Self {
+        self.profile = self.profile.with_profile_args(args);
+        self
     }
 
     /// The resolved profile, after passing any warning to `warn`.

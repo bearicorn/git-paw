@@ -29,34 +29,43 @@ definition of "verified."
 
 ### Choosing each worker's model
 
-The model is a launch argument of the worker's CLI, so give each worker profile
-its own `[clis.*]` entry with `args`. Several entries may launch the same
-executable; declaring `family` keeps the CLI's native approval flags, session
-resume and MCP boot form:
+The model is a launch argument of the worker's CLI, so give each tier a
+**worker profile** (`[profiles.<name>]`, see [Agent Profiles](agent-profiles.md))
+on one CLI, each with its own `args`:
 
 ```toml
-[clis.sonnet]
-command = "claude"
-family = "claude"
+[profiles.cheap]
+kind = "worker"
+description = "Routine implementation on the small model"
+cli = "claude"
 args = "--model sonnet"
 
-[clis.opus]
-command = "claude"
-family = "claude"
+[profiles.deep]
+kind = "worker"
+description = "Hard tasks on the large model"
+cli = "claude"
 args = "--model opus"
+
+default_profile = "cheap"
 ```
 
-Then name the profile as the worker CLI (`default_spec_cli = "sonnet"`, or
-`--cli sonnet`). The arguments are appended on every launch path — start,
-`git paw add`, and session recovery alike — so a recovered worker keeps its
-model. No wrapper script on `PATH` is needed; see
+Then launch with `--profile cheap`, set `paw_profile: deep` in a spec's
+frontmatter, or let the picker start on `default_profile`. The profile's
+arguments follow the CLI's own on every launch path — start, `git paw add`,
+and session recovery alike — so a recovered worker keeps its model, and the
+worker keeps its CLI's operator isolation. A profile may also set its own
+`approval` and a role skill. One `[clis.*]` entry per model (each with
+`args`, `family = "claude"` and the same `command`) still works and is what
+earlier releases needed; profiles replace those per-model shims. No wrapper
+script on `PATH` is needed; see
 [Provider families](../supported-clis.md#provider-families).
 
 ### Reading per-tier usage
 
-Because each tier is its own `[clis.*]` entry, usage is reported per tier.
-`git paw status --json` gives each worktree's `cli` and `usage`, so grouping
-by `cli` shows what the `sonnet` workers spent against the `opus` ones. The
+`git paw status --json` groups usage by profile in `usage_by_profile`, so
+the `cheap` workers' spend shows against the `deep` ones (each worktree also
+carries its `profile`, `cli` and `usage`). With per-model `[clis.*]` shims
+instead, group by `cli`. The
 unattended drive loop's exit summary prints the same split (workers by CLI
 id, then the orchestrator invocations it started), and a `[supervisor]`
 `budget_max_tokens` cap stops the loop dispatching once the known total —

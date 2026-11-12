@@ -4,7 +4,7 @@
 //! and per-repo (`.git-paw/config.toml`) files. Supports custom CLI definitions,
 //! presets, and programmatic add/remove of custom CLIs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,7 @@ mod broker;
 mod cli;
 mod dashboard;
 mod layout;
+mod profiles;
 mod prompt_profile;
 mod specs;
 mod supervisor;
@@ -30,6 +31,9 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
+pub use profiles::{
+    DEFAULT_DELEGATE_TIMEOUT_SECONDS, PROFILE_KEYS, ProfileEntry, ProfileKind, ProfileName,
+};
 pub use prompt_profile::{
     CliPromptProfile, CliPromptProfileOverride, CompiledPromptProfile, InvalidPattern,
     claude_prompt_profile, resolve_prompt_profile,
@@ -376,6 +380,15 @@ pub struct PawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_spec_cli: Option<String>,
 
+    /// Default worker profile: pre-selected in the picker ahead of
+    /// `default_cli`, and the session-wide fallback before `default_cli`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "profiles::deserialize_default_profile"
+    )]
+    pub default_profile: Option<ProfileName>,
+
     /// Prefix for spec-derived branch names (default: `"spec/"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_prefix: Option<String>,
@@ -391,6 +404,14 @@ pub struct PawConfig {
     /// Named presets keyed by name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub presets: HashMap<String, Preset>,
+
+    /// Agent profiles keyed by name (`[profiles.<name>]`), validated at load.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "profiles::deserialize_profiles"
+    )]
+    pub profiles: BTreeMap<ProfileName, ProfileEntry>,
 
     /// Spec scanning configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,6 +524,11 @@ impl PawConfig {
             presets.insert(k.clone(), v.clone());
         }
 
+        let mut profiles = self.profiles.clone();
+        for (k, v) in &overlay.profiles {
+            profiles.insert(k.clone(), v.clone());
+        }
+
         Self {
             default_cli: overlay
                 .default_cli
@@ -512,6 +538,10 @@ impl PawConfig {
                 .default_spec_cli
                 .clone()
                 .or_else(|| self.default_spec_cli.clone()),
+            default_profile: overlay
+                .default_profile
+                .clone()
+                .or_else(|| self.default_profile.clone()),
             branch_prefix: overlay
                 .branch_prefix
                 .clone()
@@ -519,6 +549,7 @@ impl PawConfig {
             mouse: overlay.mouse.or(self.mouse),
             clis,
             presets,
+            profiles,
             specs: overlay.specs.clone().or_else(|| self.specs.clone()),
             logging: overlay.logging.clone().or_else(|| self.logging.clone()),
             dashboard: overlay.dashboard.clone().or_else(|| self.dashboard.clone()),
@@ -642,6 +673,29 @@ impl PawConfig {
             .unwrap_or_else(|| "git-paw".to_string())
     }
 
+    /// Returns the profile named `name`, if one is configured.
+    #[must_use]
+    pub fn profile(&self, name: &str) -> Option<&ProfileEntry> {
+        self.profiles
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .map(|(_, v)| v)
+    }
+
+    /// Worker profiles in name order.
+    pub fn worker_profiles(&self) -> impl Iterator<Item = (&ProfileName, &ProfileEntry)> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| p.kind == ProfileKind::Worker)
+    }
+
+    /// Delegate profiles in name order.
+    pub fn delegate_profiles(&self) -> impl Iterator<Item = (&ProfileName, &ProfileEntry)> {
+        self.profiles
+            .iter()
+            .filter(|(_, p)| p.kind == ProfileKind::Delegate)
+    }
+
     /// Returns a preset by name, if it exists.
     pub fn get_preset(&self, name: &str) -> Option<&Preset> {
         self.presets.get(name)
@@ -678,6 +732,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_cli_families(&config, path)?;
             validate_prompt_profile_patterns(&config, path)?;
             validate_cli_sandboxes(&config, path)?;
+            validate_delegate_args(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -900,6 +955,30 @@ fn validate_cli_sandboxes(config: &PawConfig, path: &Path) -> Result<(), PawErro
     Ok(())
 }
 
+/// Rejects a delegate profile whose `args` carry a word that widens its CLI's
+/// permissions ([`crate::agent_cli::CliProfile::widening_arg`]): a delegate's
+/// level comes from `approval` alone, which refuses `full-auto` and makes an
+/// `auto` run exclusive, so neither may be smuggled in through `args` — an
+/// editing run would otherwise count as read-only.
+fn validate_delegate_args(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, entry) in config.delegate_profiles() {
+        let Some(args) = entry.args.as_deref() else {
+            continue;
+        };
+        if let Some(word) =
+            crate::agent_cli::CliProfile::resolve(&entry.cli, &config.clis).widening_arg(args)
+        {
+            return Err(PawError::ConfigError(format!(
+                "{}: profiles.{name}: args carries `{word}`, which widens `{}`'s permissions; \
+                 a delegate's level comes from approval alone (manual or auto)",
+                path.display(),
+                entry.cli
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Collects non-fatal warnings about the `[worktree]` runtime-provisioning
 /// tables.
 ///
@@ -1012,6 +1091,8 @@ pub fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfi
     let global = load_config_file(global_path)?.unwrap_or_default();
     let repo = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
     let mut merged = global.merged_with(&repo);
+    // A profile in one file may name a CLI declared in the other.
+    validate_delegate_args(&merged, &repo_config_path(repo_root))?;
     auto_wire_governance(&mut merged, repo_root);
     Ok(merged)
 }
@@ -1051,6 +1132,10 @@ pub fn generate_default_config() -> String {
 # Pre-select a CLI in the interactive picker (user can still change).
 # Omit to show the full picker with no default.
 # default_cli = ""
+
+# Pre-select a worker profile ([profiles.<name>] below) in the interactive
+# picker, ahead of default_cli; also the fallback when no picker is shown.
+# default_profile = "routine"
 
 # Enable tmux mouse mode for sessions (default: true).
 # mouse = true
@@ -1305,7 +1390,7 @@ worktree_placement = "child"
 # display_name = "My Agent"
 #
 # Arguments appended to every launch of this CLI, before the approval flags.
-# For per-worker models, give each worker profile its own [clis.*] entry.
+# For per-worker models, give each worker profile ([profiles.*]) its own args.
 # Put permission flags in approval_args, not here.
 # args = "--model sonnet"
 #
@@ -1328,6 +1413,49 @@ worktree_placement = "child"
 # Sandbox mode: "wrapper" or "native". Unset means no sandbox.
 # sandbox = "wrapper"
 # sandbox_args = "--sandbox workspace-write"
+
+# Agent profiles: what an agent is for. A worker profile launches a coding
+# agent (pane, branch, worktree) with its CLI plus the profile's own args,
+# approval level and optional role skill; select it with --profile, a spec's
+# paw_profile, the picker, or default_profile. A delegate profile runs one
+# headless agent at the repository root through `git paw delegate <name>`
+# (approval "manual" unless set; "full-auto" is refused; timeout_seconds
+# defaults to 600) and prints its standard output as the result.
+# [profiles.routine]
+# kind = "worker"
+# description = "Routine implementation"
+# cli = "my-agent"
+# args = "--model <model>"
+# approval = "auto"
+# skill = "<role-skill>"
+#
+# [profiles.explorer]
+# kind = "delegate"
+# description = "Read-only codebase sweep that returns a map"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "explorer"
+#
+# [profiles.spec-audit]
+# kind = "delegate"
+# description = "Runs the spec audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "spec-auditor"
+#
+# [profiles.doc-audit]
+# kind = "delegate"
+# description = "Runs the doc audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "doc-auditor"
+#
+# [profiles.security-audit]
+# kind = "delegate"
+# description = "Runs the security audit gate and returns a compressed verdict"
+# cli = "my-agent"
+# args = "--model <model>"
+# skill = "security-auditor"
 
 # Named presets for quick launches.
 # [presets.my-preset]

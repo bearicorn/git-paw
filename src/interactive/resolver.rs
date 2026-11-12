@@ -13,7 +13,9 @@ use crate::config::PawConfig;
 use crate::error::PawError;
 use crate::specs::SpecEntry;
 
-use super::{CliInfo, CliMode, Prompter, SelectionResult};
+use super::{
+    CliInfo, CliMode, ProfileInfo, Prompter, SelectionResult, WorkerChoice, WorkerOptions,
+};
 
 /// Pure post-processing for `select_branches`: maps the picker's
 /// `Option<Vec<usize>>` selection (indices into the original `branches` slice)
@@ -260,24 +262,25 @@ pub(super) fn clamp_cursor(cursor: &mut usize, state: &PickerState) {
 /// Runs the full interactive selection flow, skipping prompts when CLI flags
 /// provide the necessary data.
 ///
-/// `default_cli` (the configuration's `default_cli`) pre-selects an entry in
-/// the uniform-mode picker and in every per-branch picker. It never skips a
-/// picker: only `cli_flag` does that.
+/// `options.default` (the configuration's `default_profile`, else
+/// `default_cli`) pre-selects an entry in the uniform-mode picker and in every
+/// per-branch picker. It never skips a picker: only `flag` (`--cli` or
+/// `--profile`) does that. Every picker lists `options.profiles` after the
+/// CLIs.
 ///
 /// # Errors
 ///
-/// Returns `PawError::NoCLIsFound` if `clis` is empty.
+/// Returns `PawError::NoCLIsFound` if `options.clis` is empty.
 /// Returns `PawError::BranchError` if `branches` is empty.
 /// Returns `PawError::UserCancelled` if the user cancels any prompt.
 pub fn run_selection(
     prompter: &dyn Prompter,
     branches: &[String],
-    clis: &[CliInfo],
-    cli_flag: Option<&str>,
+    options: &WorkerOptions<'_>,
+    flag: Option<&WorkerChoice>,
     branches_flag: Option<&[String]>,
-    default_cli: Option<&str>,
 ) -> Result<SelectionResult, PawError> {
-    if clis.is_empty() {
+    if options.clis.is_empty() {
         return Err(PawError::NoCLIsFound);
     }
     if branches.is_empty() {
@@ -291,27 +294,27 @@ pub fn run_selection(
         prompter.select_branches(branches)?
     };
 
-    // Determine CLI mapping.
-    let mappings = if let Some(cli) = cli_flag {
+    // Determine the worker mapping.
+    let mappings = if let Some(choice) = flag {
         selected_branches
             .into_iter()
-            .map(|branch| (branch, cli.to_string()))
+            .map(|branch| (branch, choice.clone()))
             .collect()
     } else {
         let mode = prompter.select_mode()?;
         match mode {
             CliMode::Uniform => {
-                let cli = prompter.select_cli(clis, default_cli)?;
+                let choice = prompter.select_cli(options)?;
                 selected_branches
                     .into_iter()
-                    .map(|branch| (branch, cli.clone()))
+                    .map(|branch| (branch, choice.clone()))
                     .collect()
             }
             CliMode::PerBranch => {
                 let mut pairs = Vec::with_capacity(selected_branches.len());
                 for branch in selected_branches {
-                    let cli = prompter.select_cli_for_branch(&branch, clis, default_cli)?;
-                    pairs.push((branch, cli));
+                    let choice = prompter.select_cli_for_branch(&branch, options)?;
+                    pairs.push((branch, choice));
                 }
                 pairs
             }
@@ -325,47 +328,63 @@ pub fn run_selection(
 // Spec-driven CLI resolution
 // ---------------------------------------------------------------------------
 
-/// Resolves which CLI to use for each spec-driven branch using a 5-level
-/// priority chain:
+/// Resolves which CLI or worker profile to use for each spec-driven branch
+/// using a 5-level priority chain:
 ///
-/// 1. `cli_flag` (from `--cli`) → all branches, no prompt
-/// 2. `spec.cli` (`paw_cli` in spec) → that branch only
+/// 1. `flag` (`--cli` or `--profile`) → all branches, no prompt
+/// 2. the spec's `paw_profile` or `paw_cli` → that branch only
 /// 3. `config.default_spec_cli` → remaining branches, no prompt
-/// 4. `config.default_cli` → pre-selects in picker for remaining
+/// 4. `config.default_profile`, else `config.default_cli` → pre-selects in
+///    the picker for the remaining branches
 /// 5. Nothing → full picker for remaining
 ///
-/// Prompts at most once. Validates all resolved CLI names against
-/// `available_clis`.
+/// Prompts at most once; the picker lists the configured worker profiles
+/// after the CLIs. Validates every resolved CLI name against
+/// `available_clis` and every profile against the configuration.
+///
+/// # Errors
+///
+/// `PawError::CliNotFound` for an unavailable CLI; a configuration error
+/// naming the value and its source for a profile that is unknown or a
+/// delegate, or for a spec setting both `paw_profile` and `paw_cli`.
 pub fn resolve_cli_for_specs(
     specs: &[SpecEntry],
-    cli_flag: Option<&str>,
+    flag: Option<&WorkerChoice>,
     config: &PawConfig,
     available_clis: &[CliInfo],
     prompter: &dyn Prompter,
-) -> Result<Vec<(String, String)>, PawError> {
+) -> Result<Vec<(String, WorkerChoice)>, PawError> {
     let cli_exists = |name: &str| available_clis.iter().any(|c| c.binary_name == name);
-
-    // Priority 1: --cli flag overrides everything
-    if let Some(flag) = cli_flag {
-        if !cli_exists(flag) {
-            return Err(PawError::CliNotFound(flag.to_string()));
+    let check = |choice: WorkerChoice, source: &str| -> Result<WorkerChoice, PawError> {
+        match &choice {
+            WorkerChoice::Cli(name) if !cli_exists(name) => {
+                Err(PawError::CliNotFound(name.clone()))
+            }
+            WorkerChoice::Profile(name) => {
+                crate::worker::worker_profile(config, name.as_str(), source)?;
+                Ok(choice)
+            }
+            WorkerChoice::Cli(_) => Ok(choice),
         }
+    };
+
+    // Priority 1: --cli / --profile overrides everything
+    if let Some(flag) = flag {
+        let choice = check(flag.clone(), "--profile")?;
         return Ok(specs
             .iter()
-            .map(|s| (s.branch.clone(), flag.to_string()))
+            .map(|s| (s.branch.clone(), choice.clone()))
             .collect());
     }
 
-    let mut mappings: Vec<(String, String)> = Vec::with_capacity(specs.len());
+    let mut mappings: Vec<(String, WorkerChoice)> = Vec::with_capacity(specs.len());
     let mut remaining: Vec<&SpecEntry> = Vec::new();
 
-    // Priority 2: per-spec paw_cli
+    // Priority 2: per-spec paw_profile / paw_cli
     for spec in specs {
-        if let Some(ref cli_name) = spec.cli {
-            if !cli_exists(cli_name) {
-                return Err(PawError::CliNotFound(cli_name.clone()));
-            }
-            mappings.push((spec.branch.clone(), cli_name.clone()));
+        if let Some(choice) = crate::worker::spec_choice(config, spec)? {
+            let choice = check(choice, "paw_profile")?;
+            mappings.push((spec.branch.clone(), choice));
         } else {
             remaining.push(spec);
         }
@@ -381,13 +400,21 @@ pub fn resolve_cli_for_specs(
             return Err(PawError::CliNotFound(spec_cli.clone()));
         }
         for spec in &remaining {
-            mappings.push((spec.branch.clone(), spec_cli.clone()));
+            mappings.push((spec.branch.clone(), WorkerChoice::cli(spec_cli)));
         }
         return Ok(mappings);
     }
 
-    // Priority 4+5: prompt once (pre-selected if default_cli set)
-    let chosen = prompter.select_cli(available_clis, config.default_cli.as_deref())?;
+    // Priority 4+5: prompt once (pre-selected on default_profile, else
+    // default_cli)
+    let default = crate::worker::configured_default(config)?;
+    let profiles = ProfileInfo::workers(config);
+    let options = WorkerOptions {
+        clis: available_clis,
+        profiles: &profiles,
+        default: default.as_ref(),
+    };
+    let chosen = prompter.select_cli(&options)?;
     for spec in &remaining {
         mappings.push((spec.branch.clone(), chosen.clone()));
     }
@@ -421,6 +448,64 @@ mod tests {
         /// Captures the `default` parameter passed to each
         /// `select_cli_for_branch()` call, in call order.
         per_branch_defaults: RefCell<Vec<Option<String>>>,
+        /// The item labels the last `select_cli()` call listed.
+        last_items: RefCell<Vec<String>>,
+    }
+
+    /// What a scripted answer maps to: the item whose label is `answer`
+    /// (so a test can pick a profile entry by its full label), else the CLI
+    /// named `answer`.
+    fn pick(options: &WorkerOptions<'_>, answer: &str) -> WorkerChoice {
+        options
+            .items()
+            .into_iter()
+            .find(|(label, _)| label == answer)
+            .map_or_else(|| WorkerChoice::cli(answer), |(_, choice)| choice)
+    }
+
+    /// The pre-profile shape of a selection: `(branch, cli id)` pairs.
+    struct CliSelection {
+        mappings: Vec<(String, String)>,
+    }
+
+    fn pairs(mappings: Vec<(String, WorkerChoice)>) -> Vec<(String, String)> {
+        mappings
+            .into_iter()
+            .map(|(b, c)| (b, c.to_string()))
+            .collect()
+    }
+
+    /// [`run_selection`] driven with CLI ids only, as every CLI-chain
+    /// scenario states it.
+    fn run_cli_selection(
+        prompter: &dyn Prompter,
+        branches: &[String],
+        clis: &[CliInfo],
+        cli_flag: Option<&str>,
+        branches_flag: Option<&[String]>,
+        default_cli: Option<&str>,
+    ) -> Result<CliSelection, PawError> {
+        let flag = cli_flag.map(WorkerChoice::cli);
+        let default = default_cli.map(WorkerChoice::cli);
+        let options = WorkerOptions::clis_only(clis, default.as_ref());
+        run_selection(prompter, branches, &options, flag.as_ref(), branches_flag).map(|r| {
+            CliSelection {
+                mappings: pairs(r.mappings),
+            }
+        })
+    }
+
+    /// [`resolve_cli_for_specs`] driven with a CLI flag, as every CLI-chain
+    /// scenario states it.
+    fn resolve_cli_specs(
+        specs: &[SpecEntry],
+        cli_flag: Option<&str>,
+        config: &PawConfig,
+        clis: &[CliInfo],
+        prompter: &dyn Prompter,
+    ) -> Result<Vec<(String, String)>, PawError> {
+        let flag = cli_flag.map(WorkerChoice::cli);
+        resolve_cli_for_specs(specs, flag.as_ref(), config, clis, prompter).map(pairs)
     }
 
     impl TrackingPrompter {
@@ -435,6 +520,7 @@ mod tests {
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
                 per_branch_defaults: RefCell::new(Vec::new()),
+                last_items: RefCell::new(Vec::new()),
             }
         }
 
@@ -449,6 +535,7 @@ mod tests {
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
                 per_branch_defaults: RefCell::new(Vec::new()),
+                last_items: RefCell::new(Vec::new()),
             }
         }
 
@@ -463,6 +550,7 @@ mod tests {
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
                 per_branch_defaults: RefCell::new(Vec::new()),
+                last_items: RefCell::new(Vec::new()),
             }
         }
 
@@ -477,6 +565,7 @@ mod tests {
                 cancel_on_cli_select: true,
                 last_select_cli_default: Cell::new(None),
                 per_branch_defaults: RefCell::new(Vec::new()),
+                last_items: RefCell::new(Vec::new()),
             }
         }
 
@@ -492,6 +581,7 @@ mod tests {
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
                 per_branch_defaults: RefCell::new(Vec::new()),
+                last_items: RefCell::new(Vec::new()),
             }
         }
     }
@@ -512,28 +602,35 @@ mod tests {
                 .collect())
         }
 
-        fn select_cli(&self, _clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
-            self.last_select_cli_default.set(default.map(String::from));
+        fn select_cli(&self, options: &WorkerOptions<'_>) -> Result<WorkerChoice, PawError> {
+            self.last_select_cli_default
+                .set(options.default.map(ToString::to_string));
+            self.last_items.replace(
+                options
+                    .items()
+                    .into_iter()
+                    .map(|(label, _)| label)
+                    .collect(),
+            );
             if self.cancel_on_cli_select {
                 return Err(PawError::UserCancelled);
             }
-            Ok(self.uniform_cli.clone())
+            Ok(pick(options, &self.uniform_cli))
         }
 
         fn select_cli_for_branch(
             &self,
             _branch: &str,
-            _clis: &[CliInfo],
-            default: Option<&str>,
-        ) -> Result<String, PawError> {
+            options: &WorkerOptions<'_>,
+        ) -> Result<WorkerChoice, PawError> {
             self.per_branch_defaults
                 .borrow_mut()
-                .push(default.map(String::from));
+                .push(options.default.map(ToString::to_string));
             let idx = self.per_branch_call_count.get();
             self.per_branch_call_count.set(idx + 1);
             self.per_branch_clis
                 .get(idx)
-                .cloned()
+                .map(|label| pick(options, label))
                 .ok_or(PawError::UserCancelled)
         }
 
@@ -574,7 +671,7 @@ mod tests {
         let clis = test_clis();
         let flag_branches = vec!["feature/auth".to_string(), "fix/api".to_string()];
 
-        let result = run_selection(
+        let result = run_cli_selection(
             &prompter,
             &branches,
             &clis,
@@ -599,7 +696,8 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, Some("alpha"), None, None).unwrap();
+        let result =
+            run_cli_selection(&prompter, &branches, &clis, Some("alpha"), None, None).unwrap();
 
         // Should use the flag CLI, and the branch from the prompter (index 0)
         assert_eq!(
@@ -627,7 +725,7 @@ mod tests {
         );
 
         let result =
-            run_selection(&prompter, &branches, &clis, Some("cursor"), None, None).unwrap();
+            run_cli_selection(&prompter, &branches, &clis, Some("cursor"), None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -646,7 +744,7 @@ mod tests {
         let clis = test_clis();
         let flag_branches = vec!["feature/auth".to_string(), "fix/api".to_string()];
 
-        let result = run_selection(
+        let result = run_cli_selection(
             &prompter,
             &branches,
             &clis,
@@ -675,7 +773,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -692,7 +790,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -710,7 +808,7 @@ mod tests {
         let clis = test_clis();
         let flag_branches = vec!["feature/auth".to_string(), "fix/api".to_string()];
 
-        let result = run_selection(
+        let result = run_cli_selection(
             &prompter,
             &branches,
             &clis,
@@ -739,7 +837,7 @@ mod tests {
         let branches = test_branches();
         let clis: Vec<CliInfo> = vec![];
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None);
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::NoCLIsFound)));
     }
@@ -750,7 +848,7 @@ mod tests {
         let branches: Vec<String> = vec![];
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None);
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::BranchError(_))));
     }
@@ -761,7 +859,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None);
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -773,7 +871,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None);
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -784,7 +882,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None);
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -799,7 +897,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
+        let result = run_cli_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -818,7 +916,8 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+        let result =
+            run_cli_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
 
         assert_eq!(
             prompter.last_select_cli_default.take(),
@@ -842,7 +941,8 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+        let result =
+            run_cli_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
 
         assert_eq!(
             prompter.last_select_cli_default.take(),
@@ -863,7 +963,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
+        run_cli_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(prompter.last_select_cli_default.take(), None);
     }
@@ -875,7 +975,8 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+        let result =
+            run_cli_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
 
         assert_eq!(
             prompter.per_branch_defaults.borrow().as_slice(),
@@ -902,7 +1003,7 @@ mod tests {
         let clis = test_clis();
         let flag_branches = test_branches();
 
-        let result = run_selection(
+        let result = run_cli_selection(
             &prompter,
             &branches,
             &clis,
@@ -937,6 +1038,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::Markdown,
             branch: branch.to_string(),
             cli: cli.map(String::from),
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         }
@@ -957,8 +1059,7 @@ mod tests {
         let specs = test_specs();
 
         let result =
-            resolve_cli_for_specs(&specs, Some("alpha"), &default_config(), &clis, &prompter)
-                .unwrap();
+            resolve_cli_specs(&specs, Some("alpha"), &default_config(), &clis, &prompter).unwrap();
 
         assert_eq!(result.len(), 3);
         assert!(result.iter().all(|(_, cli)| cli == "alpha"));
@@ -972,7 +1073,7 @@ mod tests {
         let prompter = TrackingPrompter::for_specs("should-not-be-used");
         let clis = test_clis();
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
 
         assert!(result.iter().any(|(b, c)| b == "spec/auth" && c == "beta"));
         assert!(result.iter().any(|(b, c)| b == "spec/api" && c == "alpha"));
@@ -986,7 +1087,7 @@ mod tests {
         let clis = test_clis();
         let specs = test_specs();
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
 
         assert_eq!(result.len(), 3);
         assert!(result.iter().all(|(_, cli)| cli == "alpha"));
@@ -1000,7 +1101,7 @@ mod tests {
         let clis = test_clis();
         let specs = vec![spec("spec/auth", None)];
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
 
         assert_eq!(result, vec![("spec/auth".to_string(), "beta".to_string())]);
         // Verify default was passed to select_cli
@@ -1016,8 +1117,7 @@ mod tests {
         let clis = test_clis();
         let specs = vec![spec("spec/auth", None)];
 
-        let result =
-            resolve_cli_for_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
 
         assert_eq!(result, vec![("spec/auth".to_string(), "alpha".to_string())]);
         assert_eq!(prompter.last_select_cli_default.take(), None);
@@ -1035,7 +1135,7 @@ mod tests {
         let prompter = TrackingPrompter::for_specs("should-not-be-used");
         let clis = test_clis();
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
 
         assert_eq!(result.len(), 3);
         assert!(result.iter().any(|(b, c)| b == "spec/auth" && c == "beta"));
@@ -1053,8 +1153,7 @@ mod tests {
         let prompter = TrackingPrompter::for_specs("alpha");
         let clis = test_clis();
 
-        let result =
-            resolve_cli_for_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
 
         assert_eq!(result.len(), 3);
         assert!(result.iter().any(|(b, c)| b == "spec/auth" && c == "beta"));
@@ -1075,8 +1174,7 @@ mod tests {
         let prompter = TrackingPrompter::for_specs("alpha");
         let clis = test_clis();
 
-        let result =
-            resolve_cli_for_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &default_config(), &clis, &prompter).unwrap();
 
         let remaining: Vec<_> = result.iter().filter(|(_, c)| c == "alpha").collect();
         assert_eq!(remaining.len(), 3);
@@ -1089,8 +1187,7 @@ mod tests {
         let specs = test_specs();
 
         let result =
-            resolve_cli_for_specs(&specs, Some("alpha"), &default_config(), &clis, &prompter)
-                .unwrap();
+            resolve_cli_specs(&specs, Some("alpha"), &default_config(), &clis, &prompter).unwrap();
         assert_eq!(result.len(), 3);
     }
 
@@ -1102,7 +1199,7 @@ mod tests {
         let prompter = TrackingPrompter::cancel_on_cli(vec![]); // would fail if called
         let clis = test_clis();
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -1112,7 +1209,7 @@ mod tests {
         let prompter = TrackingPrompter::for_specs("alpha");
         let clis = test_clis();
 
-        let result = resolve_cli_for_specs(&specs, None, &default_config(), &clis, &prompter);
+        let result = resolve_cli_specs(&specs, None, &default_config(), &clis, &prompter);
         assert!(matches!(result, Err(PawError::CliNotFound(ref name)) if name == "nonexistent"));
     }
 
@@ -1124,7 +1221,7 @@ mod tests {
         let clis = test_clis();
         let specs = test_specs();
 
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter);
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter);
         assert!(matches!(result, Err(PawError::CliNotFound(ref name)) if name == "nonexistent"));
     }
 
@@ -1134,7 +1231,7 @@ mod tests {
         let clis = test_clis();
         let specs = test_specs();
 
-        let result = resolve_cli_for_specs(
+        let result = resolve_cli_specs(
             &specs,
             Some("nonexistent"),
             &default_config(),
@@ -1152,7 +1249,7 @@ mod tests {
         let mut config = default_config();
         config.default_cli = Some("beta".to_string());
 
-        resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
 
         assert_eq!(
             prompter.last_select_cli_default.take(),
@@ -1169,12 +1266,246 @@ mod tests {
         config.default_cli = Some("nonexistent".to_string());
 
         // Should not error — the default just doesn't pre-select
-        let result = resolve_cli_for_specs(&specs, None, &config, &clis, &prompter).unwrap();
+        let result = resolve_cli_specs(&specs, None, &config, &clis, &prompter).unwrap();
         assert_eq!(result, vec![("spec/x".to_string(), "alpha".to_string())]);
         assert_eq!(
             prompter.last_select_cli_default.take(),
             Some("nonexistent".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Worker profiles in the CLI pickers (cli-interactive-selection)
+    // -----------------------------------------------------------------------
+
+    fn profile_info(name: &str, description: &str, cli: &str) -> ProfileInfo {
+        ProfileInfo {
+            name: crate::config::ProfileName::new(name).unwrap(),
+            description: description.to_string(),
+            cli: cli.to_string(),
+        }
+    }
+
+    fn profile_choice(name: &str) -> WorkerChoice {
+        WorkerChoice::Profile(crate::config::ProfileName::new(name).unwrap())
+    }
+
+    /// A config with worker profile `routine` on `beta` and delegate profile
+    /// `explorer`.
+    fn profiles_config() -> PawConfig {
+        let mut cfg = PawConfig::default();
+        cfg.profiles.insert(
+            crate::config::ProfileName::new("routine").unwrap(),
+            crate::config::ProfileEntry {
+                kind: crate::config::ProfileKind::Worker,
+                description: "Routine implementation".into(),
+                cli: "beta".into(),
+                args: None,
+                skill: None,
+                approval: None,
+                timeout_seconds: None,
+            },
+        );
+        cfg.profiles.insert(
+            crate::config::ProfileName::new("explorer").unwrap(),
+            crate::config::ProfileEntry {
+                kind: crate::config::ProfileKind::Delegate,
+                description: "Read-only sweep".into(),
+                cli: "beta".into(),
+                args: None,
+                skill: Some("explorer".into()),
+                approval: None,
+                timeout_seconds: None,
+            },
+        );
+        cfg
+    }
+
+    /// Spec scenario "Profiles appear with their descriptions".
+    #[test]
+    fn profiles_appear_with_their_descriptions() {
+        let clis = test_clis();
+        let profiles = ProfileInfo::workers(&profiles_config());
+        let options = WorkerOptions {
+            clis: &clis,
+            profiles: &profiles,
+            default: None,
+        };
+        let labels: Vec<String> = options.items().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Alpha CLI (alpha)".to_string(),
+                "Beta CLI (beta)".to_string(),
+                "routine \u{2014} Routine implementation [beta]".to_string(),
+            ]
+        );
+        assert!(!labels.iter().any(|l| l.contains("explorer")));
+    }
+
+    /// Spec scenario "No profiles leaves the picker unchanged".
+    #[test]
+    fn no_profiles_leaves_the_picker_unchanged() {
+        let clis = test_clis();
+        let profiles = ProfileInfo::workers(&PawConfig::default());
+        assert!(profiles.is_empty());
+        let options = WorkerOptions {
+            clis: &clis,
+            profiles: &profiles,
+            default: None,
+        };
+        let labels: Vec<String> = options.items().into_iter().map(|(l, _)| l).collect();
+        let before: Vec<String> = clis.iter().map(ToString::to_string).collect();
+        assert_eq!(labels, before);
+    }
+
+    /// Spec scenario "Picking a profile maps the branch to it".
+    #[test]
+    fn picking_a_profile_maps_the_branch_to_it() {
+        let prompter = TrackingPrompter::per_branch(
+            vec![0, 1],
+            vec!["routine \u{2014} Routine implementation [beta]", "alpha"],
+        );
+        let clis = test_clis();
+        let profiles = vec![profile_info("routine", "Routine implementation", "beta")];
+        let options = WorkerOptions {
+            clis: &clis,
+            profiles: &profiles,
+            default: None,
+        };
+        let result = run_selection(&prompter, &test_branches(), &options, None, None).unwrap();
+        assert_eq!(
+            result.mappings,
+            vec![
+                ("feature/auth".to_string(), profile_choice("routine")),
+                ("fix/api".to_string(), WorkerChoice::cli("alpha")),
+            ]
+        );
+    }
+
+    /// Spec scenario "A profile sharing a CLI's name stays distinct".
+    #[test]
+    fn a_profile_sharing_a_clis_name_stays_distinct() {
+        let clis = vec![CliInfo {
+            display_name: "fast".to_string(),
+            binary_name: "fast".to_string(),
+        }];
+        let profiles = vec![profile_info("fast", "Fast profile", "beta")];
+        let prompter = TrackingPrompter::uniform(vec![0], "fast \u{2014} Fast profile [beta]");
+        let options = WorkerOptions {
+            clis: &clis,
+            profiles: &profiles,
+            default: None,
+        };
+        let result = run_selection(&prompter, &test_branches(), &options, None, None).unwrap();
+        assert_eq!(
+            result.mappings,
+            vec![("feature/auth".to_string(), profile_choice("fast"))]
+        );
+        let items = options.items();
+        assert_eq!(items[0].1, WorkerChoice::cli("fast"));
+        assert_eq!(items[1].1, profile_choice("fast"));
+    }
+
+    /// Spec scenarios "`default_profile` is the starting entry" and
+    /// "`default_profile` pre-selects in picker ahead of `default_cli`".
+    #[test]
+    fn default_profile_is_the_starting_entry() {
+        let mut cfg = profiles_config();
+        cfg.default_profile = Some(crate::config::ProfileName::new("routine").unwrap());
+        cfg.default_cli = Some("alpha".into());
+        let prompter = TrackingPrompter::for_specs("alpha");
+        let clis = test_clis();
+        let specs = vec![spec("spec/auth", None), spec("spec/api", None)];
+
+        let result = resolve_cli_for_specs(&specs, None, &cfg, &clis, &prompter).unwrap();
+
+        assert_eq!(
+            prompter.last_select_cli_default.take(),
+            Some("routine".to_string())
+        );
+        assert_eq!(
+            result.len(),
+            2,
+            "the picker is shown once for the remaining branches"
+        );
+        let default = profile_choice("routine");
+        let profiles = ProfileInfo::workers(&cfg);
+        let options = WorkerOptions {
+            clis: &clis,
+            profiles: &profiles,
+            default: Some(&default),
+        };
+        assert_eq!(options.default_index(), 2, "starts on the routine entry");
+        assert_eq!(
+            prompter.last_items.borrow().last().map(String::as_str),
+            Some("routine \u{2014} Routine implementation [beta]")
+        );
+    }
+
+    /// Spec scenario "--profile flag overrides everything".
+    #[test]
+    fn profile_flag_overrides_everything() {
+        let cfg = profiles_config();
+        let prompter = TrackingPrompter::cancel_on_cli(vec![]);
+        let clis = test_clis();
+        let mut with_profile = spec("spec/b", None);
+        with_profile.profile = Some("routine".into());
+        let specs = vec![spec("spec/a", Some("alpha")), with_profile];
+        let flag = profile_choice("routine");
+
+        let result = resolve_cli_for_specs(&specs, Some(&flag), &cfg, &clis, &prompter).unwrap();
+
+        assert!(result.iter().all(|(_, c)| c == &flag));
+        assert_eq!(prompter.last_select_cli_default.take(), None);
+    }
+
+    /// Spec scenario "`paw_profile` in spec overrides config".
+    #[test]
+    fn paw_profile_in_spec_overrides_config() {
+        let mut cfg = profiles_config();
+        cfg.default_spec_cli = Some("alpha".into());
+        cfg.default_cli = Some("alpha".into());
+        let prompter = TrackingPrompter::cancel_on_cli(vec![]);
+        let clis = test_clis();
+        let mut s = spec("spec/a", None);
+        s.profile = Some("routine".into());
+
+        let result = resolve_cli_for_specs(&[s], None, &cfg, &clis, &prompter).unwrap();
+
+        assert_eq!(
+            result,
+            vec![("spec/a".to_string(), profile_choice("routine"))]
+        );
+    }
+
+    /// Spec scenario "A spec with both `paw_profile` and `paw_cli` is rejected".
+    #[test]
+    fn a_spec_with_both_paw_profile_and_paw_cli_is_rejected() {
+        let cfg = profiles_config();
+        let prompter = TrackingPrompter::for_specs("alpha");
+        let mut s = spec("spec/a", Some("alpha"));
+        s.profile = Some("routine".into());
+        let err = resolve_cli_for_specs(&[s], None, &cfg, &test_clis(), &prompter)
+            .expect_err("both set")
+            .to_string();
+        assert!(err.contains("spec/a"), "{err}");
+    }
+
+    /// Spec scenario "`paw_profile` naming an unknown or delegate profile is
+    /// rejected".
+    #[test]
+    fn paw_profile_naming_an_unknown_or_delegate_profile_is_rejected() {
+        let cfg = profiles_config();
+        for bad in ["nonexistent", "explorer"] {
+            let prompter = TrackingPrompter::for_specs("alpha");
+            let mut s = spec("spec/a", None);
+            s.profile = Some(bad.into());
+            let err = resolve_cli_for_specs(&[s], None, &cfg, &test_clis(), &prompter)
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains(bad) && err.contains("spec/a"), "{err}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1187,6 +1518,7 @@ mod tests {
             backend: crate::specs::SpecBackendKind::Markdown,
             branch: format!("spec/{id}"),
             cli: None,
+            profile: None,
             prompt: String::new(),
             owned_files: None,
         }
@@ -1306,19 +1638,14 @@ mod tests {
         fn select_branches(&self, _branches: &[String]) -> Result<Vec<String>, PawError> {
             Err(PawError::UserCancelled)
         }
-        fn select_cli(
-            &self,
-            _clis: &[CliInfo],
-            _default: Option<&str>,
-        ) -> Result<String, PawError> {
+        fn select_cli(&self, _options: &WorkerOptions<'_>) -> Result<WorkerChoice, PawError> {
             Err(PawError::UserCancelled)
         }
         fn select_cli_for_branch(
             &self,
             _branch: &str,
-            _clis: &[CliInfo],
-            _default: Option<&str>,
-        ) -> Result<String, PawError> {
+            _options: &WorkerOptions<'_>,
+        ) -> Result<WorkerChoice, PawError> {
             Err(PawError::UserCancelled)
         }
         fn select_specs(&self, _specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {

@@ -275,6 +275,37 @@ pub fn run<B: TerminalBackend>(
     agent_id: &str,
     message: &str,
 ) -> Result<SendResult, PawError> {
+    run_marked(
+        crate::delegate::current_delegate_run().as_deref(),
+        runner,
+        cwd,
+        backend,
+        clock,
+        agent_id,
+        message,
+    )
+}
+
+/// [`run`] with the delegate-run marker (`GIT_PAW_DELEGATE`) passed in: a
+/// send inside a delegate run is refused before anything is looked up, so no
+/// pane is captured and no keystroke is sent.
+///
+/// # Errors
+/// As [`run`].
+pub(crate) fn run_marked<B: TerminalBackend>(
+    delegate_run: Option<&str>,
+    runner: &dyn CommandRunner,
+    cwd: &Path,
+    backend: &B,
+    clock: &dyn Clock,
+    agent_id: &str,
+    message: &str,
+) -> Result<SendResult, PawError> {
+    if let Some(run) = delegate_run {
+        return Ok(SendResult::Refused(
+            crate::delegate::refusal_inside_delegate(run, "git paw __send"),
+        ));
+    }
     let layout = crate::cli_setup::shell::resolve_layout(runner, cwd)?;
     if layout.is_linked_worktree() {
         return Ok(SendResult::Refused(
@@ -819,6 +850,36 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// Spec scenario "A direct send from a delegate run is refused": exit 3
+    /// with a `refused:` line naming the delegate run, before any pane is
+    /// captured — no keystroke reaches any pane.
+    #[test]
+    fn a_direct_send_from_a_delegate_run_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let backend = FakeBackend::new();
+        let result = run_marked(
+            Some("explorer"),
+            &crate::command_runner::RealCommandRunner,
+            &repo,
+            &backend,
+            &NoSleep,
+            "feat-x",
+            "please continue",
+        )
+        .unwrap();
+        assert_eq!(result.exit_code(), 3);
+        assert!(
+            result.line().starts_with("refused:") && result.line().contains("delegate run"),
+            "{}",
+            result.line()
+        );
+        assert!(backend.operations().is_empty(), "nothing captured or typed");
     }
 
     /// Spec scenario "A send from a linked worktree is refused".

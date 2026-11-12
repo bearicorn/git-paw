@@ -31,6 +31,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
             branch: "feat/auth".to_string(),
             worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-auth")),
             cli: "claude".to_string(),
+            profile: None,
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,

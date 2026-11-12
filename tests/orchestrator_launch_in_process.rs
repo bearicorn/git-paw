@@ -89,6 +89,7 @@ fn child_in_process_launch() {
         &ctx,
         SupervisorOptions {
             cli: Some("echo".to_string()),
+            profile: None,
             branches: Some(vec!["a".to_string()]),
             spec_mode: SpecMode::None,
             specs_format: None,

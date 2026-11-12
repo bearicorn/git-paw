@@ -10583,6 +10583,7 @@ mod tests {
                 approval_flags: Vec::new(),
                 headless_args: vec!["-p".to_string()],
                 session_id_args: None,
+                isolation_env: Vec::new(),
             },
             repo_root: repo.to_path_buf(),
             broker_url: Some("http://127.0.0.1:9119".to_string()),
@@ -11140,6 +11141,7 @@ mod tests {
                 cli: cli.to_string(),
                 label: branch.to_string(),
                 session_id: Some(session.to_string()),
+                profile: None,
                 report,
             }
         }
@@ -11681,6 +11683,7 @@ mod tests {
                     "orchestrator invocation 1",
                     &one_shot,
                 )]),
+                profiles: std::collections::BTreeMap::new(),
             };
             let text =
                 budget::render_section(&snapshot, tokens_cap(1000, OnExhausted::Escalate), &[]);
@@ -11692,6 +11695,66 @@ mod tests {
             assert!(text.contains("1 worker(s) with unknown usage"), "{text}");
             assert!(text.contains(EXCLUDES_OWN_SESSION), "{text}");
             assert!(text.contains("budget_max_tokens: 43 of 1000"), "{text}");
+        }
+
+        /// Scenario "Profiles appear in the usage section": profiled workers
+        /// still count in their CLI's line and the total; a delegate run is
+        /// reported on its profile line only.
+        #[test]
+        fn profiles_appear_in_the_usage_section() {
+            let profiled = |branch: &str, s: &str| Attributed {
+                profile: Some("routine".to_string()),
+                ..worker("beta", branch, s, known(10, 20))
+            };
+            let records = vec![
+                profiled("feat/a", "s-a"),
+                profiled("feat/b", "s-b"),
+                worker("alpha", "feat/c", "s-c", known(1, 2)),
+                Attributed {
+                    role: UsageRole::Delegate,
+                    profile: Some("spec-audit".to_string()),
+                    ..worker("beta", "delegate spec-audit at 1", "s-d", known(100, 100))
+                },
+            ];
+            let snapshot = snapshot_of(&records);
+            let text =
+                budget::render_section(&snapshot, tokens_cap(1000, OnExhausted::Escalate), &[]);
+            assert!(text.contains("workers on beta: 60 tokens"), "{text}");
+            assert!(text.contains("workers on alpha: 3 tokens"), "{text}");
+            assert!(text.contains("worker profile routine: 60 tokens"), "{text}");
+            assert!(
+                text.contains("delegate profile spec-audit: 200 tokens"),
+                "{text}"
+            );
+            assert!(
+                text.contains("total: 63 tokens"),
+                "delegate spend is not in the total: {text}"
+            );
+            assert!(text.contains("budget_max_tokens: 63 of 1000"), "{text}");
+        }
+
+        /// Scenario "No profile leaves the usage section unchanged".
+        #[test]
+        fn no_profile_leaves_the_usage_section_unchanged() {
+            let records = vec![
+                worker("beta", "feat/a", "s-a", known(10, 20)),
+                worker("alpha", "feat/c", "s-c", known(1, 2)),
+            ];
+            let snapshot = snapshot_of(&records);
+            assert!(snapshot.profiles.is_empty());
+            let text =
+                budget::render_section(&snapshot, tokens_cap(1000, OnExhausted::Escalate), &[]);
+            assert_eq!(
+                text,
+                format!(
+                    "Usage (known usage only; {EXCLUDES_OWN_SESSION}):\n\
+                     \x20 - workers on alpha: 3 tokens (1 in, 2 out; cache 0 read, 0 write)\n\
+                     \x20 - workers on beta: 30 tokens (10 in, 20 out; cache 0 read, 0 write)\n\
+                     \x20 - 0 worker(s) with unknown usage\n\
+                     \x20 - total: 33 tokens (11 in, 22 out; cache 0 read, 0 write)\n\
+                     \x20 - budget_max_tokens: 33 of 1000\n"
+                )
+            );
         }
     }
 

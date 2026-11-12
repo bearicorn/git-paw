@@ -73,6 +73,7 @@ fn save_session_with(home: &Path, repo_root: &Path, credential: Option<&str>) {
 fn authority_cmd(cwd: &Path, home: &Path) -> Command {
     let mut cmd = Command::cargo_bin("git-paw").expect("binary");
     cmd.arg("__authority")
+        .env_remove("GIT_PAW_DELEGATE")
         .current_dir(cwd)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
@@ -162,4 +163,26 @@ fn authority_is_hidden_from_help() {
         .output()
         .expect("run");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("__authority"));
+}
+
+/// Scenario "No credential inside a delegate run": non-zero, empty stdout,
+/// although the session holds a credential.
+#[test]
+fn authority_refuses_inside_a_delegate_run() {
+    let (_tmp, root) = repo();
+    let home = TempDir::new().expect("home");
+    let credential = "cd".repeat(32);
+    save_session_with(home.path(), &root, Some(&credential));
+
+    let out = authority_cmd(&root, home.path())
+        .env("GIT_PAW_DELEGATE", "spec-audit")
+        .output()
+        .expect("run");
+    assert!(!out.status.success(), "{out:?}");
+    assert!(out.stdout.is_empty(), "no credential may be printed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("delegate run"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

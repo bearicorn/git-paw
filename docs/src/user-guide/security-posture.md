@@ -588,6 +588,59 @@ The MCP server's spec-authoring tools (`create_spec`, `write_spec_artifact`) are
 
 **The limit.** The switch is a file in the repository, so anything that can edit the root's `.git-paw/config.toml` can turn it on. That includes an unsandboxed worker writing outside its worktree, or a merged branch that carries the key. The change shows up in the diff a human reviews and in the server's startup log line, and the [sandbox](./sandbox.md) confines a worker's writes to its worktree. Against an unsandboxed rogue worker, though, the switch is no defence, as with [broker verdict authority](#broker-verdict-authority). Likewise, a local process that can already write inside the change directory could swap a directory that was just checked for a symbolic link before the write lands. That is out of scope for the same reason: it already has write access.
 
+## Delegate runs
+
+`git paw delegate <name>` runs a delegate profile's CLI once, headless, at the
+repository's main working tree (see [Agent Profiles](agent-profiles.md)). It is
+an agent with execution power started on another agent's request, outside
+every worktree, with no pane anyone watches. What bounds it:
+
+- **Its approval level.** `manual` unless the profile sets `auto`; git-paw
+  passes no permission-widening flag at `manual`, so the CLI's own
+  non-interactive mode decides what may run. `full-auto` is refused at config
+  load, so an orchestrator cannot launder full execution power through a
+  delegate. Nothing relays or answers a delegate's permission prompts.
+- **Where it may start.** Only when the caller's working directory is the
+  main working tree — the guard checks only that, so a worker able to run
+  shell commands can `cd` into the main checkout and pass it — never inside
+  another delegate run, at most four `manual` runs at once and an `auto` run
+  alone, for at most `timeout_seconds` before its whole process group is
+  killed. The group is recorded with its deadline: an interrupted
+  `git paw delegate` kills it, and an orphaned one is killed at the next
+  admission once overdue, counting toward the limits until then.
+- **Profile `args` are trusted config, checked best-effort.** A profile's
+  `args` are operator-trusted configuration, like `[clis.<name>].args`, and
+  `git paw setup-cli` keeps `config.toml` edits ask-protected. A delegate
+  profile's `args` are still checked against a per-family denylist (approval
+  and sandbox flags, each family's permission-mode, sandbox and tool-grant
+  flags, Codex `-c` overrides of `sandbox_mode`, `approval_policy` and
+  `sandbox_workspace_write.*`, and bypass values), so an editing run is not
+  counted as read-only by accident. That check is defence in depth: no
+  denylist over arbitrary CLI arguments is complete.
+- **Signalling is identity-checked.** A recorded process group is signalled
+  only when it is greater than 1 (and at most `i32::MAX`), is not git-paw's
+  own group, and its leader still runs the recorded delegate program with the
+  start time recorded at spawn; a planted or reused group is never signalled,
+  and a record whose group could not be confirmed and killed keeps counting.
+- **Operator isolation.** The run gets its CLI's operator isolation (unless
+  `[clis.<name>] inherit_operator_config = true`). That matters more than for
+  a worker: a delegate runs in the main checkout, whose auto memory is your
+  own.
+- **The marker refusals.** The run carries `GIT_PAW_DELEGATE=<name>` and no
+  `GIT_PAW_BROKER_URL`. Under the marker `git paw __authority` prints no
+  credential, `git paw __send` refuses (exit 3) before touching any pane, the
+  bundled `broker.sh` and `sweep.sh` refuse every subcommand before reaching
+  the broker, and an MCP server started inside the run is never a root
+  session and registers no publish tool at all (`publish_status`,
+  `publish_artifact`, `publish_blocked`, `publish_question` included).
+
+**The limit.** The marker refusals are defence in depth. A delegate allowed to
+run shell commands could unset the variable, or run public commands such as
+`git paw stop` or raw `tmux`. The boundary is the approval level plus, where
+configured, the CLI's declared sandbox (`[clis.<name>].sandbox`, see the
+[sandbox guide](./sandbox.md)) — and because the run happens at the
+repository root, a `git paw setup-cli` grant applied there reaches it too.
+
 ## The bottom line
 
 - Treat every agent as capable of running arbitrary code as you.

@@ -128,12 +128,16 @@ fn publish_supervisor_question(question: &str, broker_url: &str) -> Result<(), P
 fn interactive_branch_cli_selection(
     prompter: &dyn interactive::Prompter,
     all_branches: &[String],
-    clis: &[interactive::CliInfo],
-    cli_flag: Option<&str>,
-    default_cli: Option<&str>,
-) -> Result<(Vec<String>, std::collections::HashMap<String, String>), PawError> {
-    let selection =
-        interactive::run_selection(prompter, all_branches, clis, cli_flag, None, default_cli)?;
+    options: &interactive::WorkerOptions<'_>,
+    flag: Option<&crate::worker::WorkerChoice>,
+) -> Result<
+    (
+        Vec<String>,
+        std::collections::HashMap<String, crate::worker::WorkerChoice>,
+    ),
+    PawError,
+> {
+    let selection = interactive::run_selection(prompter, all_branches, options, flag, None)?;
     let mut branches = Vec::with_capacity(selection.mappings.len());
     let mut overrides = std::collections::HashMap::new();
     for (branch, cli) in selection.mappings {
@@ -154,10 +158,24 @@ mod interactive_cli_selection_tests {
     use std::cell::RefCell;
 
     use crate::error::PawError;
-    use crate::interactive::{CliInfo, CliMode, Prompter};
+    use crate::interactive::{CliInfo, CliMode, Prompter, WorkerChoice, WorkerOptions};
     use crate::specs::SpecEntry;
 
-    use super::interactive_branch_cli_selection;
+    /// The selection with CLI choices only, as these scenarios state it:
+    /// `(branches, branch → cli id)`.
+    fn interactive_branch_cli_selection(
+        prompter: &dyn Prompter,
+        all_branches: &[String],
+        clis: &[CliInfo],
+        cli_flag: Option<&str>,
+        default_cli: Option<&str>,
+    ) -> Result<(Vec<String>, std::collections::HashMap<String, String>), PawError> {
+        let flag = cli_flag.map(WorkerChoice::cli);
+        let default = default_cli.map(WorkerChoice::cli);
+        let options = WorkerOptions::clis_only(clis, default.as_ref());
+        super::interactive_branch_cli_selection(prompter, all_branches, &options, flag.as_ref())
+            .map(|(b, m)| (b, m.into_iter().map(|(k, v)| (k, v.to_string())).collect()))
+    }
 
     /// A prompter that answers with a scripted mode and CLI choices and
     /// records the `default` each picker was given.
@@ -190,16 +208,15 @@ mod interactive_cli_selection_tests {
         fn select_branches(&self, _branches: &[String]) -> Result<Vec<String>, PawError> {
             Ok(self.branches.clone())
         }
-        fn select_cli(&self, _clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
-            *self.uniform_default.borrow_mut() = default.map(String::from);
-            Ok(self.uniform_cli.clone())
+        fn select_cli(&self, options: &WorkerOptions<'_>) -> Result<WorkerChoice, PawError> {
+            *self.uniform_default.borrow_mut() = options.default.map(ToString::to_string);
+            Ok(WorkerChoice::cli(&self.uniform_cli))
         }
         fn select_cli_for_branch(
             &self,
             _branch: &str,
-            _clis: &[CliInfo],
-            _default: Option<&str>,
-        ) -> Result<String, PawError> {
+            _options: &WorkerOptions<'_>,
+        ) -> Result<WorkerChoice, PawError> {
             let mut calls = self.per_branch_calls.borrow_mut();
             let cli = self
                 .per_branch_clis
@@ -207,7 +224,7 @@ mod interactive_cli_selection_tests {
                 .cloned()
                 .ok_or(PawError::UserCancelled)?;
             *calls += 1;
-            Ok(cli)
+            Ok(WorkerChoice::Cli(cli))
         }
         fn select_specs(&self, _specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
             Err(PawError::UserCancelled)
@@ -307,6 +324,8 @@ mod interactive_cli_selection_tests {
 pub struct SupervisorOptions<'a> {
     /// `--cli`: the coding agents' CLI.
     pub cli: Option<String>,
+    /// `--profile`: the coding agents' worker profile.
+    pub profile: Option<String>,
     /// `--branches`.
     pub branches: Option<Vec<String>>,
     /// Which discovered specs to launch (`SpecMode::None` for the branch
@@ -353,6 +372,7 @@ pub fn supervisor(
     let config = ctx.config()?;
     let SupervisorOptions {
         cli,
+        profile: profile_flag,
         branches,
         spec_mode,
         specs_format,
@@ -428,13 +448,26 @@ pub fn supervisor(
         .clone()
         .or_else(|| config.default_cli.clone());
 
-    // Resolve the coding agents' fallback CLI: explicit flag > default_cli >
-    // `[supervisor].cli` (kept so earlier configs launch unchanged). Checked
-    // against the branches that need it once they are known.
-    let agent_cli = cli_flag
-        .map(ToString::to_string)
-        .or_else(|| config.default_cli.clone())
-        .or_else(|| supervisor_cfg.cli.clone());
+    // The `--profile` / `--cli` flag, applied to every branch.
+    let worker_flag = match profile_flag.as_deref() {
+        Some(name) => Some(crate::worker::profile_flag_choice(config, name)?),
+        None => cli_flag.map(crate::worker::WorkerChoice::cli),
+    };
+
+    // Resolve the coding agents' fallback worker: explicit flag >
+    // default_profile > default_cli > `[supervisor].cli` (kept so earlier
+    // configs launch unchanged). Checked against the branches that need it
+    // once they are known.
+    let agent_fallback = match &worker_flag {
+        Some(choice) => Some(choice.clone()),
+        None => crate::worker::configured_default(config)?,
+    }
+    .or_else(|| {
+        supervisor_cfg
+            .cli
+            .as_deref()
+            .map(crate::worker::WorkerChoice::cli)
+    });
 
     // Resolve branches. Precedence:
     //   1. `--branches` — explicit branch list wins.
@@ -450,7 +483,7 @@ pub fn supervisor(
     // --specs` can no longer silently diverge from the non-supervisor
     // `--specs` resolution (in particular, `default_spec_cli` is honoured
     // instead of being bypassed by the `agent_cli` fallback below).
-    let mut spec_cli_overrides: std::collections::HashMap<String, String> =
+    let mut spec_cli_overrides: std::collections::HashMap<String, crate::worker::WorkerChoice> =
         std::collections::HashMap::new();
     let branches: Vec<String> = if let Some(bs) = branches_flag {
         bs.to_vec()
@@ -463,12 +496,21 @@ pub fn supervisor(
         let all_branches = git::list_branches(repo_root)?;
         let interactive_clis: Vec<interactive::CliInfo> =
             detected.iter().map(to_interactive_cli).collect();
+        let worker_profiles = interactive::ProfileInfo::workers(config);
+        let picker_default = if worker_flag.is_some() {
+            None
+        } else {
+            crate::worker::configured_default(config)?
+        };
         let (picked_branches, picked_clis) = interactive_branch_cli_selection(
             prompter,
             &all_branches,
-            &interactive_clis,
-            cli_flag,
-            config.default_cli.as_deref(),
+            &interactive::WorkerOptions {
+                clis: &interactive_clis,
+                profiles: &worker_profiles,
+                default: picker_default.as_ref(),
+            },
+            worker_flag.as_ref(),
         )?;
         spec_cli_overrides.extend(picked_clis);
         picked_branches
@@ -503,7 +545,7 @@ pub fn supervisor(
             detected.iter().map(to_interactive_cli).collect();
         let cli_mappings = interactive::resolve_cli_for_specs(
             &specs,
-            cli_flag,
+            worker_flag.as_ref(),
             config,
             &interactive_clis,
             prompter,
@@ -521,13 +563,14 @@ pub fn supervisor(
     // A branch without a per-branch CLI (the `--branches` path) launches with
     // the fallback; when it is needed and nothing resolved it, no coding agent
     // can start.
-    if agent_cli.is_none() && branches.iter().any(|b| !spec_cli_overrides.contains_key(b)) {
+    if agent_fallback.is_none() && branches.iter().any(|b| !spec_cli_overrides.contains_key(b)) {
         return Err(PawError::ConfigError(
             "supervisor mode could not resolve a coding-agent CLI: pass --cli or set default_cli"
                 .to_string(),
         ));
     }
-    let agent_cli = agent_cli.unwrap_or_default();
+    let agent_fallback =
+        agent_fallback.unwrap_or_else(|| crate::worker::WorkerChoice::Cli(String::new()));
 
     // Refuse before anything is touched when two of the session's branches
     // derive the same broker agent id — they would share one inbox, so a
@@ -558,17 +601,28 @@ pub fn supervisor(
     // an orchestrator, so it shapes no command here.
     let agent_approval = &supervisor_cfg.agent_approval;
 
-    // Resolves the CLI `branch` launches with: its per-branch override when
-    // one was resolved — the spec-driven priority chain (GP-10) or the
-    // interactive picker (DS-8) — else the session-wide `agent_cli` fallback
-    // (the `--branches` path, which shows no picker and has no per-spec
-    // `paw_cli`/`default_spec_cli` to consult).
-    let effective_agent_cli = |branch: &str| -> String {
-        spec_cli_overrides
-            .get(branch)
-            .cloned()
-            .unwrap_or_else(|| agent_cli.clone())
+    // Resolves the worker `branch` launches with: its per-branch override
+    // when one was resolved — the spec-driven priority chain (GP-10) or the
+    // interactive picker (DS-8) — else the session-wide fallback (the
+    // `--branches` path, which shows no picker and has no per-spec
+    // `paw_cli`/`paw_profile`/`default_spec_cli` to consult). A worker
+    // profile's `approval` applies to that worker only.
+    let mut branch_workers: std::collections::HashMap<String, crate::worker::WorkerLaunch> =
+        std::collections::HashMap::new();
+    for branch in &branches {
+        let choice = spec_cli_overrides.get(branch).unwrap_or(&agent_fallback);
+        branch_workers.insert(
+            branch.clone(),
+            crate::worker::WorkerLaunch::resolve(choice, config, *agent_approval)?,
+        );
+    }
+    let effective_worker = |branch: &str| -> &crate::worker::WorkerLaunch {
+        // Every branch was inserted above.
+        &branch_workers[branch]
     };
+    let agent_cli = crate::worker::WorkerLaunch::resolve(&agent_fallback, config, *agent_approval)
+        .map(|w| w.cli)
+        .unwrap_or_default();
 
     // Dry-run: print the plan and exit without touching the filesystem.
     if dry_run {
@@ -580,10 +634,13 @@ pub fn supervisor(
         }
         out.line("Dry run — supervisor session plan:\n");
         out.line(&format!("  Session:    {session_name}"));
-        if spec_cli_overrides.values().any(|cli| cli != &agent_cli) {
+        if spec_cli_overrides
+            .values()
+            .any(|choice| choice != &agent_fallback)
+        {
             out.line("  Agent CLI:  (resolved per branch, see below)");
         } else {
-            out.line(&format!("  Agent CLI:  {agent_cli}"));
+            out.line(&format!("  Agent CLI:  {agent_fallback}"));
         }
         out.line(&format!("  Approval:   {agent_approval:?}"));
         if unattended {
@@ -605,22 +662,17 @@ pub fn supervisor(
         let mut dry_run_warnings = LaunchWarnings::default();
         for branch in &branches {
             let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
-            let cli = effective_agent_cli(branch);
+            let worker = effective_worker(branch);
             // Refuse before printing anything for this worker, so the plan
             // never shows a command the launch would refuse to run.
-            let runs = dry_run_launch_line(
-                &cli,
-                *agent_approval,
-                &config.clis,
-                repo_root,
-                &mut dry_run_warnings,
-                out,
-            )?;
-            let flags = config::resolve_approval_flags(&cli, agent_approval, &config.clis);
+            let runs =
+                dry_run_launch_line(worker, &config.clis, repo_root, &mut dry_run_warnings, out)?;
+            let flags = config::resolve_approval_flags(&worker.cli, &worker.approval, &config.clis);
+            let label = super::launch::worker_label(worker);
             let cmd = if flags.is_empty() {
-                cli
+                label
             } else {
-                format!("{cli} {flags}")
+                format!("{label} {flags}")
             };
             out.line(&format!("  {branch} \u{2192} {cmd} ({wt})"));
             out.line(&runs);
@@ -638,12 +690,7 @@ pub fn supervisor(
     // disabled native sandbox refuses the launch before any worktree exists.
     let warnings = std::cell::RefCell::new(LaunchWarnings::default());
     for branch in &branches {
-        let resolved = crate::agent_cli::resolve_for_launch(
-            &effective_agent_cli(branch),
-            &config.clis,
-            agent_approval,
-            repo_root,
-        )?;
+        let resolved = effective_worker(branch).resolve_for_launch(&config.clis, repo_root)?;
         warnings.borrow_mut().admit(resolved, out);
     }
     git::prune_worktrees(repo_root)?;
@@ -724,13 +771,16 @@ pub fn supervisor(
     for branch in &branches {
         // A spec can set a different CLI per branch, so each branch needs
         // its own context.
-        let branch_cli = effective_agent_cli(branch);
+        let worker = effective_worker(branch);
         let attach_ctx = AttachContext {
             repo_root,
             project: &project,
             broker_config: &broker_config,
-            agent_cli: &branch_cli,
-            approval: agent_approval,
+            agent_cli: &worker.cli,
+            approval: &worker.approval,
+            profile: worker.profile_str(),
+            profile_args: worker.profile_args.as_deref(),
+            role_skill: worker.role_skill.as_deref(),
             packages: &worktree_packages,
             gate_commands: &gate_commands,
             session_backends: &session_backends,
@@ -885,7 +935,7 @@ pub fn supervisor(
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
-        let agent_cli = effective_agent_cli(&branches[idx]);
+        let agent_cli = effective_worker(&branches[idx]).cli.clone();
         let agent_delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
         let pane_idx = session_layout.agent_index(idx);
         gate_pane_or_fail_on_dialog(
@@ -1130,6 +1180,7 @@ fn write_orchestrator_context(
         // then the `## Governance documents` section so a configured
         // `[governance]` table reaches the orchestrator (boot-block:
         // governance follows the orchestrator context).
+        role_skill: None,
         skill_content: Some(crate::skills::orchestrator_session_context(
             &template,
             session_name,

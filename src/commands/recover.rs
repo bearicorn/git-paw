@@ -24,6 +24,12 @@ use super::{CommandContext, Output};
 /// Builds the pane command that resumes `entry`'s recorded session id. A CLI
 /// without a resume template launches fresh.
 ///
+/// An entry recording a worker profile relaunches as that profile, resolved
+/// from the current `profiles` (its CLI, `args` and approval level, the
+/// profile's level replacing `approval`). A recorded profile that no longer
+/// exists, or is no longer a worker profile, relaunches with the recorded CLI
+/// at `approval` after one warning naming the branch and the profile.
+///
 /// # Errors
 ///
 /// Refuses an ambiguous PATH shim.
@@ -31,6 +37,7 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     entry: &WorktreeEntry,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
+    profiles: &std::collections::BTreeMap<crate::config::ProfileName, crate::config::ProfileEntry>,
     repo_root: &Path,
     warnings: &mut LaunchWarnings,
     out: &mut dyn Output,
@@ -39,9 +46,20 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
         .cli_session_id
         .as_deref()
         .map_or(LaunchSession::None, LaunchSession::Resume);
-    let resolved = resolve_for_launch(&entry.cli, clis, &approval, repo_root)?;
+    let (worker, warning) = crate::worker::WorkerLaunch::recorded(
+        &entry.branch,
+        &entry.cli,
+        entry.profile.as_deref(),
+        profiles,
+        approval,
+    );
+    if let Some(warning) = warning {
+        out.warn(&warning);
+    }
+    let resolved = resolve_for_launch(&worker.cli, clis, &worker.approval, repo_root)?
+        .with_profile_args(worker.profile_args.as_deref());
     let profile = warnings.admit(resolved, out);
-    Ok(profile.launch_command(&approval, session))
+    Ok(profile.launch_command(&worker.approval, session))
 }
 
 /// Options for [`recover`].
@@ -180,6 +198,7 @@ pub(crate) fn recover_session_detached(
             config.border_affordances_enabled(),
             bare_approval,
             &config.clis,
+            &config.profiles,
             out,
         )?,
     };
@@ -276,6 +295,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     border_affordances: bool,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
+    profiles: &std::collections::BTreeMap<crate::config::ProfileName, crate::config::ProfileEntry>,
     out: &mut dyn Output,
 ) -> Result<(SessionPlan, SessionLayout), PawError> {
     let mut warnings = LaunchWarnings::default();
@@ -298,6 +318,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
                         entry,
                         approval,
                         clis,
+                        profiles,
                         repo_root,
                         &mut warnings,
                         out,
@@ -374,6 +395,7 @@ fn recover_supervisor_session(
                     entry,
                     supervisor_cfg.agent_approval,
                     &config.clis,
+                    &config.profiles,
                     repo_root,
                     &mut warnings,
                     out,
@@ -415,6 +437,7 @@ mod tests {
             e,
             level,
             clis,
+            &std::collections::BTreeMap::new(),
             Path::new("/"),
             &mut LaunchWarnings::default(),
             &mut crate::commands::CaptureOutput::default(),
@@ -428,6 +451,7 @@ mod tests {
             branch: "feat/x".to_string(),
             worktree_path: PathBuf::from("/tmp/wt-feat-x"),
             cli: cli.to_string(),
+            profile: None,
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,
@@ -450,6 +474,68 @@ mod tests {
             recovery_command(&e, ApprovalLevel::Manual, &clis),
             "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --setting-sources project,local --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
+    }
+
+    fn routine_profiles()
+    -> std::collections::BTreeMap<crate::config::ProfileName, crate::config::ProfileEntry> {
+        std::collections::BTreeMap::from([(
+            crate::config::ProfileName::new("routine").unwrap(),
+            crate::config::ProfileEntry {
+                kind: crate::config::ProfileKind::Worker,
+                description: "Routine".into(),
+                cli: "my-agent".into(),
+                args: Some("--model small".into()),
+                skill: None,
+                approval: None,
+                timeout_seconds: None,
+            },
+        )])
+    }
+
+    fn recover_with_profiles(
+        e: &WorktreeEntry,
+        profiles: &std::collections::BTreeMap<
+            crate::config::ProfileName,
+            crate::config::ProfileEntry,
+        >,
+    ) -> (String, crate::commands::CaptureOutput) {
+        let mut out = crate::commands::CaptureOutput::default();
+        let command = cli_command_for_recovery(
+            e,
+            ApprovalLevel::Manual,
+            &HashMap::new(),
+            profiles,
+            Path::new("/"),
+            &mut LaunchWarnings::default(),
+            &mut out,
+        )
+        .unwrap();
+        (command, out)
+    }
+
+    /// Spec scenario "A recovered worker keeps its profile's arguments".
+    #[test]
+    fn a_recovered_worker_keeps_its_profiles_arguments() {
+        let mut e = entry("my-agent", None);
+        e.profile = Some("routine".into());
+        let (command, out) = recover_with_profiles(&e, &routine_profiles());
+        assert!(command.contains("--model small"), "{command}");
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// Spec scenario "A removed profile falls back with a warning".
+    #[test]
+    fn a_removed_profile_falls_back_with_a_warning() {
+        let mut e = entry("beta", None);
+        e.profile = Some("gone".into());
+        let (command, out) = recover_with_profiles(&e, &routine_profiles());
+        assert_eq!(command, "beta");
+        let warned: Vec<_> = out
+            .warnings
+            .iter()
+            .filter(|w| w.contains("feat/x") && w.contains("gone"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", out.warnings);
     }
 
     /// Spec scenario "Entry without an id launches fresh".
@@ -603,6 +689,7 @@ mod tests {
             true,
             ApprovalLevel::Manual,
             &clis,
+            &std::collections::BTreeMap::new(),
             &mut crate::commands::CaptureOutput::default(),
         )
         .expect("a two-agent plan builds");

@@ -119,6 +119,13 @@ from outside, whatever its flags are.
 
 **Declaring a sandbox does not change the approval level.** The recipe for a
 prompt-free worker is explicit: declare the sandbox **and** set the level.
+The level is per worker: a [worker profile](agent-profiles.md) with its own
+`approval` runs at that level, so the native-sandbox refusal, the unsandboxed
+full-auto warning and `git paw doctor`'s sandbox-mode row are all evaluated at
+the profile's level, not only at `agent_approval`. A
+[delegate profile](agent-profiles.md#delegate-profiles) is never less confined
+than a worker on the same CLI: it gets the same declared sandbox arguments,
+and `full-auto` is refused for it.
 
 ```toml
 [supervisor]

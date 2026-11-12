@@ -139,6 +139,7 @@ Usage: git-paw start [OPTIONS]
 
 Options:
       --cli <CLI>                    AI CLI to use (skips CLI picker)
+      --profile <NAME>               Worker profile from [profiles.<name>] for every branch (skips CLI picker)
       --branches <BRANCHES>          Comma-separated branches (skips branch picker)
       --from-all-specs               Launch from every discovered spec across all configured formats
       --specs [<SPECS>...]           Comma-separated spec names; bare flag opens picker (TTY required)
@@ -156,6 +157,7 @@ Options:
 | Flag | Accepted values | Purpose |
 |------|-----------------|---------|
 | `--cli` | name of a detected or custom CLI | Skip the interactive CLI picker; assign this CLI to every agent that doesn't otherwise pin one. |
+| `--profile` | name of a worker profile (`[profiles.<name>]`, `kind = "worker"`) | Skip the interactive CLI picker; launch every branch with this [agent profile](user-guide/agent-profiles.md) — its CLI, `args`, approval level and role skill. Conflicts with `--cli` and `--preset`. A name that is no profile, or a delegate profile, fails the launch. |
 | `--branches` | comma-separated branches | Skip the interactive branch picker; launch one worktree per branch. |
 | `--from-all-specs` | (flag) | Launch every discovered spec across the configured backend. Mutually exclusive with `--specs`. |
 | `--specs` | comma-separated spec names; bare flag opens a multi-select picker (TTY required) | Narrow the session to named specs or open the picker. Mutually exclusive with `--from-all-specs`. |
@@ -223,6 +225,7 @@ and `b`), exactly matching the non-supervisor `--specs` behaviour. `--supervisor
 git paw start
 git paw start --cli claude
 git paw start --cli claude --branches feat/auth,feat/api
+git paw start --profile routine --branches feat/auth   # worker profile from [profiles.routine]
 git paw start --dry-run
 git paw start --preset backend
 
@@ -284,6 +287,7 @@ Arguments:
 
 Options:
       --cli <CLI>              AI CLI for the new pane (defaults to the session's default CLI)
+      --profile <NAME>         Worker profile from [profiles.<name>] for the new pane
       --from-spec <FROM_SPEC>  Derive branch + CLI from a spec (OpenSpec change, Markdown spec, Spec Kit feature, or Superpowers plan)
       --no-rebase              Skip rebasing the existing branch onto the default branch before opening its worktree
   -h, --help                   Print help
@@ -295,7 +299,13 @@ git paw add feat/new-thing
 git paw add feat/api --cli codex
 git paw add --from-spec add-export
 git paw add feat/api --cli codex --no-rebase
+git paw add feat/api --profile routine   # worker profile from [profiles.routine]
 ```
+
+**Worker choice on add.** `--profile` or `--cli` (mutually exclusive); with
+`--from-spec`, the spec's `paw_profile` or `paw_cli`; then the session's first
+worker — its recorded profile, else its CLI; then `default_profile`; then
+`default_cli`. See [Agent Profiles](user-guide/agent-profiles.md).
 
 **Rebase on add.** Like `start`, `add` rebases a branch that already exists onto the default branch before it opens or reuses the worktree; `--no-rebase` skips that and leaves the branch's HEAD unchanged. A branch `add` creates is never rebased, and the rebase runs inside the branch's own worktree, never in the main checkout. When the branch's worktree has uncommitted changes (anything other than git-paw's own `.git-paw/` files), `add` skips the rebase on its own: it prints one notice on stderr naming the branch and `--no-rebase`, attaches the agent on the branch's current HEAD, and does not stash, commit, reset or otherwise touch those changes. The same happens when git cannot report the worktree's status (for example its directory was deleted), with a notice saying the check failed. If a rebase that `add` does attempt fails (for example a conflict), `add` exits non-zero before creating a pane or changing the session, the branch stays at its old HEAD, and the error names `--no-rebase`.
 
@@ -530,6 +540,7 @@ Each entry in `--json`'s `worktrees` array carries:
 |-------|------|---------|
 | `branch` | string | The agent's branch name. |
 | `cli` | string | The CLI id assigned to this worktree. |
+| `profile` | string or `null` | The [worker profile](user-guide/agent-profiles.md) the worker was launched with, or `null` for a plain CLI. |
 | `worktree_path` | string | Absolute path to the worktree. |
 | `cli_session_id` | string or `null` | The session identifier git-paw assigned this worker's CLI at launch, or `null` when the CLI has no assignment template. Resume it by hand with the CLI's own resume flag (e.g. `claude --resume <id>`), or let `git paw start` do it automatically on recovery. |
 | `usage` | object or `null` | The worker's attributed token usage, or `null` when it is unknown (the CLI declares no usage source, the session has no assigned id, or its report cannot be read). Unknown is not zero. |
@@ -554,6 +565,17 @@ Each `--json` call reads every worker's transcripts in full.
 "usage_total": {"input_tokens": 5, "output_tokens": 150, "cache_read_tokens": 2500, "cache_write_tokens": 520, "tokens": 3175, "unknown_workers": 1}
 ```
 
+`usage_by_profile` breaks the spend down by [agent profile](user-guide/agent-profiles.md):
+an object keyed by profile name whose values carry `kind` (`worker` or
+`delegate`), `workers` and `delegate_runs` (counts), `usage` (the sum of their
+known usage, in the fields of a worktree's `usage` object, or `null` when none
+is known) and `unknown` (how many have unknown usage). Workers count by their
+recorded profile; delegate runs count from `.git-paw/logs/delegates/runs.jsonl`
+runs that started at or after the session's creation. Workers without a
+profile do not appear, and with no profile in use it is `{}`. It is an
+additive breakdown: `usage_total` keeps counting the workers only, profiled or
+not, and no delegate spend.
+
 The human-readable table (no `--json`) never shows `cli_session_id` or usage —
 they are operator/tooling data surfaced only in JSON.
 
@@ -561,6 +583,53 @@ they are operator/tooling data surfaced only in JSON.
 ```bash
 git paw status
 git paw status --json
+```
+
+## `git paw delegate`
+
+Runs a [delegate profile](user-guide/agent-profiles.md#delegate-profiles)
+(`[profiles.<name>]` with `kind = "delegate"`) once, non-interactively, at the
+repository's main working tree, and prints its result: the delegate's
+standard output, capped at 64 KiB with a final line naming the full run log.
+
+```
+Usage: git-paw delegate [OPTIONS] <NAME|--list>
+
+Arguments:
+  [NAME]  Delegate profile to run ([profiles.<name>] with kind = "delegate")
+
+Options:
+      --task <TEXT>  Task for the delegate (read from standard input when absent)
+      --list         List the configured delegate profiles
+  -h, --help         Print help
+```
+
+The task travels on the delegate's standard input — after the bundled
+delegate framing and the profile's rendered role skill — never on its command
+line; without `--task` it is read from standard input to end of file. An
+empty task is refused. `--list` prints every delegate profile with its
+description, CLI, role skill, approval level, and whether its CLI has a
+headless form; worker profiles are not listed.
+
+The run is refused, with nothing spawned, from a linked worktree, inside
+another delegate run (`GIT_PAW_DELEGATE` set), for a name that is no delegate
+profile, for an unavailable CLI, for a CLI without a headless form (naming
+`[clis.<cli>].headless_args`), when the profile's level would switch a
+declared native sandbox off, and when admission fails: at most four `manual`
+runs at once, and an `auto` run only alone — refused immediately, never
+queued.
+
+Exit status is `0` only when the delegate exited `0` within its
+`timeout_seconds` (default 600); a timeout kills its whole process group.
+Every run writes `.git-paw/logs/delegates/<run>.log` (stderr, then the full
+stdout) and appends one metadata line — profile, CLI, session id, start time,
+duration, outcome — to `.git-paw/logs/delegates/runs.jsonl`.
+
+**Examples:**
+```bash
+git paw delegate --list
+git paw delegate explorer --task "map the config loader"
+echo "audit feat/x at abc123, change add-x" | git paw delegate spec-audit
 ```
 
 ## `git paw attach`

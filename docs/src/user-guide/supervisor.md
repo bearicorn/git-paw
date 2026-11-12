@@ -1465,9 +1465,16 @@ the procedure, and the finding format with the gate's bracketed prefix. The
 references are rendered with the same `[supervisor]` gate commands as
 `SKILL.md`.
 
-**Delegation.** When the orchestrator's CLI can run isolated subagents, the
-skill's *Delegating gates* section lets it run the three audits concurrently,
-once testing and regression have passed. Each audit runs in its own context,
+**Delegation.** Once testing and regression have passed, the skill's
+*Delegating gates* section sends each audit to the first mechanism available,
+in order: a configured **delegate profile** whose role skill is the gate's
+auditor (`spec-auditor`, `doc-auditor`, `security-auditor`), run with
+`git paw delegate <name> --task "<branch> at <tip>, change <change-id>"`; then
+the CLI's own isolated subagents; then inline. A delegate profile counts as an
+isolated context whatever the orchestrator's CLI supports, and up to four
+read-only delegates run at once, so the three audits run concurrently (see
+[Agent Profiles](agent-profiles.md)). With subagents instead, the section lets
+it run the three audits concurrently the same way. Each audit runs in its own context,
 which is given only its reference plus the branch, the re-resolved tip and
 the change id. Each returns a compressed verdict: the gate name, `pass` or
 `fail`, and one line per finding as `[<gate prefix>] <location>: <issue>`.
@@ -1476,7 +1483,8 @@ publishes. The orchestrator publishes `agent.verified` only when testing,
 regression and all three audit verdicts pass; otherwise it sends one
 `feedback-gate` call per finding. An orchestrator whose CLI has no subagents
 reads each reference and runs the gate inline. Broad read-only exploration
-may be delegated the same way, returning a map of paths rather than file
+may be delegated the same way — to a delegate profile whose role skill is
+`explorer`, or to a subagent — returning a map of paths rather than file
 contents.
 
 **No persona files.** git-paw ships no CLI-specific subagent definitions — no

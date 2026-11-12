@@ -62,6 +62,7 @@ fn receipt(
             branch: "feat/x".to_string(),
             worktree_path: worktree_path.to_path_buf(),
             cli: "claude".to_string(),
+            profile: None,
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,
