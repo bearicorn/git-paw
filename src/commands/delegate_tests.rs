@@ -149,7 +149,9 @@ fn a_delegate_runs_at_the_root_with_its_arguments_in_order() {
 }
 
 /// Scenarios "A delegate gets its CLI's operator isolation" and "An
-/// opted-out CLI's delegate keeps the operator configuration".
+/// opted-out CLI's delegate keeps the operator configuration", where the
+/// opted-out delegate still keeps its CLI's worker safety
+/// (`worker-isolation-split` D3).
 #[test]
 fn a_delegate_gets_its_clis_operator_isolation_unless_opted_out() {
     let fx = fixture();
@@ -164,16 +166,21 @@ fn a_delegate_gets_its_clis_operator_isolation_unless_opted_out() {
         let (result, _) = run(&fx.repo, cfg, &spawner, task("explorer", "x"), None);
         assert_eq!(result.expect("runs"), 0);
         let spec = &spawner.spawns()[0];
-        let has_memory_off = spec
-            .env
-            .iter()
-            .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && v == "1");
+        let has = |name: &str, value: &str| spec.env.iter().any(|(k, v)| k == name && v == value);
+        assert!(has("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"), "{spec:?}");
+        assert!(
+            has("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+            "{spec:?}"
+        );
         if opted_out {
             assert!(
                 !spec.args.iter().any(|a| a == "--setting-sources"),
                 "{spec:?}"
             );
-            assert!(!has_memory_off, "{spec:?}");
+            assert!(
+                !spec.env.iter().any(|(k, _)| k == "CLAUDE_CODE_PLUGIN_DIRS"),
+                "{spec:?}"
+            );
         } else {
             assert_eq!(
                 spec.args[..4],
@@ -182,7 +189,7 @@ fn a_delegate_gets_its_clis_operator_isolation_unless_opted_out() {
             assert_eq!(spec.args[4], "--session-id");
             assert_eq!(spec.args.last().map(String::as_str), Some("-p"));
             assert_eq!(spec.args.len(), 7, "{:?}", spec.args);
-            assert!(has_memory_off, "{spec:?}");
+            assert!(has("CLAUDE_CODE_PLUGIN_DIRS", ""), "{spec:?}");
         }
     }
 }

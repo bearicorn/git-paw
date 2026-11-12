@@ -113,7 +113,9 @@ standard input is a document made of the bundled delegate framing, the
 rendered role skill and the task — the task never appears on the command
 line. Its argv is, in order: the CLI's command and `args`, the profile's
 `args`, the CLI's operator-isolation arguments (unless
-`inherit_operator_config = true`), declared sandbox arguments, the approval
+`inherit_operator_config = true`, which drops them but keeps the
+worker-safety environment; see
+[Customising Workers](customising-workers.md)), declared sandbox arguments, the approval
 flags for the profile's level, session-id arguments with a fresh id (when the
 CLI has a template), then the headless arguments. No shell runs.
 

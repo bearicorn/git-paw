@@ -487,18 +487,19 @@ impl CliProfile {
     }
 
     /// The operator isolation a worker launch applies: the family's
-    /// [`OperatorIsolation`], or none when the entry sets
-    /// `inherit_operator_config`.
+    /// [`OperatorIsolation`], or only its worker-safety part when the entry
+    /// sets `inherit_operator_config`.
     #[must_use]
     pub fn operator_isolation(&self) -> OperatorIsolation {
+        let isolation = self.family.provider().operator_isolation();
         if self
             .entry
             .as_ref()
             .is_some_and(|e| e.inherit_operator_config)
         {
-            OperatorIsolation::NONE
+            isolation.worker_safety_only()
         } else {
-            self.family.provider().operator_isolation()
+            isolation
         }
     }
 
@@ -525,9 +526,10 @@ impl CliProfile {
         // `env NAME=value … <cmd>` rather than a bare leading assignment,
         // which csh and tcsh reject.
         let mut command = String::new();
-        if !isolation.env.is_empty() {
+        let mut env = isolation.env().peekable();
+        if env.peek().is_some() {
             command.push_str("env ");
-            for (name, value) in isolation.env {
+            for (name, value) in env {
                 command.push_str(name);
                 command.push('=');
                 command.push_str(value);
@@ -538,7 +540,7 @@ impl CliProfile {
         for part in [
             self.args().unwrap_or_default(),
             self.profile_args().unwrap_or_default(),
-            isolation.args,
+            isolation.args(),
             sandbox.as_deref().unwrap_or_default(),
             &approval,
             session_args.as_deref().unwrap_or_default(),

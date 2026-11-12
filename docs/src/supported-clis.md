@@ -86,9 +86,14 @@ So a `claude` worker at `auto` launches as
 prompt suggestion, so an idle worker's input box stays empty and a lone Enter
 git-paw sends it (buffered-input recovery, `sweep.sh tell`, an approval) cannot
 submit a predicted message nobody wrote. A declared variant
-(`family = "claude"`) gets the same isolation; `inherit_operator_config = true`
-on its [`[clis.<name>]` entry](configuration/README.md#custom-clis) turns it
-off for that CLI. What each part does, and what a worker still inherits, is in
+(`family = "claude"`) gets the same isolation. The isolation has two parts:
+*worker safety* (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and
+`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`), which every claude-family worker
+always gets, and *operator config* (`CLAUDE_CODE_PLUGIN_DIRS=` and
+`--setting-sources project,local`), which `inherit_operator_config = true` on
+its [`[clis.<name>]` entry](configuration/README.md#custom-clis) drops for that
+CLI, so its own config folder decides what loads — see
+[Customising Workers](user-guide/customising-workers.md). What each part does, and what a worker still inherits, is in
 [Security Posture](user-guide/security-posture.md#what-a-worker-inherits-from-you).
 
 ### Declaring a variant
