@@ -233,7 +233,31 @@ static BUNDLED_PACKAGES: [BundledPackage; 4] = [
                 content: include_str!("../assets/agent-skills/orchestrator/scripts/sweep.sh"),
             },
         ],
-        references: &[],
+        // The three audit gates, each a self-contained brief the Workflow
+        // points at by its installed path.
+        references: &[
+            BundledFile {
+                path: "references/gates/spec-audit.md",
+                source: "assets/agent-skills/orchestrator/references/gates/spec-audit.md",
+                content: include_str!(
+                    "../assets/agent-skills/orchestrator/references/gates/spec-audit.md"
+                ),
+            },
+            BundledFile {
+                path: "references/gates/doc-audit.md",
+                source: "assets/agent-skills/orchestrator/references/gates/doc-audit.md",
+                content: include_str!(
+                    "../assets/agent-skills/orchestrator/references/gates/doc-audit.md"
+                ),
+            },
+            BundledFile {
+                path: "references/gates/security-audit.md",
+                source: "assets/agent-skills/orchestrator/references/gates/security-audit.md",
+                content: include_str!(
+                    "../assets/agent-skills/orchestrator/references/gates/security-audit.md"
+                ),
+            },
+        ],
         assets: &[],
         gate: ProvisionGate::RootOnly,
     },
@@ -492,23 +516,7 @@ pub fn render_package(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> 
         content: skill_md,
         executable: false,
     }];
-    for reference in package.references {
-        let template = SkillTemplate {
-            name: package.name.to_string(),
-            content: reference.content.to_string(),
-            source: Source::Embedded,
-            format: SkillFormat::Standardized,
-            metadata: None,
-            resource_paths: None,
-            origin_path: None,
-        };
-        let resolved = ResolvedPackage { package, template };
-        files.push(RenderedFile {
-            path: reference.path.to_string(),
-            content: render_package_body(&resolved, inputs),
-            executable: false,
-        });
-    }
+    files.extend(render_references(resolved, inputs));
     for script in package.scripts {
         files.push(RenderedFile {
             path: script.path.to_string(),
@@ -605,6 +613,105 @@ fn substitute_cli_fragments(text: &str, family: CliFamily, package: &str) -> Str
         }
     }
     out
+}
+
+/// Renders each of a resolved package's `references/` for `inputs`, with the
+/// placeholder set its `SKILL.md` is rendered with: the orchestrator's through
+/// the session-independent [`render_standardized`] body (no frontmatter),
+/// every other package's through [`render_package_body`]. References are
+/// always the embedded ones — an override replaces the skill text only.
+#[must_use]
+pub fn render_references(
+    resolved: &ResolvedPackage,
+    inputs: &RenderInputs<'_>,
+) -> Vec<RenderedFile> {
+    let package = resolved.package;
+    package
+        .references
+        .iter()
+        .map(|reference| {
+            let template = SkillTemplate {
+                content: reference.content.to_string(),
+                ..resolved.template.clone()
+            };
+            let content = if package.name == ORCHESTRATOR_SKILL {
+                render_standardized_body(&template, &inputs.gates, inputs.backends)
+            } else {
+                render_package_body(&ResolvedPackage { package, template }, inputs)
+            };
+            RenderedFile {
+                path: reference.path.to_string(),
+                content,
+                executable: false,
+            }
+        })
+        .collect()
+}
+
+/// Joins a package's `SKILL.md` text and its references into one document:
+/// the `SKILL.md` text, then each reference introduced by a
+/// `## Reference: <path>` heading naming its package-relative path. With no
+/// references the `SKILL.md` text is returned unchanged.
+#[must_use]
+pub fn join_package_document<'a>(
+    skill_md: &str,
+    references: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let mut out = skill_md.to_string();
+    for (path, content) in references {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        let _ = write!(out, "\n## Reference: {path}\n\n{content}");
+    }
+    out
+}
+
+/// The unrendered text of a whole package — its `SKILL.md` template followed
+/// by each reference template (see [`join_package_document`]) — so a content
+/// requirement on the skill is checked against the package as a whole.
+#[must_use]
+pub fn package_text(package: &BundledPackage) -> String {
+    join_package_document(
+        package.skill_md.content,
+        package.references.iter().map(|r| (r.path, r.content)),
+    )
+}
+
+/// `template` with its package's reference templates appended to its content
+/// (see [`join_package_document`]), so rendering it with any renderer renders
+/// the whole package in one pass. A template with no registered package, or
+/// whose package has no references, is returned unchanged.
+#[must_use]
+pub fn with_package_references(template: SkillTemplate) -> SkillTemplate {
+    let Some(package) = bundled_package(&template.name) else {
+        return template;
+    };
+    SkillTemplate {
+        content: join_package_document(
+            &template.content,
+            package.references.iter().map(|r| (r.path, r.content)),
+        ),
+        ..template
+    }
+}
+
+/// Renders a whole package for `inputs` as one document: the rendered
+/// `SKILL.md` ([`render_package`]) followed by each rendered reference
+/// ([`render_references`]) under its `## Reference: <path>` heading.
+#[must_use]
+pub fn render_package_document(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> String {
+    let files = render_package(resolved, inputs);
+    let references: Vec<&RenderedFile> = files
+        .iter()
+        .filter(|f| f.path.starts_with("references/"))
+        .collect();
+    join_package_document(
+        &files[0].content,
+        references
+            .iter()
+            .map(|f| (f.path.as_str(), f.content.as_str())),
+    )
 }
 
 /// Returns the content of the named file of the coordination package.
@@ -1716,16 +1823,7 @@ pub fn render_standardized(
     gates: &GateCommands<'_>,
     backends: &[crate::specs::SpecBackendKind],
 ) -> String {
-    let body = render_for_agent_id(
-        template,
-        crate::surface::SUPERVISOR_AGENT_ID,
-        "",
-        "",
-        gates,
-        backends,
-        CliFamily::Generic,
-    );
-    let body = with_drive_loop_directive(&body, false);
+    let body = render_standardized_body(template, gates, backends);
     let description = template
         .metadata
         .as_ref()
@@ -1736,6 +1834,26 @@ pub fn render_standardized(
         "---\nname: {ORCHESTRATOR_SKILL}\ndescription: {description}\n---\n\n{}",
         body.trim_start_matches('\n')
     )
+}
+
+/// The body [`render_standardized`] puts under the frontmatter: `template`
+/// rendered with session-independent inputs, drive-loop region stripped. The
+/// orchestrator's references are rendered through it too.
+fn render_standardized_body(
+    template: &SkillTemplate,
+    gates: &GateCommands<'_>,
+    backends: &[crate::specs::SpecBackendKind],
+) -> String {
+    let body = render_for_agent_id(
+        template,
+        crate::surface::SUPERVISOR_AGENT_ID,
+        "",
+        "",
+        gates,
+        backends,
+        CliFamily::Generic,
+    );
+    with_drive_loop_directive(&body, false)
 }
 
 /// Renders a resolved skill as a standardized `SKILL.md`: a frontmatter
@@ -1924,11 +2042,19 @@ mod tests {
     /// against the path the agent is told to run (`skill-packages`
     /// *Requirements naming the legacy deployed helper path are satisfied by
     /// the package path*).
+    ///
+    /// The content is the whole package ([`with_package_references`]):
+    /// `SKILL.md` followed by every reference, so a content requirement on
+    /// the skill is satisfied wherever in the package the content lives
+    /// (`skill-agent` *Orchestrator skill content requirements are satisfied
+    /// package-wide*).
     fn resolve_embedded(name: &str) -> Result<SkillTemplate, SkillError> {
-        resolve_from(name, &SkillRoots::default()).map(|t| SkillTemplate {
-            content: substitute_helper_paths(&t.content),
-            ..t
-        })
+        resolve_from(name, &SkillRoots::default())
+            .map(with_package_references)
+            .map(|t| SkillTemplate {
+                content: substitute_helper_paths(&t.content),
+                ..t
+            })
     }
 
     /// Roots whose repository level is `repo` and that have no user level.
@@ -4133,7 +4259,9 @@ mod tests {
             .to_lowercase()
             .replace("opsx-role-gating", "")
             .replace("role-gating", "")
-            .replace("role_gating", "");
+            .replace("role_gating", "")
+            // "Delegating gates" names the delegation section, not gating.
+            .replace("delegating", "");
         assert!(
             !lowered.contains("gating"),
             "supervisor skill must not use the language of 'gating' (outside the opsx role-gating feature name)"
@@ -7546,6 +7674,18 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         )
     }
 
+    /// The `## Reference: <path>` section of a full-package document, up to
+    /// the next reference or the end.
+    fn reference_section<'a>(document: &'a str, path: &str) -> &'a str {
+        let heading = format!("## Reference: {path}\n");
+        let start = document
+            .find(&heading)
+            .unwrap_or_else(|| panic!("the package carries `{path}`"));
+        let rest = &document[start + heading.len()..];
+        let end = rest.find("\n## Reference: ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
     /// 8.3 (as amended by broker-helper-full-surface) — the resolved supervisor
     /// skill publishes its boot self-register `agent.status` through the
     /// bundled `sweep.sh status-publish` helper (which sets
@@ -7824,14 +7964,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     #[test]
     fn supervisor_skill_doc_audit_enumerates_surfaces() {
         let rendered = render_supervisor();
-        let start = rendered
-            .find("**Doc audit**")
-            .expect("Doc audit gate present");
-        let end = rendered[start..]
-            .find("**Security audit**")
-            .map(|p| start + p)
-            .expect("Security audit follows Doc audit");
-        let section = &rendered[start..end];
+        let section = reference_section(&rendered, "references/gates/doc-audit.md");
         let mut hits = 0;
         for surface in [
             "user-guide",
@@ -7855,13 +7988,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     #[test]
     fn supervisor_skill_security_audit_enumerates_owasp_categories() {
         let rendered = render_supervisor();
-        let start = rendered
-            .find("**Security audit**")
-            .expect("Security audit gate present");
-        let end = rendered[start..]
-            .find("**Verify or feedback**")
-            .map_or(rendered.len(), |p| start + p);
-        let section = &rendered[start..end];
+        let section = reference_section(&rendered, "references/gates/security-audit.md");
         let lower = section.to_lowercase();
         let mut hits = 0;
         for cat in [

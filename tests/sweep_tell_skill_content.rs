@@ -8,7 +8,7 @@
 
 fn skill() -> String {
     git_paw::skills::bundled_package("orchestrator")
-        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
+        .map(|p| git_paw::skills::substitute_helper_paths(&git_paw::skills::package_text(p)))
         .expect("orchestrator.md is at the expected path")
 }
 

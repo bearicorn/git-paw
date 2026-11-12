@@ -68,6 +68,18 @@ If this command fails (broker down or unreachable), retry it after `~5s`. The
 rest of the workflow below assumes the supervisor row is present in
 `/status`.
 
+**Self-hosted session: run the branch's own build.** When the repository you
+are orchestrating is git-paw's own source — a self-hosted session — confirm at
+bootstrap that the `git paw` this session runs is the build from the branch
+under test, not a previously installed copy. A stale binary silently
+re-introduces bugs the branch has already fixed: the session's broker,
+helpers and rendered skills all come from the binary that runs it, so an
+older copy brings its old defects back and you then "find" them again. If the
+session runs a binary not built from the branch under test, tell the human to
+rebuild it with the project's own build and run the session on that build,
+before you drive any agent. In any other repository this check does not
+apply.
+
 ### Introspection: what to publish and when
 
 Your `agent.status` is the structured "what is the supervisor doing right
@@ -670,6 +682,15 @@ other.
 1. **Baseline** — before any agent reports done, run `{{TEST_COMMAND}}` on `main` and
    record which tests pass. This is the regression baseline.
 
+   **Prepare the checkout first.** Before recording, ensure the checkout you
+   run the gate commands in — the root checkout or the verify worktree —
+   has the project's dependencies installed, the way the project's own setup
+   or its `[worktree.hooks] on_create` hook installs them. That hook runs per
+   agent worktree only, so the root checkout may have none. If the baseline
+   fails because dependencies are missing, install them and re-run it; never
+   record that failing run as the baseline — every later regression diff would
+   be measured against a broken run.
+
 1.5 **Launch-time pane sweep** — immediately after the session starts
    (before your first event read), inspect every
    coding-agent pane via `{{SWEEP_HELPER}} snapshot` and classify
@@ -993,65 +1014,34 @@ of running the command — `git paw` does not substitute it at render time.
    baseline) are not regressions. Errors are reported as
    `[regression] <test name>: was passing on main, fails now`.
 
-6. **Spec audit** — after tests pass and no regression, run the Spec Audit
-   Procedure below to verify the implementation matches the change's specs,
-   located per the session's **Spec layout** doctrine (see *Spec layout for
-   this session* under the Spec Audit Procedure). When
-   `{{SPEC_VALIDATE_COMMAND}}` is configured (i.e. does not render
-   as `(not configured)`), also run it as a tooling-aided pre-check;
-   substitute `{{CHANGE_ID}}` in the rendered command with the change name
-   being audited. Assess *what the change added* from the **merge-base** diff
-   (`git merge-base <integration-target> <tip>` — see the merge-base rule
-   above), NOT from a stale integration tip, so a behind-tip or rebased branch
-   does not show spurious mass deletions. **Skip this step if testing or
-   regression-analysis failed** — there is no point auditing code that does not
-   build or pass tests. Errors are reported as `[spec audit]
-   <requirement-name>: <gap description>`.
+6. **Spec audit** — after tests pass and no regression, verify the
+   implementation matches the change's specs: the Spec Audit Procedure with its
+   governance-verification sub-step, against the merge-base diff at the
+   re-resolved tip. **Read
+   `.git-paw/skills/orchestrator/references/gates/spec-audit.md` before running
+   this gate** and follow it — it carries the gate's inputs, its
+   `{{SPEC_VALIDATE_COMMAND}}` tooling step, the procedure and the finding
+   format. Skip this step if testing or regression-analysis failed. Findings are
+   reported as `[spec audit] <requirement-name>: <gap description>`.
 
-6a. **Doc audit** — verify the documentation surfaces named in the change's
-   `Impact` section have been updated, reading them from the re-resolved branch
-   tip (per the recipe above) so docs committed after the triggering event are
-   seen; a surface present at the tip MUST NOT be reported as MISSING. When
-   `{{DOC_BUILD_COMMAND}}` is configured, also run it to confirm the doc
-   surface still builds; skip the
-   tooling invocation if it renders as `(not configured)` (the manual
-   surface-coverage review still applies). Doc surfaces typically in scope
-   (the change's `Impact` section is the authoritative driver of which
-   apply per audit — adapt to the project's actual doc layout):
+6a. **Doc audit** — verify the documentation surfaces the change's `Impact`
+   section names were updated, read from the re-resolved tip. **Read
+   `.git-paw/skills/orchestrator/references/gates/doc-audit.md` before running
+   this gate** and follow it — it carries the gate's inputs, its
+   `{{DOC_BUILD_COMMAND}}` tooling step, the surfaces in scope and the finding
+   format. Findings are reported as `[doc audit] <surface>: <gap description>`.
 
-   - the project's user-guide pages (mdBook, MkDocs, Sphinx, Docusaurus, …)
-   - top-level `README.md`
-   - `AGENTS.md`
-   - the relevant `--help` (or `--man`) text accessed via the binary
-   - per-language API-doc generator output for changed public items —
-     run `{{DOC_TOOL_COMMAND}}` for projects that configure it
-     (`[supervisor].doc_tool_command`). The governance-verification sub-step (see "Spec Audit
-   Procedure" below — DoD, ADRs, security.md, test-strategy.md, constitution.md)
-   is an **input source** for this gate; its findings are doc-audit findings
-   tagged `[doc audit]`. Doc-audit gaps are reported as
-   `[doc audit] <surface>: <gap description>`.
+6b. **Security audit** — review the branch's merge-base diff for the
+   OWASP-relevant and forbidden error-handling patterns the project's
+   conventions name. **Read
+   `.git-paw/skills/orchestrator/references/gates/security-audit.md` before
+   running this gate** and follow it — it carries the gate's inputs, its
+   `{{SECURITY_AUDIT_COMMAND}}` tooling step, the review checklist and the
+   finding format. Findings are reported as `[security audit] <category>:
+   <issue>`.
 
-6b. **Security audit** — review the **merge-base** diff (the branch's own
-   contribution — `git merge-base <integration-target> <tip>`, per the
-   merge-base rule above, NOT a stale integration tip) for the OWASP-relevant
-   patterns called out in the project's `CLAUDE.md` / governance docs:
-
-   - command injection
-   - XSS
-   - SQL injection
-   - path traversal
-   - unvalidated external input flowing into subprocess invocation or
-     filesystem writes
-   - secret leakage in logs/error messages
-
-   AND any new panic-bearing or unhandled-error patterns the project's
-   conventions forbid outside test code (the specific shape — `unwrap()` /
-   `expect()` in Rust, broad `try/except: pass` in Python, ignored returns
-   in Go, etc. — comes from the project's `CLAUDE.md`). When `{{SECURITY_AUDIT_COMMAND}}` is
-   configured, also run it for tooling-aided checks; skip the invocation if it
-   renders as `(not configured)`. The manual OWASP-category review above
-   applies in any case. On doc/text-only changes this gate is normally a fast
-   noop. Findings are reported as `[security audit] <category>: <issue>`.
+   Steps 6, 6a and 6b may be delegated to isolated contexts once testing and
+   regression pass — see **Delegating gates** below.
 
 7. **Verify or feedback** — if **all five gates** (testing, regression analysis,
    spec audit, doc audit, security audit) are clean, publish `agent.verified`
@@ -1106,6 +1096,45 @@ of running the command — `git paw` does not substitute it at render time.
    specifics; this synthesis pass catches the patterns that only become visible
    once the whole run is in view.
 
+### Delegating gates
+
+The three audit gates — spec audit, doc audit, security audit — each have a
+reference under `.git-paw/skills/orchestrator/references/gates/` that reads
+correctly on its own: its inputs, the rule to run its gate command bare, its
+procedure and its finding format. That makes each one a ready brief for an
+isolated context, so the context-heavy audit work need not flood yours.
+
+- **Only after testing and regression pass.** Run the testing and
+  regression-analysis gates (steps 4 and 5) yourself, inline. Delegate the
+  audit gates only after both have passed; a branch that fails either gets
+  feedback, not an audit.
+- **When your CLI can run isolated subagents**, you MAY run the three audit
+  gates concurrently, each in its own isolated context given only its
+  reference plus the branch, the re-resolved tip and the change id. They only
+  read the verify worktree; testing has already built in it.
+- **The verdict.** Each delegated gate returns a compressed verdict and
+  nothing else: the gate name; `pass` or `fail`; and one line per finding,
+  `[<gate prefix>] <location>: <issue>` — the error `feedback-gate` sends.
+  A delegated gate returns no raw tool output: command output, logs and file
+  contents stay in its own context.
+
+  ```text
+  gate: security audit
+  verdict: fail
+  [security audit] <file>:42: user input reaches a subprocess unvalidated
+  ```
+- **Only you publish.** A delegated gate never publishes `agent.verified` or
+  `agent.feedback`. You publish `agent.verified` only when testing and
+  regression passed and all three audit verdicts are `pass`; otherwise you send
+  one `feedback-gate` call per finding. The gate order and the all-five-pass
+  rule do not change.
+- **Without subagent support**, read each reference yourself and run the gate
+  inline, in order: 6, 6a, 6b.
+- **Read-only exploration.** Broad read-only exploration — sweeping many files
+  to find where something lives — may be delegated the same way, to an
+  isolated read-only context that returns a map (paths with a one-line note
+  each) rather than file contents.
+
 <!-- opsx-role-gating:begin -->
 ### Commands you must run (not coding agents)
 
@@ -1127,73 +1156,6 @@ observation — call it out via `agent.feedback` to that agent so the violation
 surfaces to the user.
 
 <!-- opsx-role-gating:end -->
-### Spec Audit Procedure
-
-Before publishing `agent.verified` for an agent's branch, audit the implementation
-against its specs.
-
-**Spec layout for this session:** {{SPEC_PATH_DOCTRINE}}
-
-1. **Locate specs** — using the layout above, find the change's spec files
-   (per backend: the `specs/` subdirectory of an OpenSpec change, the
-   `spec.md` of a Spec Kit feature, or the `paw_status: pending` Markdown
-   file). Each carries requirements and scenarios.
-2. **For each `#### Scenario:` block** — extract the WHEN/THEN assertions. Search the
-   codebase for a test that exercises this scenario:
-   ```bash
-   grep -r "<key assertion from THEN clause>" tests/ <project source dirs>
-   ```
-   If no matching test is found, add to the gap list: "Scenario '<name>' has no test."
-3. **For each `### Requirement:` block** — read the SHALL/MUST statements. Find the
-   implementation file (from the change's file ownership in the proposal). Verify that
-   struct field names, function signatures, and return types match the spec exactly.
-   If a field is named differently, add to the gap list: "Requirement '<name>': field
-   `X` should be `Y` per spec."
-4. **Compile results** —
-   - If the gap list is empty: spec audit passes. Include "spec audit clean" in the
-     `agent.verified` message.
-   - If gaps exist: publish `agent.feedback` with the gap list as the errors array.
-     The agent must fix the gaps and re-publish `agent.artifact`.
-
-#### Governance verification (sub-step of spec audit)
-
-When the boot prompt contains a `## Governance documents` section listing project doc
-paths, read each listed doc as part of the audit above and check the diff/branch
-against it. This runs **inside** the Spec Audit Procedure — it is a sub-step of the
-audit, not a separate workflow step. If the boot prompt has no `## Governance
-documents` section, skip this sub-step entirely.
-
-Per-doc examples (illustrative starting points, not exhaustive rubrics — apply
-judgment based on the project's actual conventions, since these docs are owned by the
-team's existing process, not by git-paw):
-
-- **DoD** (e.g. `docs/dod.md`) — walk each `- [ ]` item against branch state.
-  Example: an unchecked `- [ ] CHANGELOG.md updated` is a finding when the diff
-  doesn't touch `CHANGELOG.md`.
-- **ADRs** (e.g. `docs/adr/`) — scan the diff for new architectural decisions (new
-  deps, new patterns) and verify a matching ADR exists. Example: a new `tokio`
-  dependency warrants a matching ADR if the project's ADR convention covers deps.
-- **Security** (e.g. `docs/security.md`) — walk each checklist item against the diff.
-  Example: an item "validate user input" is a finding when a new HTTP handler has no
-  input validation.
-- **Test strategy** (e.g. `docs/test-strategy.md`) — check test composition matches
-  the documented strategy. Example: a new public function with no accompanying test
-  is a finding if the strategy requires tests for new public APIs.
-- **Constitution** (e.g. `docs/constitution.md`) — check the diff against documented
-  principles. Example: a principle "no panics in library code" is a finding when the
-  diff introduces an `unwrap()` outside test code.
-
-**Findings flow through `agent.feedback`.** Governance findings are surfaced as
-standard `agent.feedback` errors, mixed in with other spec-audit findings in the same
-errors array. There is no governance-specific tag prefix, no separate broker message
-variant, and no per-doc enforcement category — a governance finding is an audit
-finding, treated like any other.
-
-**Missing-doc handling.** If a configured path doesn't resolve to a readable file in
-the worktree, add an error to the same `agent.feedback` errors list noting the
-missing path (e.g. `"configured DoD doc 'docs/dod.md' not found in worktree"`). Treat
-it as a finding, not a distinct failure type.
-
 ### Verify accept-edits commits before merge
 
 Some CLIs offer an auto-accept editing mode that silently applies file edits
@@ -1204,7 +1166,8 @@ verification step runs. The fix is post-hoc: when you receive an
 against the change's expected file set before publishing `agent.verified`.
 
 1. Locate the change's proposal / spec file per the session's
-   **Spec layout** (see the doctrine above the Spec Audit Procedure).
+   **Spec layout** (see *Spec layout for this session* in
+   `.git-paw/skills/orchestrator/references/gates/spec-audit.md`).
    Read its **Impact** / file-ownership section — that is the canonical
    list of files this change is allowed to touch.
 2. Diff `agent.artifact.payload.modified_files` against the expected list. Files
