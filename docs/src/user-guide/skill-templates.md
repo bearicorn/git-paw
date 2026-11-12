@@ -67,8 +67,9 @@ git-paw installs each bundled package as the directory
 | `scripts/` | the package's helpers and the shared `_paw_common.sh` preamble, executable (`0o755`) |
 | `references/` | reference documents, rendered like `SKILL.md` (no bundled package ships one today) |
 
-A package's `assets/` (the boot-block templates, say) are render-time inputs
-and are never installed.
+A package's `assets/` (the boot-block templates and the
+[per-CLI fragments](#per-cli-fragments), say) are render-time inputs and are
+never installed.
 
 **Where.** `git paw init` and every `git paw start` install every package at
 the repository root, rendered with the current branch, the configured broker
@@ -167,6 +168,53 @@ Skills support these placeholders that get replaced at runtime:
   package path of the `broker.sh`, `sweep.sh` and `docs-fetch.sh` helpers
   (e.g. `.git-paw/skills/coordination/scripts/broker.sh`), derived from the
   package registry; see [Installed packages](#installed-packages)
+- `{{CLI_NOTES}}` - the skill fragment for the agent's CLI family (see
+  [Per-CLI fragments](#per-cli-fragments)); the coordination skill uses it for
+  the compact / clear commands
+- `{{CLI_BOOT_NOTES}}` - the boot fragment for the agent's CLI family; both
+  boot-block forms use it for the paste-handling paragraph
+
+### Per-CLI fragments
+
+The few lines of bundled prose that differ by agent CLI live in small
+fragments rather than in per-CLI copies of a whole skill. A package registers
+one fragment per CLI family and slot:
+
+```text
+assets/cli/<family>/skill.md   # rendered into {{CLI_NOTES}}
+assets/cli/<family>/boot.md    # rendered into {{CLI_BOOT_NOTES}}
+```
+
+`<family>` is the [provider family](../supported-clis.md#provider-families)
+config name: `claude`, `codex`, `agy`, `qwen`, `cursor-agent` or `generic`.
+Each agent's sidecar, its installed `SKILL.md` and its boot block are rendered
+with the fragment for **its own** CLI's family, so a Claude agent sees `/compact`
+and `/clear` and the `[Pasted text #N]` note while an agent on another CLI sees
+nothing written for Claude.
+
+**Fallback.** A family with no fragment for a slot renders the package's
+vendor-neutral `generic` fragment. The coordination package ships `claude`
+(both slots), `codex` (skill slot only) and `generic` (both slots); every
+other family, and every slot a family leaves out, renders `generic`. A render
+with no agent CLI — the repository-root install and the MCP `get_skill` tool —
+also uses `generic`.
+
+**Custom CLIs.** A `[clis.<name>]` entry gets the fragment of the family it
+declares with [`family`](../configuration/README.md#custom-clis); with no
+`family` it is `generic`. The family is never guessed from `command`, so a
+Claude-based variant gets the Claude fragment only by declaring
+`family = "claude"`:
+
+```toml
+[clis.claude-work]
+command = "claude"
+family = "claude"
+```
+
+**Overrides.** A [skill override](#skill-resolution) may keep `{{CLI_NOTES}}`
+to get the same per-CLI text, or leave it out and write its own. The fragments
+themselves are not overridable; an override that wants different per-CLI
+prose writes it inline.
 
 ### Supervisor gate-command placeholders
 

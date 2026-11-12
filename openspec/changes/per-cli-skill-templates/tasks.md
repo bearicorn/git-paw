@@ -22,8 +22,8 @@
 
 ## 5. Docs
 
-- [ ] 5.1 `docs/src/user-guide/skill-templates.md`: CLI fragments, families, `generic` fallback, how custom variants get a family (`[clis.<name>].family`), overrides may use `{{CLI_NOTES}}`; placeholders table gains `{{CLI_NOTES}}` / `{{CLI_BOOT_NOTES}}`
-- [ ] 5.2 `docs/src/user-guide/coordination.md` context-budget section and `docs/src/user-guide/agents-md.md` boot-block section reflect per-CLI rendering
+- [x] 5.1 `docs/src/user-guide/skill-templates.md`: CLI fragments, families, `generic` fallback, how custom variants get a family (`[clis.<name>].family`), overrides may use `{{CLI_NOTES}}`; placeholders table gains `{{CLI_NOTES}}` / `{{CLI_BOOT_NOTES}}`
+- [x] 5.2 `docs/src/user-guide/coordination.md` context-budget section and `docs/src/user-guide/agents-md.md` boot-block section reflect per-CLI rendering
 
 ## 6. Gates
 
