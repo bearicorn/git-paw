@@ -231,6 +231,13 @@ fn start_and_add_launch_claude_workers_with_identical_isolation() {
         ),
     )
     .expect("write config");
+    // The main checkout's project-local settings, as `setup-cli` or a
+    // "don't ask again" would leave them, kept out of git like a real one.
+    let local_settings = repo.join(".claude/settings.local.json");
+    let seeded = b"{\"permissions\":{\"allow\":[\"Bash(make probe)\"]}}\n";
+    fs::create_dir_all(repo.join(".claude")).expect("create .claude");
+    fs::write(&local_settings, seeded).expect("seed settings.local.json");
+    fs::write(repo.join(".git/info/exclude"), ".claude/\n").expect("exclude .claude");
     let home = TempDir::new().expect("home tempdir");
     let session = format!("paw-{project}");
 
@@ -258,6 +265,8 @@ fn start_and_add_launch_claude_workers_with_identical_isolation() {
     );
     let launches = wait_for_launches(&st.log, 2, Duration::from_secs(20));
     let settings = claude_settings_files(&repo);
+    let local_after = fs::read(&local_settings).expect("read settings.local.json");
+    let home_claude = home.path().join(".claude").exists();
     kill_session(&tmux_env, &session);
 
     assert!(
@@ -292,10 +301,16 @@ fn start_and_add_launch_claude_workers_with_identical_isolation() {
         isolation(&launches[1]),
         "start and add carry the same isolation"
     );
-    assert!(
-        settings.is_empty(),
-        "git-paw must create no Claude Code settings file: {settings:?}"
+    assert_eq!(
+        settings,
+        std::slice::from_ref(&local_settings),
+        "git-paw must create no Claude Code settings file"
     );
+    assert_eq!(
+        local_after, seeded,
+        "the main checkout's project-local settings stay byte-identical"
+    );
+    assert!(!home_claude, "nothing is created under $HOME/.claude");
 }
 
 /// Scenario "Recovery keeps the isolation", through `git paw start` on a

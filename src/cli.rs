@@ -829,6 +829,11 @@ pub enum Command {
                       general commands like `make <target>`. Acting on it means editing that \
                       CLI's settings — git-paw writes no permission rule. The suggestion is a \
                       hint, not a rule.\n\n\
+                      A claude-family worker does not read your user allowlist: it launches \
+                      with only the project and local setting sources, so a user rule reaches \
+                      it only when its `[clis.<name>]` entry sets `inherit_operator_config = \
+                      true`. To stop a worker prompting, put the rule in the project-local \
+                      allowlist (`git paw setup-cli` writes it).\n\n\
                       Reads `.git-paw/sessions/<session>.manual-approvals.jsonl`. Defaults to the \
                       active session; pass --session to target another. Recording is controlled by \
                       `[supervisor] manual_approvals_log` (default on).\n\n\

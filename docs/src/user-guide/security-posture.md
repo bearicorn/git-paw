@@ -28,7 +28,7 @@ For a `claude`-family worker (verified against Claude Code 2.1.322):
 
 | | A worker gets it? | How |
 |---|---|---|
-| Your user-level settings (`~/.claude/settings.json`): permission rules, model default, `env` block, hooks, enabled plugins | **No** | `--setting-sources project,local` leaves out the `user` source |
+| Your user-level settings (`~/.claude/settings.json`): permission rules, model default, `env` block, hooks, enabled plugins | **No** | `--setting-sources project,local` leaves out the `user` source (verified for the `env` block; hooks follow from the same exclusion — no user hook was probed) |
 | Plugins your environment points at through `CLAUDE_CODE_PLUGIN_DIRS` | **No** | `CLAUDE_CODE_PLUGIN_DIRS=` (empty) for the worker; the flag alone does not stop them |
 | Auto memory, which Claude Code shares across every worktree of a repository | **No** — neither read nor written | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | The repository's project settings (`.claude/settings.json`) and the main checkout's `.claude/settings.local.json` | Yes | both sources stay on, so [`git paw setup-cli`](cli-setup.md) rules still apply |

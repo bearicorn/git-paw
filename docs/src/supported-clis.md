@@ -74,13 +74,13 @@ A family can also declare what keeps a worker away from your personal setup.
 Only `claude` declares any so far; every other family adds nothing until its
 facts are verified (the v0.23.0 per-CLI audit).
 
-| Family | Environment before the executable | Arguments after `args` |
+| Family | Environment (`env NAME=value …` before the executable) | Arguments after `args` |
 |--------|-----------------------------------|------------------------|
 | `claude` | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS=` | `--setting-sources project,local` |
 | every other family | none | none |
 
 So a `claude` worker at `auto` launches as
-`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id <id>`.
+`env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id <id>`.
 `git paw start --dry-run` prints the exact line. A declared variant
 (`family = "claude"`) gets the same isolation; `inherit_operator_config = true`
 on its [`[clis.<name>]` entry](configuration/README.md#custom-clis) turns it

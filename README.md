@@ -107,6 +107,7 @@ Register any other CLI with `git paw add-cli`. See [Supported CLIs](docs/src/sup
 - Agents run arbitrary code with your user's privileges.
 - git-paw approves no permission prompt; the agent CLI's own permission system and your allow rules decide.
 - An optional, opt-in sandbox confines an agent's writes to its worktree.
+- Claude-family workers launch without your user-level settings, hooks, plugins or auto memory — see [what a worker inherits](docs/src/user-guide/security-posture.md#what-a-worker-inherits-from-you).
 
 Read the [Security posture](docs/src/user-guide/security-posture.md) and [Sandbox](docs/src/user-guide/sandbox.md) pages before an autonomous run.
 

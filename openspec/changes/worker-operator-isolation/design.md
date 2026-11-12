@@ -12,8 +12,8 @@ assembles its own `HeadlessInvocation` argv from the record's `command()`, `args
 approval, session-id and headless facets, and spawns it without a shell through
 `CommandRunner::spawn`, adding only `GIT_PAW_BROKER_URL` to its environment. The orchestrator
 runs outside tmux, so no orchestrator pane goes through the builder either. The pane command
-reaches the pane as a shell line typed into it (`tmux send-keys`), so a leading `NAME=value`
-assignment is scoped to that one process.
+reaches the pane as a shell line typed into it (`tmux send-keys`), so an `env NAME=value … <cmd>`
+prefix is scoped to that one process.
 
 Claude Code facts, from the official docs (code.claude.com, read 2026-11-11):
 - `--setting-sources` takes `user`, `project` and `local`, and works in interactive mode. Managed
@@ -73,7 +73,7 @@ a path git-paw chooses inside operator territory.
 ### D3 — A provider facet: `operator_isolation() -> OperatorIsolation { env, args }`
 
 This follows the existing Strategy pattern. The default returns empty and the `claude` provider
-overrides it. The builder emits `env` as `NAME=value ` before the executable, and `args` after the
+overrides it. The builder emits `env` as `env NAME=value … ` before the executable (a bare leading assignment is rejected by csh and tcsh, so the `env` program carries it in every shell), and `args` after the
 CLI's `args`, ahead of sandbox and approval flags. Putting it before the approval flags keeps the
 approval and session parts last, where the readiness and recovery code already expects them. Values
 are compile-time constants, so there is no quoting or injection surface. The ordering requirement
@@ -122,10 +122,18 @@ to its child processes, so a `git paw` run from inside a Claude Code session car
 
 - **User settings are excluded by `--setting-sources project,local`.** D against C: with the
   variable unset, the user settings `env` block alone brings the plugins back, and excluding `user`
-  removes them. The user-settings `hooks` key comes from the same source; no user hook existed to
-  fire, so that part rests on the same exclusion.
+  removes them. **The user-settings `hooks` key and a user `statusLine` were not probed** (the
+  operator's user settings define neither); that they stay out follows from the `user` source
+  being excluded, not from an observation.
+- **The orchestrator's observation (this session's workers, flag only, hooks still firing and the
+  status line still drawn) is probe B.** The hook chatter (`running-audit`, `cache-keeper`) and the
+  extra status-line segment both come from plugins in `CLAUDE_CODE_PLUGIN_DIRS`: the cache-keeper
+  plugin draws its line beside any `statusLine` command, and the operator's user settings define no
+  `statusLine`. The empty `CLAUDE_CODE_PLUGIN_DIRS=` (not documented upstream, so verified here, in
+  C and I) stops them; auth, project skills, commands and the project MCP server stay intact.
 - **An inherited `CLAUDE_CODE_PLUGIN_DIRS` survives the flag** (B). The DF-14 hook chatter came
-  from exactly these plugins. The row therefore also assigns `CLAUDE_CODE_PLUGIN_DIRS=`: the empty
+  from exactly these plugins. The row therefore also assigns `CLAUDE_CODE_PLUGIN_DIRS=`, emitted
+  as `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= <cmd>` so csh and tcsh accept it: the empty
   value loads no plugin directory, the same as unsetting it (I against C), and keeps the facet a
   plain list of `NAME=value` pairs that works as a shell prefix and as `SpawnSpec` environment.
   No other inherited variable was found to load operator extensions; the v0.23.0 audit re-checks.
@@ -148,8 +156,8 @@ to its child processes, so a `git paw` run from inside a Claude Code session car
   apply. The model belongs in `[clis.<name>].args`.
 - [Setups that need user-settings `env` (a proxy, a provider) fail to authenticate or route] →
   `inherit_operator_config = true`. The docs name this case.
-- [A shell that does not accept a leading assignment (fish before 3.1)] → acceptable on supported
-  platforms. The dry-run line shows the exact command.
+- [A shell that does not accept a leading assignment (csh, tcsh, fish before 3.1)] → the builder
+  emits `env NAME=value … <cmd>`, which every shell runs. The dry-run line shows the exact command.
 - [Claude Code changes the flag or the environment variable] → the v0.23.0 per-CLI conformance
   suite owns re-verification. The facet keeps the change to one place.
 - [Leak not closed here] → "Yes, and don't ask again" in a worktree writes the rule to the main

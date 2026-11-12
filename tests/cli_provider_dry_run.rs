@@ -50,7 +50,7 @@ fn a_dry_run_shows_the_command_and_args_the_pane_would_run() {
     );
     assert!(
         stdout.contains(
-            "runs: CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= echo --model sonnet \
+            "runs: env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= echo --model sonnet \
              --setting-sources project,local"
         ),
         "plan should show the isolated pane command; got:\n{stdout}"

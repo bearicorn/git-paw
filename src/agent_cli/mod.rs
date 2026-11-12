@@ -261,7 +261,7 @@ pub trait CliProvider: Sync {
 }
 
 /// A family's operator-isolation launch facts (`cli-provider`): environment
-/// assignments placed before the executable and arguments placed after the
+/// assignments placed before the executable (through `env`) and arguments placed after the
 /// CLI's `args`. Every value is a compile-time constant, so nothing in it
 /// needs quoting. An entry with an empty value clears a variable the worker
 /// would otherwise inherit.

@@ -405,19 +405,19 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "claude",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local",
         ),
         (
             "claude",
             ApprovalLevel::FullAuto,
             LaunchSession::Assign("u1"),
-            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --dangerously-skip-permissions --session-id u1",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --dangerously-skip-permissions --session-id u1",
         ),
         (
             "claude",
             ApprovalLevel::Auto,
             LaunchSession::Resume("u1"),
-            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume u1",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --setting-sources project,local --permission-mode acceptEdits --resume u1",
         ),
         (
             "codex",
@@ -430,13 +430,13 @@ fn launch_command_orders_executable_args_flags_then_session_args() {
             "sonnet",
             ApprovalLevel::Manual,
             LaunchSession::None,
-            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local",
         ),
         (
             "sonnet",
             ApprovalLevel::FullAuto,
             LaunchSession::Resume("u2"),
-            "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --dangerously-skip-permissions --resume u2",
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local --dangerously-skip-permissions --resume u2",
         ),
         // A configured command is one shell word.
         (
@@ -503,11 +503,11 @@ fn two_profiles_of_one_executable_keep_their_own_args() {
     let level = ApprovalLevel::Manual;
     assert_eq!(
         CliProfile::resolve("sonnet", &map).launch_command(&level, LaunchSession::None),
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local"
     );
     assert_eq!(
         CliProfile::resolve("opus", &map).launch_command(&level, LaunchSession::None),
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local"
     );
 }
 
@@ -519,7 +519,7 @@ fn an_identity_with_trailing_flags_keeps_its_base_cli_facets() {
     assert_eq!(profile.family(), CliFamily::Claude);
     assert_eq!(
         profile.launch_command(&ApprovalLevel::FullAuto, LaunchSession::Assign("abc")),
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x --setting-sources project,local --dangerously-skip-permissions --session-id abc"
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x --setting-sources project,local --dangerously-skip-permissions --session-id abc"
     );
 }
 
@@ -528,9 +528,12 @@ fn an_identity_with_trailing_flags_keeps_its_base_cli_facets() {
 fn recovery_carries_approval_flags_then_resume_args() {
     let cmd = CliProfile::resolve("claude", &HashMap::new())
         .launch_command(&ApprovalLevel::Auto, LaunchSession::Resume("abc"));
+    let sources = cmd
+        .find("--setting-sources project,local")
+        .expect("sources");
     let flags = cmd.find("--permission-mode acceptEdits").expect("flags");
     let resume = cmd.find("--resume abc").expect("resume");
-    assert!(flags < resume, "{cmd}");
+    assert!(sources < flags && flags < resume, "{cmd}");
 }
 
 /// Scenario "The claude family declares its isolation".
@@ -579,7 +582,7 @@ fn a_claude_worker_is_launched_isolated() {
     assert_eq!(
         CliProfile::resolve("opus", &map)
             .launch_command(&ApprovalLevel::Auto, LaunchSession::Assign("abc")),
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
+        "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
          --setting-sources project,local --permission-mode acceptEdits --session-id abc"
     );
 }
@@ -590,7 +593,7 @@ fn recovery_keeps_the_isolation() {
     let cmd = CliProfile::resolve("claude", &HashMap::new())
         .launch_command(&ApprovalLevel::Manual, LaunchSession::Resume("u9"));
     assert!(
-        cmd.starts_with("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude"),
+        cmd.starts_with("env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude"),
         "{cmd}"
     );
     let sources = cmd
@@ -721,7 +724,10 @@ fn native_sandbox_arguments_sit_after_args_and_before_approval_flags() {
     codex.args = Some("--model o4".to_string());
     let mut foo = sandboxed("foo", None, "native");
     foo.sandbox_args = Some("--confine .".to_string());
-    let map = clis(&[("codex", codex), ("foo", foo)]);
+    let mut opus = sandboxed("claude", Some("claude"), "native");
+    opus.args = Some("--model opus".to_string());
+    opus.sandbox_args = Some("--confine .".to_string());
+    let map = clis(&[("codex", codex), ("foo", foo), ("opus", opus)]);
     let none = HashMap::new();
     let cases: &[(&str, &HashMap<String, CustomCli>, ApprovalLevel, &str)] = &[
         (
@@ -737,6 +743,14 @@ fn native_sandbox_arguments_sit_after_args_and_before_approval_flags() {
             "codex --model o4 --sandbox workspace-write",
         ),
         ("foo", &map, ApprovalLevel::FullAuto, "foo --confine ."),
+        // The operator-isolation arguments sit between `args` and the sandbox.
+        (
+            "opus",
+            &map,
+            ApprovalLevel::Auto,
+            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus \
+             --setting-sources project,local --confine . --permission-mode acceptEdits",
+        ),
         (
             "codex",
             &none,
@@ -866,7 +880,7 @@ fn a_known_name_may_point_at_another_install() {
         profile
             .launch_command(&ApprovalLevel::Manual, LaunchSession::None)
             .starts_with(&format!(
-                "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= {}",
+                "env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= {}",
                 alt_claude.to_string_lossy()
             ))
     );

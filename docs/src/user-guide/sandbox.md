@@ -51,8 +51,12 @@ sandbox, and `git paw doctor` reports the mode as *declared*, never as
 verified.
 
 **`sandbox = "wrapper"`** — `command` is your FS-sandbox wrapper (the scripts
-below). git-paw adds nothing to the launch command; the declaration only tells
-`doctor` the CLI is meant to be confined.
+below). git-paw adds no sandbox arguments; the declaration only tells
+`doctor` the CLI is meant to be confined. A declared `family` still brings its
+[operator isolation](security-posture.md#what-a-worker-inherits-from-you): for
+`claude`, the `env` prefix runs the wrapper and `--setting-sources
+project,local` follows `args`, so the wrapper must pass its arguments (`"$@"`)
+and environment through to the CLI.
 
 ```toml
 [clis.claude-sandboxed]

@@ -389,8 +389,8 @@ impl CliProfile {
         }
     }
 
-    /// The pane command for one launch: the operator-isolation environment
-    /// assignments, the executable, the CLI's `args`, the isolation
+    /// The pane command for one launch: `env` with the operator-isolation
+    /// assignments (when the family has any), the executable, the CLI's `args`, the isolation
     /// arguments, [`Self::launch_sandbox_args`], the approval flags for
     /// `level`, then
     /// the session-id arguments (fresh launch) or resume arguments
@@ -408,12 +408,17 @@ impl CliProfile {
         let approval = self.approval_flags(level);
         let sandbox = self.launch_sandbox_args(level);
         let isolation = self.operator_isolation();
+        // `env NAME=value … <cmd>` rather than a bare leading assignment,
+        // which csh and tcsh reject.
         let mut command = String::new();
-        for (name, value) in isolation.env {
-            command.push_str(name);
-            command.push('=');
-            command.push_str(value);
-            command.push(' ');
+        if !isolation.env.is_empty() {
+            command.push_str("env ");
+            for (name, value) in isolation.env {
+                command.push_str(name);
+                command.push('=');
+                command.push_str(value);
+                command.push(' ');
+            }
         }
         command.push_str(&self.base_command);
         for part in [
