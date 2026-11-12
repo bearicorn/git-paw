@@ -20,6 +20,11 @@
 - [ ] 4.1 Add to the orchestrator `SKILL.md` Bootstrap: when the orchestrated repository is git-paw's own source, confirm the `git paw` the session runs is the build from the branch under test, not an installed copy; if not, tell the human to rebuild with the project's own build and run the session on it before driving any agent; give the reason (a stale binary silently re-introduces fixed bugs); name no build tool, package manager or recipe
 - [ ] 4.2 Tests in `tests/orchestrator_skill_content.rs`: "A self-hosted session checks the binary it runs", "A stale binary is raised before work is driven", "The instruction names no build command" (asserts the section carries no `cargo` / `just` / `make` / `npm` token and the package passes `tests/lang_agnostic_skill_audit.rs`)
 
+## 4a. Baseline step prepares the checkout's dependencies (PK-10)
+
+- [ ] 4a.1 Workflow step 1 (Baseline) in the orchestrator `SKILL.md`: before recording, make sure the root checkout (or the verify worktree) has the project's dependencies installed the way the project's own setup or `[worktree.hooks] on_create` hook does it; if the baseline fails for missing dependencies, install them and re-run rather than record a red baseline; name no package manager or build tool
+- [ ] 4a.2 Tests in `tests/orchestrator_skill_content.rs`: "The Baseline step prepares the checkout first", "A baseline that fails for missing dependencies is not recorded", "The Baseline instruction names no package manager" (asserts the Baseline step carries no `npm` / `pip` / `cargo` / `just` / `make` / `yarn` / `pnpm` token and the package passes `tests/lang_agnostic_skill_audit.rs`)
+
 ## 5. MCP
 
 - [ ] 5.1 `mcp/tools/project.rs::get_skill` returns the full-package render (orchestrator: the `render_standardized` `SKILL.md` then its references); move `get_skill_serves_the_orchestrator_skill_as_exported_under_both_names` to compare against the package render; tests "get_skill includes the orchestrator's gate references", "A skill without references is unchanged" (no disk write)

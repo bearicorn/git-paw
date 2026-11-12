@@ -189,6 +189,38 @@ pointer: those remain `init`'s, because they edit tracked files.
 rejected as the default: the supervised path already refreshes, and two rules for the same files
 would let a bare start leave an old `sweep.sh` next to a new skill. Listed as a decision.
 
+**Stale means "differs from a fresh render of the current config" (PK-01).** A real v0.19.0 run
+configured the `[supervisor]` gate commands after `init`; the root orchestrator `SKILL.md` kept
+"(not configured)" and nothing flagged it. The refresh re-renders `SKILL.md` and references from the
+config as it is at that `start` and compares the result, so a config edit reaches the root skill
+on the next `start`. Doctor's Bundled-scripts check renders the same way, read-only, and reports a
+root rendered file that differs as ⚠ stale (remedy `git paw start` or `git paw init`); helpers keep
+their byte comparison. The root render is session-independent (`core-init` *Init installs the
+orchestrator skill in the standardized format*), so doctor needs no session to make it.
+
+### D7a — Doctor in a repository that was never initialised (PK-07)
+
+Today `check_bundled_scripts` emits ✗ "`.git-paw/scripts/<name>` is missing" for each of the four
+bundled scripts, so a repository where `git paw init` never ran looks broken (and exits non-zero).
+When `.git-paw/config.toml` does not exist, the group reports the packages, helpers and
+compatibility copies as one ⚠ line — not initialised, run `git paw init` — and the Python 3 line
+unchanged. The Config group's existing ⚠ for a missing `config.toml` stays. Keyed on the config, not
+on the packages: a bare `start` on defaults (D7) can install packages into a repository that has no
+config, and that repository is still not initialised.
+
+### D7b — `init` ignores all runtime state (PK-19)
+
+`required_gitignore_entries()` covers `logs/`, `tmp/`, `worktrees/`, `skills/`,
+`session-summary.md` and `session-learnings.md` (the `core-init` main spec still lists only the
+first four of these with `session-summary.md`). It misses paths git-paw itself writes at the root:
+`sessions/` (`session::repo_sessions_dir`), `scripts/` (the compatibility copies — a code comment in
+`init.rs` already assumes it is ignored), the root sidecar `AGENTS.local.md` (only in
+`.git/info/exclude`), `sweep.sh`'s `.sweep-progress` and `.sweep-stuck-dedup`, and
+`.add-remove.lock` (`lock::lock_path`). The MODIFIED *Init appends logs directory to .gitignore*
+lists all of them, so `git add .git-paw/` stages only `config.toml`. An explicit list rather than
+`.git-paw/*` + `!.git-paw/config.toml`: a negation would also hide any file a consumer deliberately
+keeps under `.git-paw/`.
+
 ### D8 — Atomic replacement of installed files
 
 `write_managed_file` (and so `install_script`) writes the new content to a temporary file created

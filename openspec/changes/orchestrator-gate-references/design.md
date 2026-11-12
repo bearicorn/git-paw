@@ -110,6 +110,21 @@ stays in this repository's `AGENTS.md`.
 now: it needs a notion of "this repository builds me" in code for one project's benefit.
 **Decided 2026-11-11:** a skill instruction only.
 
+### D7 — The Baseline step prepares the checkout's dependencies (PK-10)
+
+A real v0.19.0 run installed packages per worktree through a `[worktree.hooks] on_create` hook, so
+the root checkout — where Workflow step 1 runs `{{TEST_COMMAND}}` on `main` — had none, and the
+baseline was recorded red; every later regression diff was then measured against a broken run. The
+Baseline step gains one instruction: before recording, make sure the checkout the gate commands run
+in (root or verify worktree) has the project's dependencies installed the way the project's own
+setup or `on_create` hook does it; a baseline that fails for missing dependencies is fixed and
+re-run, never recorded. It stays in `SKILL.md` (Baseline precedes every gate and is not a gate
+reference). Export-agnosticism: it names the `on_create` hook (git-paw's own config surface) but no
+package manager or install command — the consumer's setup supplies those. *Alternative:* have
+`git paw start` run `on_create` in the root checkout — rejected: the hook is per-worktree by
+contract (`session-runtime-isolation`) and may allocate ports or write env files meant for a
+worktree.
+
 ## Risks / Trade-offs
 
 - [The orchestrator skips reading a reference] → each gate heading in the Workflow says to read its
