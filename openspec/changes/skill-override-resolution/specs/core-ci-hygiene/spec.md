@@ -2,7 +2,7 @@
 
 ### Requirement: Binary tests also remove XDG_CONFIG_HOME
 
-Every function in `tests/` that overrides `HOME` and isolates `XDG_DATA_HOME` for the compiled binary SHALL also remove `XDG_CONFIG_HOME` (`env_remove("XDG_CONFIG_HOME")`) or redirect it into the same temporary directory (`env("XDG_CONFIG_HOME", …)`), so a user skill override under the developer's real config directory can never reach a test. Tests that run `git paw init`, which renders the bundled skills, SHALL apply the full `HOME`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME` override like the session-touching subcommands. The standing convention-enforcement test SHALL check both, with the same documented-exception rule.
+Every function in `tests/` that overrides `HOME` for the compiled binary SHALL also remove or redirect `XDG_CONFIG_HOME`, so a user skill override under the developer's real config directory can never reach a test. Tests that run `git paw init` SHALL override `HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`. The convention-enforcement test SHALL check both.
 
 #### Scenario: A test file that keeps XDG_CONFIG_HOME fails the suite
 
@@ -11,6 +11,19 @@ Every function in `tests/` that overrides `HOME` and isolates `XDG_DATA_HOME` fo
 - **WHEN** the suite runs
 - **THEN** the convention-enforcement test SHALL fail
 - **AND** its failure message SHALL name the offending file
+
+#### Scenario: Redirecting XDG_CONFIG_HOME into the tempdir satisfies the convention
+
+- **GIVEN** a test file in `tests/` whose builder sets `HOME` to a tempdir, removes `XDG_DATA_HOME`, and sets `XDG_CONFIG_HOME` to a path inside that tempdir
+- **WHEN** the suite runs
+- **THEN** the convention-enforcement test SHALL accept it, as it accepts `env_remove("XDG_CONFIG_HOME")`
+
+#### Scenario: A documented exception is exempt
+
+- **GIVEN** a test file whose override omits `XDG_CONFIG_HOME`, or a test that runs `git paw init` with the real `HOME`
+- **AND** a comment documenting that it requires the real directory
+- **WHEN** the suite runs
+- **THEN** the convention-enforcement test SHALL not flag it, under the same documented-exception rule as the `XDG_DATA_HOME` check
 
 #### Scenario: A real user override does not change a binary test's output
 
