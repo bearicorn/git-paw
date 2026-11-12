@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This capability defines the standardized boot-instruction block injected into each agent and the shared machinery that renders it. It covers the block's format and content (exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations, commit-first task completion with a code-less manual-done fallback, and paste-handling guidance), `{{VARIABLE_NAME}}` template substitution with branch-ID slugification and full pre-expansion at render time, and the shared pure `build_boot_block(branch_id, broker_url) -> String` helper in `src/skills.rs` that every launch path uses to assemble the identical block. It also covers every injection path by which the rendered boot block reaches an agent pane: supervisor-mode prepending of the boot block (and, when configured, governance-documents and drive-loop coordination sections) to each pane-bound agent's prompt, manual (non-supervisor) mode pre-fill of the boot block into each pane's input line without sending Enter, and boot-block parity for the bare `git paw start --from-specs` launch path (`--from-all-specs` is the canonical flag and `--from-specs` a deprecated alias retained for backward compatibility, scheduled for removal at v1.0.0).
+This capability defines the standardized boot-instruction block injected into each agent and the shared machinery that renders it. It covers the block's format and content (exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations, commit-first task completion with a code-less manual-done fallback, and paste-handling guidance), `{{VARIABLE_NAME}}` template substitution with branch-ID slugification and full pre-expansion at render time, and the shared pure `build_boot_block(branch_id, broker_url, &CliProfile) -> String` helper in `src/skills.rs` that every launch path uses to assemble the identical block. It also covers every injection path by which the rendered boot block reaches an agent pane: supervisor-mode prepending of the boot block (and, when configured, governance-documents and drive-loop coordination sections) to each pane-bound agent's prompt, manual (non-supervisor) mode pre-fill of the boot block into each pane's input line without sending Enter, and boot-block parity for the bare `git paw start --from-specs` launch path (`--from-all-specs` is the canonical flag and `--from-specs` a deprecated alias retained for backward compatibility, scheduled for removal at v1.0.0).
 
 ## Requirements
 
@@ -155,19 +155,33 @@ Test: `skills::tests::boot_block_done_section_retains_manual_done_helper`
 
 ### Requirement: Paste handling instructions
 
-The boot block SHALL include specific instructions for handling paste operations, particularly the requirement to send a second Enter key after pasted content.
+The boot block SHALL include specific instructions for handling paste operations, particularly the requirement to send a second Enter key after pasted content, in both the helper and MCP forms. The explanation of how the agent's CLI displays pasted text SHALL come from the agent's CLI-family boot fragment: the `claude` fragment SHALL explain that the CLI collapses pasted text into `[Pasted text #N]`, and the `generic` fragment SHALL explain the behavior without naming a vendor.
 
 #### Scenario: Paste handling instruction included
 
-- **WHEN** the boot block is examined
+- **WHEN** the boot block is examined, for any CLI family
 - **THEN** it SHALL contain instructions about paste detection
 - **AND** it SHALL mention the need for a second Enter key
 
+Test: `skills::tests::paste_handling_instruction_included_for_every_family`
+
 #### Scenario: Paste instruction format
 
-- **WHEN** the paste handling section is examined
-- **THEN** it SHALL explain that Claude collapses pasted text into `[Pasted text #N]`
-- **AND** it SHALL instruct agents to send an additional Enter after paste operations
+- **GIVEN** an agent whose resolved CLI profile has family `claude`
+- **WHEN** the paste handling section of its boot block is examined
+- **THEN** it SHALL explain that pasted text is collapsed into `[Pasted text #N]`
+- **AND** it SHALL instruct the agent to send an additional Enter after paste operations
+
+Test: `skills::tests::paste_instruction_format_for_a_claude_family_agent`
+
+#### Scenario: Paste instruction for a generic agent names no vendor
+
+- **GIVEN** an agent whose resolved CLI profile has family `generic`
+- **WHEN** the paste handling section of its boot block is examined
+- **THEN** it SHALL instruct the agent to send an additional Enter after paste operations
+- **AND** it SHALL NOT name a vendor product
+
+Test: `skills::tests::paste_instruction_for_a_generic_agent_names_no_vendor`
 
 ### Requirement: Template variable substitution
 
@@ -176,14 +190,18 @@ The system SHALL support template variable substitution in boot blocks using the
 #### Scenario: Branch ID substitution
 
 - **GIVEN** boot block template containing `{{BRANCH_ID}}`
-- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** all occurrences of `{{BRANCH_ID}}` SHALL be replaced with `"feat-errors"`
+
+Test: `skills::tests::boot_template_branch_id_substitution`
 
 #### Scenario: Broker URL substitution
 
 - **GIVEN** boot block template containing `{{GIT_PAW_BROKER_URL}}`
-- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** all occurrences of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `"http://localhost:9119"`
+
+Test: `skills::tests::boot_template_broker_url_substitution`
 
 ### Requirement: Branch ID slugification
 
@@ -237,20 +255,34 @@ The system SHALL provide a shared `build_boot_block()` function in `src/skills.r
 
 ### Requirement: Helper function signature
 
-The `build_boot_block()` function SHALL have the following signature:
+The `build_boot_block()` function SHALL take the branch id, the broker URL, and the agent's resolved CLI profile, and SHALL return the rendered boot block as a `String`:
 ```rust
-pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String
+pub fn build_boot_block(branch_id: &str, broker_url: &str, cli: &CliProfile) -> String
 ```
+where `CliProfile` is the resolved per-CLI record of the `cli-provider` capability. The profile SHALL be the function's only source of per-CLI choice: its MCP capability picks the helper or the MCP form, and its family picks the CLI-family boot fragment. No caller SHALL pass a CLI name or a separately computed flag.
 
 #### Scenario: Function accepts required parameters
 
-- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
-- **THEN** it SHALL accept both parameters without error
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called with a resolved profile
+- **THEN** it SHALL accept the parameters without error
+
+Test: `skills::tests::build_boot_block_accepts_required_parameters`
 
 #### Scenario: Function returns boot block string
 
-- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119", &profile)` is called
 - **THEN** it SHALL return a `String` containing the boot instructions
+
+Test: `skills::tests::build_boot_block_returns_boot_block_string`
+
+#### Scenario: The generic profile yields the helper form with the generic fragment
+
+- **GIVEN** the profile of family `generic` with no `mcp` override
+- **WHEN** `build_boot_block` is called with it
+- **THEN** the result SHALL be the helper form
+- **AND** SHALL contain the `generic` boot fragment
+
+Test: `skills::tests::generic_profile_yields_the_helper_form_with_the_generic_fragment`
 
 ### Requirement: Helper function reusability
 
