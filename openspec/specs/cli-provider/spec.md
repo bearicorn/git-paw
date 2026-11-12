@@ -33,7 +33,7 @@ The system SHALL resolve each agent CLI, once per agent, into one record: its id
   `--cli "claude --model x"`)
 - **WHEN** a worker using it is launched at `agent_approval = "full-auto"`
 - **THEN** its id SHALL be `claude` and its family `claude`
-- **AND** the pane command SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model x` followed by
+- **AND** the pane command SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model x` followed by
   `--setting-sources project,local`, `--dangerously-skip-permissions` and the session-id arguments
 
 #### Scenario: Overrides resolve by id when the executable differs
@@ -143,7 +143,7 @@ same check and SHALL show the exact command each worker pane would run.
 
 - **GIVEN** `[clis.sonnet] command = "claude"`, `family = "claude"`, `args = "--model sonnet"`
 - **WHEN** `git paw start --dry-run` plans a worker using `sonnet`
-- **THEN** the plan SHALL show the pane command beginning `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model sonnet --setting-sources project,local`
+- **THEN** the plan SHALL show the pane command beginning `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --setting-sources project,local`
 
 #### Scenario: A built-in CLI still launches by name
 
@@ -553,7 +553,7 @@ Each provider family SHALL declare its operator-isolation launch environment and
 - **GIVEN** the `claude` provider family
 - **WHEN** its operator isolation is resolved
 - **THEN** the arguments SHALL be `--setting-sources project,local`
-- **AND** the environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_PLUGIN_DIRS=` (empty), in that order
+- **AND** the environment SHALL be `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_PLUGIN_DIRS=` (empty) and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, in that order
 
 Test: `agent_cli::tests::the_claude_family_declares_its_isolation`
 
@@ -573,7 +573,7 @@ The launch builder SHALL write the isolation environment as `env NAME=value …`
 
 - **GIVEN** `[clis.opus] command = "claude"`, `family = "claude"`, `args = "--model opus"`, and `agent_approval = "auto"`
 - **WHEN** the pane command of a worker using `opus` is built for a fresh launch assigned the session id `abc`
-- **THEN** it SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id abc`
+- **THEN** it SHALL be `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model opus --setting-sources project,local --permission-mode acceptEdits --session-id abc`
 
 Test: `agent_cli::tests::a_claude_worker_is_launched_isolated`
 
@@ -581,7 +581,7 @@ Test: `agent_cli::tests::a_claude_worker_is_launched_isolated`
 
 - **GIVEN** a stopped session whose entry has `cli = "claude"`, no `[clis.claude]` entry, and a recorded session id
 - **WHEN** the session is recovered
-- **THEN** the pane command SHALL start with `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= claude`
+- **THEN** the pane command SHALL start with `env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_PLUGIN_DIRS= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude`
 - **AND** it SHALL contain `--setting-sources project,local` before `--resume <id>`
 
 Test: `agent_cli::tests::recovery_keeps_the_isolation`, `tests/worker_operator_isolation_e2e.rs::recovery_through_start_keeps_the_isolation`
@@ -613,3 +613,19 @@ Test: `agent_cli::tests::opting_out_restores_the_previous_launch`
 - **THEN** the written file SHALL NOT contain `inherit_operator_config`
 
 Test: `config::tests::an_existing_config_round_trips_without_the_inherit_operator_config_key`
+
+### Requirement: Claude-family workers launch without prompt suggestions
+
+A claude-family worker's operator isolation SHALL also turn off the CLI's prompt suggestions, so an idle worker's input box never holds a predicted message that a lone Enter from git-paw (buffered-input recovery, `sweep.sh tell`, an approval) could submit as if someone had typed it. The opt-out `inherit_operator_config = true` SHALL leave prompt suggestions as the operator configured them.
+
+#### Scenario: An isolated claude worker gets no prompt suggestions
+
+- **GIVEN** a claude-family CLI without `inherit_operator_config`
+- **WHEN** its worker pane command is built
+- **THEN** its `env` prefix SHALL include `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
+
+#### Scenario: An opted-out claude worker keeps the operator's setting
+
+- **GIVEN** `[clis.claude] command = "claude"` with `inherit_operator_config = true`
+- **WHEN** its worker pane command is built
+- **THEN** it SHALL NOT contain `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`
