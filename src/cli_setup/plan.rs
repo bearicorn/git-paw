@@ -488,6 +488,16 @@ mod tests {
         }
     }
 
+    /// The `claude` row as it reads once the fact gate has passed for the
+    /// package-path entries.
+    fn verified() -> CliSetupFacts {
+        CliSetupFacts {
+            verified: true,
+            verified_with: "Claude Code (test fixture)",
+            ..CLAUDE
+        }
+    }
+
     fn unverified() -> CliSetupFacts {
         CliSetupFacts {
             verified: false,
@@ -588,9 +598,13 @@ mod tests {
 
     #[test]
     fn a_verified_row_is_marked_with_what_it_was_verified_against() {
-        let p = plan_ok(&CLAUDE, &snapshots());
+        let p = plan_ok(&verified(), &snapshots());
         assert!(p.verified);
-        assert!(p.verified_with.contains("2.1.220"), "{}", p.verified_with);
+        assert!(
+            p.verified_with.contains("(test fixture)"),
+            "{}",
+            p.verified_with
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -615,18 +629,20 @@ mod tests {
     #[test]
     fn protection_is_planned_with_the_grants_in_one_file() {
         let p = plan_ok(&CLAUDE, &snapshots());
-        assert!(
-            planned_under(&p, "permissions.deny")
-                .contains(&"Edit(**/.git-paw/scripts/**)".to_string())
+        assert_eq!(
+            planned_under(&p, "permissions.deny"),
+            [
+                "Edit(**/.git-paw/skills/**)",
+                "Edit(**/.git-paw/scripts/**)"
+            ]
         );
         assert!(
             planned_under(&p, "permissions.ask")
                 .contains(&"Edit(**/.git-paw/config.toml)".to_string())
         );
-        assert!(
-            planned_under(&p, "permissions.ask")
-                .contains(&"Bash(.git-paw/scripts/sweep.sh approve *)".to_string())
-        );
+        assert!(planned_under(&p, "permissions.ask").contains(
+            &"Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)".to_string()
+        ));
 
         // All of it lands in the one settings file, in a single replacement.
         let settings = p
@@ -663,12 +679,13 @@ mod tests {
 
     #[test]
     fn an_entry_already_present_is_not_planned() {
-        let snaps =
-            with_target(r#"{"permissions":{"allow":["Bash(.git-paw/scripts/broker.sh *)"]}}"#);
+        let snaps = with_target(
+            r#"{"permissions":{"allow":["Bash(.git-paw/skills/coordination/scripts/broker.sh *)"]}}"#,
+        );
         let p = plan_ok(&CLAUDE, &snaps);
         let allow = planned_under(&p, "permissions.allow");
         assert!(
-            !allow.contains(&"Bash(.git-paw/scripts/broker.sh *)".to_string()),
+            !allow.contains(&"Bash(.git-paw/skills/coordination/scripts/broker.sh *)".to_string()),
             "the user's own entry is not re-planned, so undo can never claim it"
         );
         assert_eq!(allow.len(), 11, "the other eleven are still planned");
@@ -678,8 +695,9 @@ mod tests {
     fn a_protection_rule_already_present_is_not_planned() {
         let snaps = with_target(r#"{"permissions":{"deny":["Edit(**/.git-paw/scripts/**)"]}}"#);
         let p = plan_ok(&CLAUDE, &snaps);
-        assert!(
-            planned_under(&p, "permissions.deny").is_empty(),
+        assert_eq!(
+            planned_under(&p, "permissions.deny"),
+            ["Edit(**/.git-paw/skills/**)"],
             "already there, so not claimed"
         );
     }

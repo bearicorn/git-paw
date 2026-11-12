@@ -6,7 +6,7 @@ This walkthrough shows how to launch git-paw in **supervisor mode** and drive it
 
 Supervisor mode with a spec flag (`git paw start --supervisor --from-all-specs`) launches every pending spec as its own coding agent in a tmux pane, with the dashboard above them. (Bare `git paw start --supervisor`, with no spec flag, opens the interactive branch picker instead.)
 
-**The orchestrator runs outside the tmux session.** No orchestrator runs inside the session. The orchestrator is your own agent session (any agent CLI you like), run at the repository root and outside tmux. It loads the exported orchestrator skill and the per-session context, then drives the run through the bundled helpers (`.git-paw/scripts/sweep.sh`, `broker.sh`) or git-paw's MCP server. It runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, and publishes a final summary status when the run is complete.
+**The orchestrator runs outside the tmux session.** No orchestrator runs inside the session. The orchestrator is your own agent session (any agent CLI you like), run at the repository root and outside tmux. It loads the exported orchestrator skill and the per-session context, then drives the run through the bundled helpers (`.git-paw/skills/orchestrator/scripts/sweep.sh`, `broker.sh`) or git-paw's MCP server. It runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, and publishes a final summary status when the run is complete.
 
 It does **not** approve permission prompts. Whether a command runs without asking is your agent CLI's decision, and anything it prompts for is escalated to you. For a run that proceeds without stopping, pre-approve the commands in that CLI's own allow rules, or use `agent_approval = "full-auto"` inside a [sandbox](user-guide/sandbox.md).
 
@@ -25,13 +25,13 @@ It does **not** approve permission prompts. Whether a command runs without askin
 git paw init
 ```
 
-`git paw init` writes `.git-paw/config.toml` (asking whether to enable supervisor mode by default and, if you do, for the test command) and installs the bundled helpers under `.git-paw/scripts/`. It also exports two skills and adds one pointer section:
+`git paw init` writes `.git-paw/config.toml` (asking whether to enable supervisor mode by default and, if you do, for the test command) and installs every bundled skill package under `.git-paw/skills/<package>/`, each with its rendered `SKILL.md` and its helpers under `scripts/` (copies also land in the deprecated `.git-paw/scripts/`). Two of those skills are for you, and it adds one pointer section:
 
 - `.git-paw/skills/orchestrator/SKILL.md` is the orchestrator skill, rendered with your gate commands. It is the procedure your agent follows.
 - `.git-paw/skills/cli-setup/SKILL.md` holds the consent rules for `git paw setup-cli`.
 - A section between `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->` is added to your root `AGENTS.md`. It tells any agent reading the file that, when a git-paw session is active, it is that session's orchestrator and should read the two files above.
 
-Both skills follow the standard skill-directory layout (a `SKILL.md` with `name` and `description` frontmatter), so a skill-aware agent CLI can load them directly. Copy or symlink them into your CLI's own skill directory if it needs them there. `.git-paw/skills/` is gitignored, and `git paw start` re-renders both files, so they never lag your config or the binary. Re-running `git paw init` reports `Updated` only for a file whose content changed.
+Both skills follow the standard skill-directory layout (a `SKILL.md` with `name` and `description` frontmatter), so a skill-aware agent CLI can load them directly. Copy or symlink them into your CLI's own skill directory if it needs them there. `.git-paw/skills/` is gitignored, and every `git paw start` re-installs the packages from your current config, so they never lag your config or the binary — a fresh clone does not need `git paw init` first for its helpers. Re-running `git paw init` reports `Updated` only for a file whose content changed.
 
 ### 2. Create one OpenSpec-format spec
 
@@ -89,7 +89,7 @@ Open your own agent session at the repository root, outside tmux. Have it load `
 
 From there the orchestrator:
 
-1. **Follows events.** It blocks on the broker's event cursor (the MCP `wait_for_events` tool, or `.git-paw/scripts/sweep.sh events`), carrying the returned cursor forward. It inspects the session when an event or a stalled wave says to look, so it never polls pane captures on a timer. `get_session_status` and `sweep.sh status` give the roster at any time.
+1. **Follows events.** It blocks on the broker's event cursor (the MCP `wait_for_events` tool, or `.git-paw/skills/orchestrator/scripts/sweep.sh events`), carrying the returned cursor forward. It inspects the session when an event or a stalled wave says to look, so it never polls pane captures on a timer. `get_session_status` and `sweep.sh status` give the roster at any time.
 2. **Verifies.** It runs the five gates against each branch that reports done. It publishes a verdict only through the credential-carrying helpers: `sweep.sh verified <agent> <message>`, `sweep.sh feedback-gate <agent> <gate> <message>` or `sweep.sh conflict-ack <agent-a> <agent-b> <file>`. In the root session, the MCP `publish_verified` and `publish_feedback` tools do the same.
 3. **Answers.** It replies to a worker's `agent.question` with `sweep.sh answer <agent> <text> [re]`.
 4. **Merges.** Once every expected agent is verified, it fast-forwards each branch in topological order, runs the test command after each merge, and announces each advance with `sweep.sh advanced-main <merged-branch> <summary>`. In an attended run it may confirm the merge order with you first.
@@ -174,8 +174,8 @@ Every coordination message the orchestrator and its agents exchange goes through
 
 Nobody hand-writes these envelopes:
 
-- The coding agents publish theirs through `.git-paw/scripts/broker.sh` (`status`, with `--activity` for a what-I-am-doing phrase; `artifact`; `blocked`; `question`; `intent`, with `--region` to claim parts of a file) or the MCP publish tools, and read their inbox with `broker.sh poll`. Each helper call runs bare (no exit-status probe, no pipe), so one path-scoped permission rule matches it.
-- The orchestrator publishes through `.git-paw/scripts/sweep.sh` (`status-publish`, `verified`, `feedback-gate`, `conflict-ack`, `learn`, `answer`, `advanced-main`) or `broker.sh --agent supervisor` (`question`, `intent`).
+- The coding agents publish theirs through `.git-paw/skills/coordination/scripts/broker.sh` (`status`, with `--activity` for a what-I-am-doing phrase; `artifact`; `blocked`; `question`; `intent`, with `--region` to claim parts of a file) or the MCP publish tools, and read their inbox with `broker.sh poll`. Each helper call runs bare (no exit-status probe, no pipe), so one path-scoped permission rule matches it.
+- The orchestrator publishes through `.git-paw/skills/orchestrator/scripts/sweep.sh` (`status-publish`, `verified`, `feedback-gate`, `conflict-ack`, `learn`, `answer`, `advanced-main`) or `broker.sh --agent supervisor` (`question`, `intent`).
 - The filesystem watcher and the post-commit hook publish `agent.status` and `agent.artifact` automatically.
 
 The rest of the message set is `agent.blocked`, `agent.intent`, `agent.question`, `agent.answer`, `agent.feedback`, `agent.verified`, `agent.advanced-main` and `agent.learning`, plus the broker-emitted `supervisor.verify-now`. See [Agent Coordination](user-guide/coordination.md) for the full reference with payload-field semantics.
@@ -192,7 +192,7 @@ When a run misbehaves, these places have everything you need:
    - The name carries the session, so two repositories each keep their own log.
    - Tail it live with `tail -f` to watch coordination as it happens. The file is appended every five seconds; see [Agent Coordination](user-guide/coordination.md) for the message types.
 
-To inspect an individual agent's pane history, run `.git-paw/scripts/sweep.sh capture <pane>`, or `tmux capture-pane -p -t <session>:0.<pane>` against the session named in `.git-paw/AGENTS.local.md`. The agent panes are in window 0; the session's second window, `broker`, hosts the broker.
+To inspect an individual agent's pane history, run `.git-paw/skills/orchestrator/scripts/sweep.sh capture <pane>`, or `tmux capture-pane -p -t <session>:0.<pane>` against the session named in `.git-paw/AGENTS.local.md`. The agent panes are in window 0; the session's second window, `broker`, hosts the broker.
 
 ## Governance
 

@@ -57,7 +57,8 @@ pub struct BundledFile {
 
 impl BundledFile {
     /// The file's name — its last path component, which is also the name a
-    /// helper script is deployed under in `.git-paw/scripts/`.
+    /// helper script is installed under in its package's `scripts/` and in the
+    /// `.git-paw/scripts/` compatibility directory.
     #[must_use]
     pub fn file_name(&self) -> &'static str {
         self.path.rsplit('/').next().unwrap_or(self.path)
@@ -67,12 +68,12 @@ impl BundledFile {
 /// Where a bundled package may be provisioned beyond the repository root.
 ///
 /// The gate governs agent-worktree selection only (see
-/// [`packages_for_worktree`]); `git paw init` installs every package's
-/// helpers at the root regardless.
+/// [`packages_for_worktree`]); `git paw init` and every `git paw start`
+/// install every package at the root regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProvisionGate {
-    /// Root only: never provisioned into an agent worktree. Its skill is
-    /// exported to `.git-paw/skills/` instead.
+    /// Root only: never provisioned into an agent worktree; installed at the
+    /// repository root only.
     RootOnly,
     /// Provisioned into an agent worktree when the broker is enabled.
     BrokerEnabled,
@@ -115,6 +116,85 @@ impl BundledPackage {
             .iter()
             .filter(|f| f.file_name() != PAW_COMMON_SCRIPT)
     }
+
+    /// The package's install directory relative to a checkout root, e.g.
+    /// `.git-paw/skills/coordination`.
+    #[must_use]
+    pub fn install_dir(&self) -> String {
+        format!("{INSTALL_DIR}/{}", self.name)
+    }
+
+    /// The package's installed `SKILL.md`, relative to a checkout root.
+    #[must_use]
+    pub fn skill_md_path(&self) -> String {
+        format!("{}/{}", self.install_dir(), self.skill_md.path)
+    }
+
+    /// The invocation path of each of the package's helpers (shared preamble
+    /// excluded) relative to a checkout root, e.g.
+    /// `.git-paw/skills/coordination/scripts/broker.sh`.
+    pub fn helper_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.helpers()
+            .map(move |f| format!("{}/{}", self.install_dir(), f.path))
+    }
+
+    /// The `description` field of the package's embedded `SKILL.md`
+    /// frontmatter (empty when it has none).
+    #[must_use]
+    pub fn description(&self) -> String {
+        parse_standardized_metadata(self.skill_md.content)
+            .ok()
+            .and_then(|(metadata, _)| metadata)
+            .map(|m| m.description)
+            .unwrap_or_default()
+    }
+}
+
+/// The directory bundled packages are installed under, relative to a
+/// checkout root (the repository root or an agent worktree).
+pub const INSTALL_DIR: &str = ".git-paw/skills";
+
+/// The helper placeholders bundled prose names helpers through, each with the
+/// package and helper file it renders to.
+const HELPER_PLACEHOLDERS: [(&str, &str, &str); 3] = [
+    ("{{BROKER_HELPER}}", "coordination", "broker.sh"),
+    ("{{SWEEP_HELPER}}", "orchestrator", "sweep.sh"),
+    ("{{DOCS_FETCH_HELPER}}", "docs-fetch", "docs-fetch.sh"),
+];
+
+/// The invocation path of the bundled helper `file_name` — its package path,
+/// e.g. `.git-paw/skills/orchestrator/scripts/sweep.sh` — derived from the
+/// registry, or `None` when no registered package ships it.
+#[must_use]
+pub fn helper_invocation_path(file_name: &str) -> Option<String> {
+    BUNDLED_PACKAGES.iter().find_map(|p| {
+        p.helpers()
+            .find(|f| f.file_name() == file_name)
+            .map(|f| format!("{}/{}", p.install_dir(), f.path))
+    })
+}
+
+/// Substitutes `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}` and
+/// `{{DOCS_FETCH_HELPER}}` with their package invocation paths. Every renderer
+/// of bundled prose calls this, so no bundled prose carries a literal helper
+/// path and a future move is one registry edit.
+#[must_use]
+pub fn substitute_helper_paths(text: &str) -> String {
+    let mut out = text.to_string();
+    for (placeholder, package, helper) in HELPER_PLACEHOLDERS {
+        if out.contains(placeholder) {
+            let path = bundled_package(package)
+                .and_then(|p| {
+                    p.helpers()
+                        .find(|f| f.file_name() == helper)
+                        .map(|f| (p, f))
+                })
+                .map(|(p, f)| format!("{}/{}", p.install_dir(), f.path))
+                .unwrap_or_default();
+            out = out.replace(placeholder, &path);
+        }
+    }
+    out
 }
 
 /// File name of the shared shell preamble every helper sources.
@@ -130,10 +210,10 @@ const PAW_COMMON: BundledFile = BundledFile {
 
 /// The registered bundled packages, in registry order.
 ///
-/// Order matters: [`crate::init::bundled_scripts`] installs scripts in this
-/// order (first occurrence of each), [`crate::init::export_skills`] writes the
-/// root-only packages in this order, and [`packages_for_worktree`] returns
-/// its selection in this order.
+/// Order matters: [`crate::init::refresh_root_scripts`] installs the packages
+/// (and the compatibility copies, first occurrence of each script) in this
+/// order, and [`packages_for_worktree`] returns its selection — and so the
+/// managed block's `## Skills` index — in this order.
 static BUNDLED_PACKAGES: [BundledPackage; 4] = [
     BundledPackage {
         name: "orchestrator",
@@ -259,23 +339,141 @@ pub fn packages_for_worktree(inputs: WorktreeInputs) -> Vec<&'static BundledPack
         .collect()
 }
 
-/// Resolves the skill text of the bundled package `name` when
-/// [`packages_for_worktree`] selects it for `inputs`, or `Ok(None)` when it
-/// does not.
+/// Resolves the skill template of every package [`packages_for_worktree`]
+/// selects for `inputs`, in registry order — the one selection a launch path
+/// uses both to provision the worktree's packages and to inject their skill
+/// text into its managed block.
 ///
 /// # Errors
 ///
-/// Returns the [`resolve`] error for a selected package.
-pub fn resolve_for_worktree(
+/// Returns the [`resolve`] error of the first selected package that fails.
+pub fn resolve_worktree_packages(
     inputs: WorktreeInputs,
-    name: &str,
     repo_root: &Path,
-) -> Result<Option<SkillTemplate>, SkillError> {
-    if packages_for_worktree(inputs).iter().any(|p| p.name == name) {
-        resolve(name, repo_root).map(Some)
-    } else {
-        Ok(None)
+) -> Result<Vec<ResolvedPackage>, SkillError> {
+    packages_for_worktree(inputs)
+        .into_iter()
+        .map(|package| {
+            resolve(package.name, repo_root).map(|template| ResolvedPackage { package, template })
+        })
+        .collect()
+}
+
+/// A bundled package with its resolved skill template (embedded default or
+/// override).
+#[derive(Debug, Clone)]
+pub struct ResolvedPackage {
+    /// The registered package.
+    pub package: &'static BundledPackage,
+    /// Its resolved skill template.
+    pub template: SkillTemplate,
+}
+
+/// The values a package is rendered with for one install location: an agent
+/// worktree (the agent's branch and the session's broker URL) or the
+/// repository root (the orchestrator's reserved id and the configured broker
+/// URL).
+#[derive(Debug, Clone, Copy)]
+pub struct RenderInputs<'a> {
+    /// The branch whose slug renders into `{{BRANCH_ID}}`; ignored for the
+    /// repository root ([`Self::root`]).
+    pub branch: &'a str,
+    /// Whether this is the repository-root install, which renders
+    /// `{{BRANCH_ID}}` as the orchestrator's reserved id
+    /// ([`crate::surface::SUPERVISOR_AGENT_ID`]) rather than a branch slug, so
+    /// a branch switch never makes the root skills stale.
+    pub root: bool,
+    /// The broker URL rendered into `{{GIT_PAW_BROKER_URL}}`.
+    pub broker_url: &'a str,
+    /// The project name rendered into `{{PROJECT_NAME}}`.
+    pub project: &'a str,
+    /// The `[supervisor]` gate commands.
+    pub gates: GateCommands<'a>,
+    /// The resolved spec backends.
+    pub backends: &'a [crate::specs::SpecBackendKind],
+}
+
+/// One file of a package as installed: its path relative to the package
+/// directory, its content, and whether it is an executable helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedFile {
+    /// Path relative to the package directory (e.g. `"scripts/broker.sh"`).
+    pub path: String,
+    /// The content written.
+    pub content: String,
+    /// Whether the file is a script installed executable.
+    pub executable: bool,
+}
+
+/// Renders the body of a resolved package's skill — the text inlined into an
+/// agent's managed block — for `inputs`.
+#[must_use]
+pub fn render_package_body(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> String {
+    if inputs.root {
+        return render_for_supervisor(
+            &resolved.template,
+            inputs.broker_url,
+            inputs.project,
+            &inputs.gates,
+            inputs.backends,
+        );
     }
+    render(
+        &resolved.template,
+        inputs.branch,
+        inputs.broker_url,
+        inputs.project,
+        &inputs.gates,
+        inputs.backends,
+    )
+}
+
+/// Renders a resolved package for an install location: its `SKILL.md` (a
+/// standardized frontmatter block plus the rendered body; the orchestrator
+/// through [`render_standardized`]), its `references/` rendered with the same
+/// inputs, and its `scripts/` verbatim. A package's `assets/` are render-time
+/// inputs and are never installed.
+#[must_use]
+pub fn render_package(resolved: &ResolvedPackage, inputs: &RenderInputs<'_>) -> Vec<RenderedFile> {
+    let package = resolved.package;
+    let skill_md = if package.name == ORCHESTRATOR_SKILL {
+        render_standardized(&resolved.template, &inputs.gates, inputs.backends)
+    } else {
+        to_skill_md(&SkillTemplate {
+            content: render_package_body(resolved, inputs),
+            ..resolved.template.clone()
+        })
+    };
+    let mut files = vec![RenderedFile {
+        path: package.skill_md.path.to_string(),
+        content: skill_md,
+        executable: false,
+    }];
+    for reference in package.references {
+        let template = SkillTemplate {
+            name: package.name.to_string(),
+            content: reference.content.to_string(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+            origin_path: None,
+        };
+        let resolved = ResolvedPackage { package, template };
+        files.push(RenderedFile {
+            path: reference.path.to_string(),
+            content: render_package_body(&resolved, inputs),
+            executable: false,
+        });
+    }
+    for script in package.scripts {
+        files.push(RenderedFile {
+            path: script.path.to_string(),
+            content: script.content.to_string(),
+            executable: true,
+        });
+    }
+    files
 }
 
 /// Returns the content of the named file of the coordination package.
@@ -857,7 +1055,7 @@ pub fn cli_speaks_mcp<S: BuildHasher>(cli: &str, clis: &HashMap<String, CustomCl
 /// * `branch_id` - The branch name (will be slugified)
 /// * `broker_url` - The fully-qualified broker URL. Retained for signature
 ///   stability and any future broker-URL placeholder; the boot block no
-///   longer inlines the URL — each event calls `.git-paw/scripts/broker.sh`
+///   longer inlines the URL — each event calls the coordination package's `broker.sh`
 ///   (the `agent-broker-helper` capability), which discovers the URL itself.
 /// * `mcp_capable` - Whether the target CLI speaks MCP (see
 ///   [`cli_speaks_mcp`]). `true` renders the four events as MCP publish
@@ -882,7 +1080,7 @@ fn boot_block_for_id(agent_id: &str, broker_url: &str, mcp_capable: bool) -> Str
         coordination_asset("assets/boot-block.md")
     };
 
-    template
+    substitute_helper_paths(template)
         .replace("{{BRANCH_ID}}", agent_id)
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
@@ -1120,6 +1318,7 @@ fn render_for_agent_id(
         )
         .replace("{{DOC_TOOL_COMMAND}}", gates.doc_tool_command.unwrap_or(""))
         .replace("{{SPEC_PATH_DOCTRINE}}", &spec_doctrine);
+    output = substitute_helper_paths(&output);
 
     // `{{CHANGE_ID}}` is intentionally NOT substituted: it is a
     // per-invocation placeholder owned by the supervisor agent at
@@ -1163,24 +1362,22 @@ fn render_for_agent_id(
     output
 }
 
-/// Combines the rendered coordination and docs-fetch skill blocks into the
-/// single managed skill section written to an agent's `AGENTS.md`.
-///
-/// Either input may be absent: coordination is `None` when the broker is
-/// disabled, and docs-fetch is `None` unless `docs_base_url` is explicitly
-/// configured (see the `docs-fetch-skill` capability). When both are present
-/// they are joined with a blank line so each keeps its own heading structure;
-/// when neither is present the agent gets no managed skill section.
+/// Renders the skill text of the selected worktree `packages` into the single
+/// managed skill section written to an agent's `AGENTS.md`: each package's
+/// body ([`render_package_body`]) in selection order, joined with a blank
+/// line so each keeps its own heading structure. `None` when no package is
+/// selected (broker disabled and `docs_base_url` unset), so the agent gets no
+/// managed skill section.
 #[must_use]
-pub fn combine_agent_skills(
-    coordination: Option<String>,
-    docs_fetch: Option<String>,
+pub fn render_worktree_skills(
+    packages: &[ResolvedPackage],
+    inputs: &RenderInputs<'_>,
 ) -> Option<String> {
-    match (coordination, docs_fetch) {
-        (Some(coordination), Some(docs)) => Some(format!("{coordination}\n\n{docs}")),
-        (Some(only), None) | (None, Some(only)) => Some(only),
-        (None, None) => None,
-    }
+    let bodies: Vec<String> = packages
+        .iter()
+        .map(|resolved| render_package_body(resolved, inputs))
+        .collect();
+    (!bodies.is_empty()).then(|| bodies.join("\n\n"))
 }
 
 /// Marker opening an opsx role-gating region in a bundled skill template.
@@ -1431,7 +1628,7 @@ pub fn orchestrator_session_context(
     unattended: bool,
     governance: &crate::config::GovernanceConfig,
 ) -> String {
-    let mut context = ORCHESTRATOR_SESSION_CONTEXT
+    let mut context = substitute_helper_paths(ORCHESTRATOR_SESSION_CONTEXT)
         .replace("{{SESSION_NAME}}", session_name)
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url);
     if unattended && let Some(directive) = drive_loop_directive_region(&template.content) {
@@ -1550,8 +1747,17 @@ mod tests {
     /// Resolves `name` with no override root: only the embedded default can
     /// answer, whatever the developer's machine has under its config
     /// directory or above the checkout.
+    ///
+    /// The helper placeholders are rendered to their package paths, as every
+    /// renderer does, so a content requirement naming a helper is checked
+    /// against the path the agent is told to run (`skill-packages`
+    /// *Requirements naming the legacy deployed helper path are satisfied by
+    /// the package path*).
     fn resolve_embedded(name: &str) -> Result<SkillTemplate, SkillError> {
-        resolve_from(name, &SkillRoots::default())
+        resolve_from(name, &SkillRoots::default()).map(|t| SkillTemplate {
+            content: substitute_helper_paths(&t.content),
+            ..t
+        })
     }
 
     /// Roots whose repository level is `repo` and that have no user level.
@@ -1830,39 +2036,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn combine_agent_skills_joins_both_when_present() {
-        let combined = combine_agent_skills(
-            Some("## Coordination\nbody".to_string()),
-            Some("## Consulting Docs\nbody".to_string()),
+    fn test_render_inputs() -> RenderInputs<'static> {
+        RenderInputs {
+            branch: "feat/x",
+            root: false,
+            broker_url: "http://127.0.0.1:9119",
+            project: "proj",
+            gates: GateCommands::default(),
+            backends: &[],
+        }
+    }
+
+    fn selected_packages(broker: bool, docs: bool) -> Vec<ResolvedPackage> {
+        let empty = tempfile::tempdir().unwrap();
+        resolve_worktree_packages(
+            WorktreeInputs {
+                broker_enabled: broker,
+                docs_base_url_configured: docs,
+            },
+            empty.path(),
         )
-        .expect("both present yields a block");
-        assert!(combined.contains("## Coordination"));
-        assert!(combined.contains("## Consulting Docs"));
+        .unwrap()
+    }
+
+    #[test]
+    fn worktree_skills_join_coordination_then_docs_fetch() {
+        let combined =
+            render_worktree_skills(&selected_packages(true, true), &test_render_inputs())
+                .expect("both selected yields a block");
         // Coordination precedes docs-fetch, separated by a blank line so each
         // keeps its own heading structure.
-        let coord = combined.find("## Coordination").unwrap();
-        let docs = combined.find("## Consulting Docs").unwrap();
+        let coord = combined.find("# Coordination").unwrap();
+        let docs = combined.find("# Consulting").unwrap();
         assert!(coord < docs);
-        assert!(combined.contains("body\n\n## Consulting Docs"));
     }
 
     #[test]
-    fn combine_agent_skills_passes_through_single_present_block() {
-        assert_eq!(
-            combine_agent_skills(Some("only-coordination".to_string()), None).as_deref(),
-            Some("only-coordination"),
-        );
-        assert_eq!(
-            combine_agent_skills(None, Some("only-docs-fetch".to_string())).as_deref(),
-            Some("only-docs-fetch"),
-        );
+    fn worktree_skills_carry_only_the_selected_package() {
+        let coordination =
+            render_worktree_skills(&selected_packages(true, false), &test_render_inputs()).unwrap();
+        assert!(!coordination.contains("docs-fetch.sh"), "{coordination}");
+        let docs =
+            render_worktree_skills(&selected_packages(false, true), &test_render_inputs()).unwrap();
+        assert!(!docs.contains("broker.sh status"), "{docs}");
     }
 
     #[test]
-    fn combine_agent_skills_is_none_when_both_absent() {
+    fn worktree_skills_are_none_when_nothing_is_selected() {
         // Broker disabled AND docs_base_url unset ⇒ no managed skill section.
-        assert!(combine_agent_skills(None, None).is_none());
+        assert!(
+            render_worktree_skills(&selected_packages(false, false), &test_render_inputs())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1873,7 +2098,7 @@ mod tests {
         // page bodies. Guard against a future edit that inlines doc prose.
         let body = resolve_embedded("docs-fetch").unwrap().content;
         // It references the helper and states docs are fetched on demand.
-        assert!(body.contains(".git-paw/scripts/docs-fetch.sh"));
+        assert!(body.contains(".git-paw/skills/docs-fetch/scripts/docs-fetch.sh"));
         assert!(body.to_lowercase().contains("on demand") || body.contains("live"));
         // It carries no fetched documentation page content. mdBook chapters are
         // authored with H1 titles (`# Title`); an instructions-only skill uses
@@ -1896,8 +2121,9 @@ mod tests {
         assert!(tmpl.content.contains("agent.artifact"));
         assert!(tmpl.content.contains("agent.blocked"));
         assert!(
-            tmpl.content
-                .contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll")
+            tmpl.content.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent {{BRANCH_ID}} poll"
+            )
         );
     }
 
@@ -1969,7 +2195,9 @@ mod tests {
             .map_or(tmpl.content.len(), |i| section_start + 1 + i);
         let section = &tmpl.content[section_start..section_end];
         assert!(
-            section.contains(".git-paw/scripts/sweep.sh answer __FILL_IN_AGENT_ID__"),
+            section.contains(
+                ".git-paw/skills/orchestrator/scripts/sweep.sh answer __FILL_IN_AGENT_ID__"
+            ),
             "agent.answer must be published via `sweep.sh answer`: {section}"
         );
         for field in ["`from`", "`answer`", "`re`"] {
@@ -2365,18 +2593,18 @@ mod tests {
     }
 
     /// `supervisor-bugfixes-v0-5-x` §3.10: the rendered supervisor skill SHALL
-    /// invoke `.git-paw/scripts/sweep.sh` for snapshot / capture / approve /
+    /// invoke `.git-paw/skills/orchestrator/scripts/sweep.sh` for snapshot / capture / approve /
     /// verified / feedback-gate, and SHALL NOT include legacy multi-pane
     /// `for p in …; do tmux capture-pane` loops.
     #[test]
     fn supervisor_skill_references_bundled_sweep_helper() {
         let tmpl = resolve_embedded("supervisor").unwrap();
         let required = [
-            ".git-paw/scripts/sweep.sh snapshot",
-            ".git-paw/scripts/sweep.sh capture",
-            ".git-paw/scripts/sweep.sh approve",
-            ".git-paw/scripts/sweep.sh verified",
-            ".git-paw/scripts/sweep.sh feedback-gate",
+            ".git-paw/skills/orchestrator/scripts/sweep.sh snapshot",
+            ".git-paw/skills/orchestrator/scripts/sweep.sh capture",
+            ".git-paw/skills/orchestrator/scripts/sweep.sh approve",
+            ".git-paw/skills/orchestrator/scripts/sweep.sh verified",
+            ".git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate",
         ];
         for needle in required {
             assert!(
@@ -2557,7 +2785,7 @@ mod tests {
         // *Supervisor publishes on merge to main*): no raw `/publish` request.
         assert!(
             merge_section
-                .contains(".git-paw/scripts/sweep.sh advanced-main __FILL_IN_AGENT_BRANCH__")
+                .contains(".git-paw/skills/orchestrator/scripts/sweep.sh advanced-main __FILL_IN_AGENT_BRANCH__")
                 && merge_section.contains("new_main_sha"),
             "the merge section must include a concrete `sweep.sh advanced-main` example"
         );
@@ -2789,7 +3017,7 @@ mod tests {
         );
         assert!(
             tmpl.content
-                .contains(".git-paw/scripts/sweep.sh detect-stuck"),
+                .contains(".git-paw/skills/orchestrator/scripts/sweep.sh detect-stuck"),
             "the section must name the bundled detect-stuck helper command"
         );
         assert!(
@@ -3245,7 +3473,10 @@ mod tests {
     #[test]
     fn supervisor_skill_contains_broker_status() {
         let tmpl = resolve_embedded("supervisor").unwrap();
-        assert!(tmpl.content.contains(".git-paw/scripts/sweep.sh status"));
+        assert!(
+            tmpl.content
+                .contains(".git-paw/skills/orchestrator/scripts/sweep.sh status")
+        );
         assert!(!tmpl.content.contains("{{GIT_PAW_BROKER_URL}}"));
     }
 
@@ -3491,12 +3722,12 @@ mod tests {
         // earlier shape `tmux capture-pane …` is still acceptable for
         // historical content. Either form satisfies the inspect contract.
         assert!(
-            window.contains(".git-paw/scripts/sweep.sh capture")
+            window.contains(".git-paw/skills/orchestrator/scripts/sweep.sh capture")
                 || window.contains("tmux capture-pane"),
             "paste-buffer recovery should reference a pane-capture command (sweep.sh capture or tmux capture-pane)"
         );
         assert!(
-            window.contains(".git-paw/scripts/sweep.sh tell"),
+            window.contains(".git-paw/skills/orchestrator/scripts/sweep.sh tell"),
             "paste-buffer recovery should re-send with sweep.sh tell"
         );
         assert!(
@@ -5388,7 +5619,7 @@ The loop is the pump; you are the brain. You drive the session from outside it, 
 \n\
 Your role this session is escalation-driven, in this order each cycle:\n\
 \n\
-1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human in your session, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
+1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human in your session, naming the agent and the pending command, and run `.git-paw/skills/orchestrator/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.";
 
         let tmpl = resolve_embedded("supervisor").unwrap();
@@ -5496,7 +5727,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
-    /// Task 5.3 — the rendered boot block calls `.git-paw/scripts/broker.sh`
+    /// Task 5.3 — the rendered boot block calls `.git-paw/skills/coordination/scripts/broker.sh`
     /// for all four events, contains no raw broker `curl`, and the DONE
     /// fallback still publishes `agent.artifact { status: "done" }`.
     #[test]
@@ -5515,19 +5746,27 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
         // Each event calls the helper with the pre-expanded agent id.
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test status booting"),
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test status booting"
+            ),
             "REGISTER event should call broker.sh status"
         );
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test artifact"
+            ),
             "DONE-fallback event should call broker.sh artifact"
         );
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test blocked"),
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test blocked"
+            ),
             "BLOCKED event should call broker.sh blocked"
         );
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test question"),
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test question"
+            ),
             "QUESTION event should call broker.sh question"
         );
 
@@ -5546,19 +5785,27 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let block = build_boot_block("feat/test", "http://127.0.0.1:9119", true);
 
         assert!(
-            !block.contains(".git-paw/scripts/broker.sh --agent feat-test status"),
+            !block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test status"
+            ),
             "MCP form must not call the broker.sh helper for REGISTER"
         );
         assert!(
-            !block.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            !block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test artifact"
+            ),
             "MCP form must not call the broker.sh helper for DONE"
         );
         assert!(
-            !block.contains(".git-paw/scripts/broker.sh --agent feat-test blocked"),
+            !block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test blocked"
+            ),
             "MCP form must not call the broker.sh helper for BLOCKED"
         );
         assert!(
-            !block.contains(".git-paw/scripts/broker.sh --agent feat-test question"),
+            !block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test question"
+            ),
             "MCP form must not call the broker.sh helper for QUESTION"
         );
 
@@ -5795,7 +6042,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "GIT_PAW_BROKER_URL placeholder must not leak into the rendered block"
         );
         assert!(
-            block.contains(".git-paw/scripts/broker.sh"),
+            block.contains(".git-paw/skills/coordination/scripts/broker.sh"),
             "boot block must invoke the bundled broker.sh helper"
         );
     }
@@ -5856,11 +6103,13 @@ Your role this session is escalation-driven, in this order each cycle:\n\
 
         // Each event calls the helper with the pre-expanded branch id.
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test status booting"),
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test status booting"
+            ),
             "REGISTER should call broker.sh with the pre-expanded agent id"
         );
         assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent feat-test"),
+            block.contains(".git-paw/skills/coordination/scripts/broker.sh --agent feat-test"),
             "Agent ID not substituted in broker.sh invocations"
         );
         // No raw broker curl should remain anywhere in the block.
@@ -5891,7 +6140,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             .expect("DONE section should lead with a commit-first instruction");
 
         let manual_done_idx = done_body
-            .find(".git-paw/scripts/broker.sh --agent feat-test artifact")
+            .find(".git-paw/skills/coordination/scripts/broker.sh --agent feat-test artifact")
             .expect("DONE section should still contain the manual artifact helper as a fallback");
 
         assert!(
@@ -5959,7 +6208,9 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         // The manual fallback is now a copy-pasteable broker.sh artifact
         // invocation, not a raw curl.
         assert!(
-            done_body.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            done_body.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-test artifact"
+            ),
             "DONE section should retain the manual artifact helper invocation"
         );
         assert!(
@@ -6323,7 +6574,9 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "section should mention agent.intent"
         );
         assert!(
-            window.contains(".git-paw/scripts/broker.sh --agent supervisor intent"),
+            window.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent supervisor intent"
+            ),
             "section should publish the intent through `broker.sh --agent supervisor intent`"
         );
         assert!(
@@ -6917,7 +7170,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     /// 8b.9 — §7's `agent.feedback` examples mention the gate-name
     /// convention with at least three of the five gates shown. The
     /// supervisor skill now wraps feedback through
-    /// `.git-paw/scripts/sweep.sh feedback-gate <agent> <gate> <msg>`,
+    /// `.git-paw/skills/orchestrator/scripts/sweep.sh feedback-gate <agent> <gate> <msg>`,
     /// so a gate name passed as the second argument satisfies the
     /// convention equivalently to a bracketed `[gate]` prefix.
     #[test]
@@ -7500,11 +7753,11 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     fn docs_fetch_skill_instructs_helper_not_raw_curl() {
         let out = render_skill("docs-fetch", &[]);
         assert!(
-            out.contains(".git-paw/scripts/docs-fetch.sh find"),
+            out.contains(".git-paw/skills/docs-fetch/scripts/docs-fetch.sh find"),
             "rendered docs-fetch skill should instruct the `find` op via the helper"
         );
         assert!(
-            out.contains(".git-paw/scripts/docs-fetch.sh get"),
+            out.contains(".git-paw/skills/docs-fetch/scripts/docs-fetch.sh get"),
             "rendered docs-fetch skill should instruct the `get` op via the helper"
         );
         // No raw curl command to the docs site: the skill may mention the word
@@ -7718,27 +7971,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     }
 
     #[test]
-    fn resolve_for_worktree_resolves_only_selected_packages() {
-        let empty = tempfile::tempdir().unwrap();
-        let inputs = WorktreeInputs {
-            broker_enabled: true,
-            docs_base_url_configured: false,
-        };
-        assert!(
-            resolve_for_worktree(inputs, "coordination", empty.path())
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            resolve_for_worktree(inputs, "docs-fetch", empty.path())
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            resolve_for_worktree(inputs, "orchestrator", empty.path())
-                .unwrap()
-                .is_none()
-        );
+    fn resolve_worktree_packages_resolves_only_selected_packages() {
+        let names: Vec<&str> = selected_packages(true, false)
+            .iter()
+            .map(|r| r.package.name)
+            .collect();
+        assert_eq!(names, ["coordination"]);
     }
 
     // --- skill-packages: embedded resolution comes from the registry ---
@@ -7776,7 +8014,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             assert!(!template.is_empty());
             assert_eq!(
                 build_boot_block("feat/x", "http://b", mcp),
-                template
+                substitute_helper_paths(template)
                     .replace("{{BRANCH_ID}}", "feat-x")
                     .replace("{{GIT_PAW_BROKER_URL}}", "http://b")
             );
@@ -7888,7 +8126,9 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         assert_eq!(tmpl.source, Source::Embedded);
         assert_eq!(
             tmpl.content,
-            resolve_embedded("coordination").unwrap().content
+            resolve_from("coordination", &SkillRoots::default())
+                .unwrap()
+                .content
         );
     }
 
@@ -8325,5 +8565,137 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let tmpl = levels.resolve("coordination").unwrap();
         assert_eq!(tmpl.source, Source::AgentsStandard);
         assert!(tmpl.content.contains("SHARED BODY"));
+    }
+
+    // --- skill-packages: bundled prose names helpers by their package path ---
+
+    /// Every bundled prose file an agent is told to follow: each registered
+    /// package's `SKILL.md`, references and assets, the orchestrator session
+    /// context and the escalation framing.
+    fn bundled_prose() -> Vec<(&'static str, &'static str)> {
+        let mut prose: Vec<(&'static str, &'static str)> = bundled_packages()
+            .iter()
+            .flat_map(|p| {
+                std::iter::once(&p.skill_md)
+                    .chain(p.references)
+                    .chain(p.assets)
+            })
+            .map(|f| (f.source, f.content))
+            .collect();
+        prose.push((
+            "assets/orchestrator-session-context.md",
+            ORCHESTRATOR_SESSION_CONTEXT,
+        ));
+        prose.push((
+            "assets/escalation-framing.md",
+            include_str!("../assets/escalation-framing.md"),
+        ));
+        prose
+    }
+
+    // Scenario: No bundled template carries a literal helper path.
+    // boot-block / Scenario: The boot-block template carries no literal helper
+    // path.
+    #[test]
+    fn no_bundled_template_carries_a_literal_helper_path() {
+        for (source, content) in bundled_prose() {
+            assert!(
+                !content.contains(".git-paw/scripts/"),
+                "{source} names the compatibility path"
+            );
+            for package in bundled_packages() {
+                let literal = format!("{}/scripts/", package.install_dir());
+                assert!(
+                    !content.contains(&literal),
+                    "{source} carries the literal {literal}"
+                );
+            }
+        }
+        for template in [
+            coordination_asset("assets/boot-block.md"),
+            coordination_asset("assets/boot-block-mcp.md"),
+        ] {
+            assert!(!template.contains("broker.sh --agent"), "{template}");
+        }
+        assert!(coordination_asset("assets/boot-block.md").contains("{{BROKER_HELPER}} --agent"));
+    }
+
+    // Scenario: Helper placeholders raise no warning — each renders to its
+    // registry-derived package path and none is left for the
+    // unsubstituted-placeholder warning.
+    #[test]
+    fn helper_placeholders_raise_no_warning() {
+        let tmpl = SkillTemplate {
+            name: "test".into(),
+            content: "{{BROKER_HELPER}} | {{SWEEP_HELPER}} | {{DOCS_FETCH_HELPER}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+            origin_path: None,
+        };
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+        );
+        assert_eq!(
+            output,
+            ".git-paw/skills/coordination/scripts/broker.sh | \
+             .git-paw/skills/orchestrator/scripts/sweep.sh | \
+             .git-paw/skills/docs-fetch/scripts/docs-fetch.sh"
+        );
+        assert_eq!(
+            helper_invocation_path("sweep.sh").as_deref(),
+            Some(".git-paw/skills/orchestrator/scripts/sweep.sh")
+        );
+        assert_eq!(helper_invocation_path(PAW_COMMON_SCRIPT), None);
+    }
+
+    // Scenario: The rendered boot block invokes the package helper.
+    #[test]
+    fn the_rendered_boot_block_invokes_the_package_helper() {
+        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", false);
+        assert!(
+            block.contains(
+                ".git-paw/skills/coordination/scripts/broker.sh --agent feat-x status booting"
+            ),
+            "{block}"
+        );
+        assert!(!block.contains("{{BROKER_HELPER}}"), "{block}");
+    }
+
+    // Scenario: The exported orchestrator skill names the package helper.
+    #[test]
+    fn the_exported_orchestrator_skill_names_the_package_helper() {
+        let tmpl = resolve_embedded(ORCHESTRATOR_SKILL).unwrap();
+        let exported = render_standardized(&tmpl, &GateCommands::default(), &[]);
+        assert!(
+            exported.contains(".git-paw/skills/orchestrator/scripts/sweep.sh snapshot"),
+            "the exported skill must name the package helper"
+        );
+        assert!(!exported.contains("{{SWEEP_HELPER}}"));
+    }
+
+    // Each renderer of bundled prose substitutes the helper placeholders:
+    // the orchestrator session context names both root helpers.
+    #[test]
+    fn the_orchestrator_session_context_names_the_package_helpers() {
+        let tmpl = resolve_embedded(ORCHESTRATOR_SKILL).unwrap();
+        let context = orchestrator_session_context(
+            &tmpl,
+            "paw-x",
+            "http://127.0.0.1:9119",
+            false,
+            &crate::config::GovernanceConfig::default(),
+        );
+        assert!(context.contains("`.git-paw/skills/orchestrator/scripts/sweep.sh`"));
+        assert!(
+            context.contains("`.git-paw/skills/coordination/scripts/broker.sh --agent supervisor`")
+        );
+        assert!(!context.contains("_HELPER}}"), "{context}");
     }
 }

@@ -33,12 +33,17 @@ export.
   `assets/` (the boot-block templates live in `coordination/assets/`), all registered in
   `skills::bundled_packages()` (`orchestrator` was `supervisor`, still resolvable under that
   alias).
-- **Exported skill files** — `git paw init` (and `git paw start`) writes
-  `.git-paw/skills/orchestrator/SKILL.md` (the orchestrator skill rendered with the consumer's gate
-  commands and configured spec format, no session value — no broker URL, no tmux session name, no
-  `curl`) and `.git-paw/skills/cli-setup/SKILL.md` (the resolved `cli-setup` skill), in the main
-  checkout only. The session's values go to the repo-root sidecar `.git-paw/AGENTS.local.md`
-  only, from `assets/orchestrator-session-context.md`.
+- **Installed packages** — `git paw init` and every `git paw start` install every registered
+  package at the repository root as `.git-paw/skills/<pkg>/` (rendered `SKILL.md`, executable
+  `scripts/`, rendered `references/`; never `assets/`), and every launch path installs each agent
+  worktree's selected packages (`coordination`, `docs-fetch`) into `<worktree>/.git-paw/skills/`,
+  plus each helper's deprecated compatibility copy under `.git-paw/scripts/`. The root
+  `orchestrator/SKILL.md` is rendered with the consumer's gate commands and configured spec
+  format, no session value — no broker URL, no tmux session name, no `curl`; `cli-setup/SKILL.md`
+  is the resolved `cli-setup` skill. The session's values go to the repo-root sidecar
+  `.git-paw/AGENTS.local.md` only, from `assets/orchestrator-session-context.md`. The agent's
+  managed block also carries a generated `## Skills` index naming each package's `SKILL.md` and
+  helper path, from the registry.
 - **Agent-facing prose assets** — instructions, rules, directives, framing text and task-prompt
   scaffolding injected into an agent's sidecar, boot prompt, or skill content, authored in bundled
   assets rather than assembled from compiled string literals: `assets/inter-agent-rules.md`,
@@ -69,6 +74,9 @@ export.
   `settings.json` allowlist seeding.
 - **Templates** — `{{VAR}}` placeholders (`{{TEST_COMMAND}}`, `{{BRANCH_ID}}`,
   `{{GIT_PAW_BROKER_URL}}`, …) that pull consumer specifics from config rather than inlining them.
+  Bundled prose names a helper only through `{{BROKER_HELPER}}`, `{{SWEEP_HELPER}}` or
+  `{{DOCS_FETCH_HELPER}}`, rendered to the package path from the registry — never a literal
+  `.git-paw/scripts/…` or `.git-paw/skills/<pkg>/scripts/…` path.
 
 ## How to stay agnostic (per surface)
 

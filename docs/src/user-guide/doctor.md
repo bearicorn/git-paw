@@ -31,7 +31,7 @@ Spec system
 
 Bundled scripts
   ✓ _paw_common.sh          installed, executable, matches this binary
-  ✗ sweep.sh                .git-paw/scripts/sweep.sh is missing
+  ✗ sweep.sh                .git-paw/skills/orchestrator/scripts/sweep.sh is missing
       ↳ run `git paw init` to (re)install the bundled helper scripts
   ✓ broker.sh               installed, executable, matches this binary
   ✓ docs-fetch.sh           installed, executable, matches this binary
@@ -89,7 +89,7 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. One row per `[clis.<name>]` entry is ✗ when a launch would refuse it as an [ambiguous PATH shim](../supported-clis.md#migrating-from-path-shims) (a different `<name>` on `PATH` than its `command`), naming both paths. The [sandbox-mode check](#the-sandbox-mode-check) reports each worker CLI's declared sandbox mode. Plus three read-only reports about [per-CLI setup](cli-setup.md): **setup state**, **broad grants** and **grant residue** (below). |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
 | **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. Finally, whether the workflow entry point the launch submits to spec-driven agents is **reachable** from your worktrees (below). |
-| **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. A **skill sources** row names where each bundled skill resolves from — `embedded`, `repo <SKILL.md path>` or `user <SKILL.md path>` (see [skill resolution](skill-templates.md#skill-resolution)): ✓ when all resolve, ⚠ when a `cli-setup` override directory exists (it is ignored; remove it), ✗ naming the skill and override path when an override fails to load (fix or remove it — `start` would fail on it too). |
+| **Bundled scripts** | Every bundled skill package is installed at the root under `.git-paw/skills/<package>/`: its `SKILL.md` is present (missing is ✗), and each of its helpers — `sweep.sh`, `broker.sh`, `docs-fetch.sh` and the shared `_paw_common.sh` preamble they source — exists under the package's `scripts/`, is executable, and matches this binary's embedded copy. Missing or non-executable is ✗ with the `git paw init` remedy; content drift is ⚠ ("stale"). A root `SKILL.md` or reference that differs from what this binary renders from the current config — a `[supervisor]` gate command added after `git paw init`, say — is ⚠ stale with the remedy `git paw start` or `git paw init`. The deprecated compatibility copies under `.git-paw/scripts/` are checked too, but a missing or stale copy is only ⚠: nothing bundled calls that path. A repository with no `.git-paw/config.toml` gets one ⚠ "not initialised — run `git paw init`" line instead of a line per package and helper, and never ✗ for them. Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. A **skill sources** row names where each bundled skill resolves from — `embedded`, `repo <SKILL.md path>` or `user <SKILL.md path>` (see [skill resolution](skill-templates.md#skill-resolution)): ✓ when all resolve, ⚠ when a `cli-setup` override directory exists (it is ignored; remove it), ✗ naming the skill and override path when an override fails to load (fix or remove it — `start` would fail on it too). |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker **for this repository**. A git-paw broker serving another repository is ⚠ with the `[broker] port` remedy — it is the clash that would refuse your next `git paw start`. A non-git-paw service on the port is a separate ⚠ with its own remedy. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. Warns (⚠) when `budget_max_cost` is set but not every configured worker CLI reports cost, so the cap cannot fire. When disabled, an informational ✓. |
 | **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session state; registered worktrees whose directory no longer exists. Each is ⚠. A receipt that claims active while its tmux session is **gone** gets the `git paw purge --stale` remedy, as does an orphaned worktree registration. A session whose tmux session is still up but whose agent panes have all dropped back to a bare shell (past a short launch grace period) is a separate finding: it names the session, says its agent panes exited, and its remedy is `git paw start`, which recovers it — `purge --stale` never purges such a session. An **orchestrator pointer** row is ⚠ when the root `AGENTS.md` carries the `git-paw orchestrator` section but not the one this binary writes — typically one written before the section was scoped to the root session, which worktree agents could read as theirs; its remedy is `git paw init`, which rewrites the section in place. |
@@ -137,9 +137,16 @@ the reason doctor fails**: they never report ✗.
 - ⚠ when a **granted helper script** differs from the copy this binary
   bundles, naming its path. This one matters most: the allowlist lets that
   script run without a prompt, so drift in it is drift in what runs
-  unprompted. Helpers are checked in the main checkout and in every session
-  worktree, because a granted path is relative and resolves against whichever
-  directory the session runs in.
+  unprompted. Every allow value in the target settings file is followed —
+  git-paw's own entries, ones you wrote, and durable grants the CLI saved
+  when someone answered "don't ask again" — and, for each one that names a
+  bundled helper at its package path `.git-paw/skills/<package>/scripts/` or
+  at `.git-paw/scripts/` (however it is spelled: with `./`, behind `bash` or
+  `sh`, or as an absolute path), **every** bundled script in that helper's
+  directory is checked, including the shared `_paw_common.sh` preamble the
+  helper sources. Scripts are checked in the main checkout and in every
+  session worktree, because a granted path is relative and resolves against
+  whichever directory the session runs in.
 
 What counts as **applied** is judged against the CLI's target settings file,
 not against git-paw's record: a planned entry is applied when that file holds
@@ -153,6 +160,9 @@ The check reads the comparison in both directions. It also warns when the
 record holds a permission rule **this version of git-paw no longer plans** — a
 grant a previous release wrote and this one has withdrawn. The remedy is the
 same either way: `git paw setup-cli <CLI> --undo`, then re-apply the item.
+Entries applied by v0.19.0 or earlier name the pre-package `.git-paw/scripts/`
+paths, so after the upgrade they are reported this way; doctor leaves them in
+place, and only you replace them.
 
 **Broad grants**, an advisory over the allowlist item's target file when it
 exists. It lists every `permissions.allow` entry whose shape grants more than
@@ -160,10 +170,12 @@ one specific command — a bare tool rule, a single-word prefix grant, a shell
 or interpreter wrapper, a state-changing `git` or `git-paw` subcommand, a
 far-reaching command like `rm` or `curl` (a loopback `curl` is exempt), a
 file-tool rule anchored at the filesystem root or your home directory, or a
-helper grant broader than git-paw's own entry for that helper.
+helper grant — at its package path or at its `.git-paw/scripts/` compatibility
+path — broader than git-paw's own entry for that helper.
 
 Entries are abbreviated to the tool name and the first two words of the
-specifier, each capped in length. That bounds the common way a secret ends up
+specifier, each capped in length (a bundled helper path is always printed
+whole, however long). That bounds the common way a secret ends up
 in a rule — a long URL carrying a token — but it is a mitigation, not a
 guarantee: a short rule that is itself a secret cannot be told apart from a
 short rule that is not, so treat doctor output as you would the settings file
@@ -184,8 +196,8 @@ either holds one of exactly three things:
 | Residue | Example | Why it matters |
 |---|---|---|
 | A `permissions.allow` entry granting `curl` with any arguments | `Bash(curl *)`, `Bash(curl:*)`, `Bash(curl*)` | an unrestricted network client |
-| A `permissions.allow` entry naming a helper script with a keystroke or verdict subcommand | `Bash(.git-paw/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/scripts/sweep.sh *)` | it lets an agent session approve its own permission prompts, or publish a supervisor verdict, without a prompt |
-| A `permissions.allow` entry naming the pass-through fetch subcommand | `Bash(.git-paw/scripts/docs-fetch.sh get *)` | it passes an arbitrary URL through, so a session can read any file it names or send repository content to any host |
+| A `permissions.allow` entry naming a helper script with a keystroke or verdict subcommand | `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)` | it lets an agent session approve its own permission prompts, or publish a supervisor verdict, without a prompt |
+| A `permissions.allow` entry naming the pass-through fetch subcommand | `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh get *)`, `Bash(.git-paw/scripts/docs-fetch.sh get *)` | it passes an arbitrary URL through, so a session can read any file it names or send repository content to any host |
 | A `permissions.allow` entry naming any other subcommand the grant table withholds | `Bash(.git-paw/scripts/sweep.sh classify *)` | a helper subcommand the grant table deliberately withholds from the allowlist item |
 | A top-level `allowed_bash_prefixes` key | — | the inert seed git-paw wrote before v0.16.0; it grants nothing in the current CLI and is pure leftover |
 
@@ -194,8 +206,9 @@ reaches, and a rule reaching several — a whole-script wildcard reaches all of
 them — is reported by the gravest.
 
 The helper rules are matched by the helper's name wherever it appears in the
-specifier, so a relative, absolute or interpreter-prefixed path is caught
-alike. A wildcard is matched in or across the subcommand position: both
+specifier, so the package path (`.git-paw/skills/<package>/scripts/…`), the
+compatibility path (`.git-paw/scripts/…`), an absolute or an
+interpreter-prefixed path are caught alike. A wildcard is matched in or across the subcommand position: both
 `Bash(.git-paw/scripts/sweep.sh *)` and `Bash(.git-paw/scripts/sweep.sh ap*)`
 reach `approve`. Two things are deliberately **not** residue: a specific loopback rule
 such as `Bash(curl -s http://127.0.0.1:9119/status)`, which names one

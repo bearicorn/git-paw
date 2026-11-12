@@ -16,7 +16,7 @@ can cover every call, and the behaviour stays deterministic.
 ## What the agent gets
 
 When the docs-fetch skill is rendered into an agent's instructions, the agent
-is told to reach for the helper — `.git-paw/scripts/docs-fetch.sh` — whenever a
+is told to reach for the helper — `.git-paw/skills/docs-fetch/scripts/docs-fetch.sh` — whenever a
 git-paw fact is unclear (a subcommand's behaviour, a config field, a
 coordination or governance convention, a workflow). Documentation is fetched
 live and only when asked; none of it is embedded in the binary or injected
@@ -34,7 +34,7 @@ and per-page anchors).
 best match the query, each as a title, absolute URL, and one-line summary:
 
 ```bash
-.git-paw/scripts/docs-fetch.sh find "worktree placement"
+.git-paw/skills/docs-fetch/scripts/docs-fetch.sh find "worktree placement"
 ```
 
 **`get <page-or-url> [anchor]`** — fetch a page (by the URL or path from
@@ -42,8 +42,8 @@ best match the query, each as a title, absolute URL, and one-line summary:
 the output to just that section instead of the whole page:
 
 ```bash
-.git-paw/scripts/docs-fetch.sh get user-guide/worktree-placement.html
-.git-paw/scripts/docs-fetch.sh get user-guide/worktree-placement.html child-vs-sibling
+.git-paw/skills/docs-fetch/scripts/docs-fetch.sh get user-guide/worktree-placement.html
+.git-paw/skills/docs-fetch/scripts/docs-fetch.sh get user-guide/worktree-placement.html child-vs-sibling
 ```
 
 ## Configurable docs source
@@ -71,11 +71,13 @@ without the docs** in that case rather than block or retry in a loop.
 
 ## Least-privilege install
 
-`git paw init` installs `docs-fetch.sh` into `.git-paw/scripts/` alongside
-`broker.sh`, `sweep.sh`, and the shared `_paw_common.sh` preamble they source.
+`git paw init` installs `docs-fetch.sh` in the `docs-fetch` package,
+`.git-paw/skills/docs-fetch/scripts/`, beside the shared `_paw_common.sh`
+preamble it sources (with a deprecated compatibility copy under
+`.git-paw/scripts/`).
 Nothing is seeded into the agent CLI's settings file, and git-paw approves no
 prompt for it. The point of the stable path is that **you** can write one
-permission rule naming `.git-paw/scripts/docs-fetch.sh` — invoked directly or
+permission rule naming `.git-paw/skills/docs-fetch/scripts/docs-fetch.sh` — invoked directly or
 as `bash <path>` / `sh <path>` — instead of a broad `curl` wildcard. That one
 by-path rule covers every subcommand, so an agent consults the docs without any
 wildcard network permission. Without such a rule the helper simply prompts like

@@ -158,13 +158,10 @@ pub(crate) struct AttachContext<'a> {
     pub(crate) agent_cli: &'a str,
     /// Effective approval level the pane command's flags are resolved for.
     pub(crate) approval: &'a config::ApprovalLevel,
-    /// Pre-resolved coordination skill template (`None` when broker disabled).
-    pub(crate) coordination_template: Option<&'a crate::skills::SkillTemplate>,
-    /// Pre-resolved docs-fetch skill template (`None` unless `docs_base_url` is
-    /// explicitly configured). Gated on explicit config so a consumer that has
-    /// not pointed git-paw at their own docs never has the skill (which defaults
-    /// to git-paw's site) injected into their agents.
-    pub(crate) docs_fetch_template: Option<&'a crate::skills::SkillTemplate>,
+    /// The worktree package selection with resolved templates
+    /// ([`crate::skills::resolve_worktree_packages`]): provisioned into the
+    /// worktree and injected into its managed block alike.
+    pub(crate) packages: &'a [crate::skills::ResolvedPackage],
     /// Gate-command substitutions for skill rendering.
     pub(crate) gate_commands: &'a crate::skills::GateCommands<'a>,
     /// Distinct spec backends in the session (for `{{SPEC_PATH_DOCTRINE}}`).
@@ -264,38 +261,23 @@ pub(crate) fn attach_agent(
         out.line(&format!("  {branch}: {summary}"));
     }
 
-    // Provision the bundled helper scripts the agent's boot block invokes into
-    // this worktree's `.git-paw/scripts/` (idempotent, executable). A fresh
-    // worktree checkout has no `.git-paw/scripts/` (it is gitignored), so
-    // without this the agent's relative `.git-paw/scripts/broker.sh` call fails
-    // until it hand-copies from `assets/`. Sourced from the same embedded
-    // assets `git paw init` uses so the worktree's helper matches the running
-    // binary's version. `broker.sh` when the broker is enabled; `docs-fetch.sh`
-    // when `docs_base_url` is configured (the same gate as the docs-fetch skill
-    // injection — `ctx.docs_fetch_template` is `Some` iff it is configured).
-    crate::init::provision_worktree_helpers(
-        &wt.path,
-        ctx.broker_config.enabled,
-        ctx.docs_fetch_template.is_some(),
-    )?;
-
-    let render_tmpl = |tmpl: &crate::skills::SkillTemplate| {
-        crate::skills::render(
-            tmpl,
-            branch,
-            &ctx.broker_config.url(),
-            ctx.project,
-            ctx.gate_commands,
-            ctx.session_backends,
-        )
+    // Provision the selected packages — the helper the agent's boot block
+    // invokes included — into this worktree's `.git-paw/skills/` (with the
+    // `.git-paw/scripts/` compatibility copies), rendered for this agent and
+    // sourced from the binary's embedded registry, then inject the same
+    // packages' skill text into the managed block. A fresh worktree checkout
+    // has none (the directories are gitignored).
+    let broker_url = ctx.broker_config.url();
+    let render_inputs = crate::skills::RenderInputs {
+        branch,
+        root: false,
+        broker_url: &broker_url,
+        project: ctx.project,
+        gates: *ctx.gate_commands,
+        backends: ctx.session_backends,
     };
-    // Combine the coordination and docs-fetch skills into one managed block.
-    // Either may be absent (coordination when broker is off; docs-fetch unless
-    // `docs_base_url` is configured); the block carries whichever are present.
-    let rendered_skill = crate::skills::combine_agent_skills(
-        ctx.coordination_template.map(render_tmpl),
-        ctx.docs_fetch_template.map(render_tmpl),
-    );
+    crate::init::provision_worktree_helpers(&wt.path, ctx.packages, &render_inputs)?;
+    let rendered_skill = crate::skills::render_worktree_skills(ctx.packages, &render_inputs);
 
     let spec_content = spec_entry.map(|s| s.prompt.clone());
     let owned_files = spec_entry.and_then(|s| s.owned_files.clone());
@@ -306,6 +288,7 @@ pub(crate) fn attach_agent(
         spec_content,
         owned_files,
         skill_content: rendered_skill,
+        skill_packages: ctx.packages.iter().map(|r| r.package).collect(),
         inter_agent_rules: ctx
             .inter_agent_rules_peers
             .map(|peers| crate::agents::build_inter_agent_rules(branch, peers)),
@@ -1109,7 +1092,7 @@ mod tests {
         let helper_form = crate::skills::build_boot_block("supervisor", broker_url, false);
         assert!(
             helper_form
-                .contains(".git-paw/scripts/broker.sh --agent agent-supervisor status booting"),
+                .contains(".git-paw/skills/coordination/scripts/broker.sh --agent agent-supervisor status booting"),
             "a branch named supervisor boots under its slugified id; got:\n{helper_form}"
         );
     }
@@ -1336,8 +1319,7 @@ mod permission_seeding_removed_tests {
             broker_config,
             agent_cli: "claude",
             approval: &ApprovalLevel::Manual,
-            coordination_template: None,
-            docs_fetch_template: None,
+            packages: &[],
             gate_commands,
             session_backends: &[],
             inter_agent_rules_peers: None,
@@ -1578,8 +1560,7 @@ mod permission_seeding_removed_tests {
             broker_config: &broker_config,
             agent_cli: "codex",
             approval: &ApprovalLevel::Manual,
-            coordination_template: None,
-            docs_fetch_template: None,
+            packages: &[],
             gate_commands: &gate_commands,
             session_backends: &[],
             inter_agent_rules_peers: None,
@@ -1621,8 +1602,7 @@ mod permission_seeding_removed_tests {
             broker_config: &broker_config,
             agent_cli: "claude",
             approval: &ApprovalLevel::FullAuto,
-            coordination_template: None,
-            docs_fetch_template: None,
+            packages: &[],
             gate_commands: &gate_commands,
             session_backends: &[],
             inter_agent_rules_peers: None,

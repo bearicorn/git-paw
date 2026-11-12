@@ -16,7 +16,7 @@ phone / browser ──(the agent CLI's own remote control)──▶ your driving
 
 - **The driving session runs on your local machine**, at the repository root and outside tmux. git-paw's MCP server is attached to it, and it has loaded the orchestrator skill (`.git-paw/skills/orchestrator/SKILL.md`) and the session context (`.git-paw/AGENTS.local.md`).
 - **You remote-control that session** through the agent CLI's native remote-control feature. Your phone is only a view into the local session. The session's files, MCP servers and tools stay on the machine.
-- **The driving session drives git-paw** the way it does when you sit at the keyboard. It uses the bundled helpers (`.git-paw/scripts/sweep.sh`, `broker.sh`) and the MCP tools: `wait_for_events` and `get_session_status` to follow the run, and, in the root session, `start_session`, `pause_session`, `stop_session`, `purge_session`, `publish_verified` and `publish_feedback`.
+- **The driving session drives git-paw** the way it does when you sit at the keyboard. It uses the bundled helpers (`.git-paw/skills/orchestrator/scripts/sweep.sh`, `broker.sh`) and the MCP tools: `wait_for_events` and `get_session_status` to follow the run, and, in the root session, `start_session`, `pause_session`, `stop_session`, `purge_session`, `publish_verified` and `publish_feedback`.
 
 **git-paw ships no bridge, tunnel or network transport of its own.** The remote channel belongs to the agent CLI vendor, and git-paw opens no port for it. Pair the driving session with `git paw start --unattended` so the coding agents keep moving while you are away. Each permission prompt the drive loop escalates reaches you through the driving session, and you answer it from the phone.
 

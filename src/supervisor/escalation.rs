@@ -161,7 +161,7 @@ pub fn render_context(handoff: &HandOff, inputs: ContextInputs<'_>) -> String {
         .replace("<<<", "<");
     // `{{BODY}}` is substituted last: it quotes a worker's text, which must
     // not be able to inject a placeholder the later passes would expand.
-    template
+    crate::skills::substitute_helper_paths(template)
         .replace("{{KIND_RULES}}", kind_rules)
         .replace("{{KIND}}", handoff.kind.label())
         .replace("{{AGENT_ID}}", &handoff.agent_id)

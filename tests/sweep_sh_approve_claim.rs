@@ -133,6 +133,11 @@ impl Repo {
 
     /// Runs `sweep.sh approve <pane>` with `capture` behind the fake tmux.
     fn approve(&self, capture: &str, pane: &str) -> ApproveRun {
+        self.approve_in(self.dir.path(), capture, pane)
+    }
+
+    /// [`Self::approve`] with `cwd` as the current directory.
+    fn approve_in(&self, cwd: &Path, capture: &str, pane: &str) -> ApproveRun {
         let capture_file = self.dir.path().join("capture.txt");
         fs::write(&capture_file, capture).expect("write capture fixture");
         let log_file = self.dir.path().join("tmux.log");
@@ -153,7 +158,7 @@ impl Repo {
         let out = script_cmd::bash()
             .arg(&self.sweep)
             .args(["approve", pane])
-            .current_dir(self.dir.path())
+            .current_dir(cwd)
             .env("PATH", path)
             .env("FAKE_TMUX_LOG", &log_file)
             .env("FAKE_TMUX_CAPTURE", &capture_file)
@@ -225,6 +230,39 @@ fn a_claim_taken_at_the_rust_path_blocks_the_shell_approver() {
         claim.exists(),
         "the helper must leave the other approver's claim in place"
     );
+}
+
+/// broker-agent-helper scenario "The approve claim is shared between the root
+/// and a worktree" (DF-54): a claim taken at the repository root is seen by
+/// `sweep.sh approve` run with a linked worktree as the current directory, so
+/// the claim resolves under the main checkout, not the worktree.
+#[test]
+fn the_approve_claim_is_shared_between_the_root_and_a_worktree() {
+    let repo = Repo::new();
+    let worktree = repo.dir.path().join("wt-feat-x");
+    let st = StdCommand::new("git")
+        .current_dir(repo.dir.path())
+        .args(["worktree", "add", "-q", "-b", "feat/x"])
+        .arg(&worktree)
+        .status()
+        .expect("git worktree add");
+    assert!(st.success());
+    let claim = repo.plant_claim(2);
+
+    let run = repo.approve_in(&worktree, LIVE_PROMPT, "2");
+
+    assert!(
+        run.sent_keys().is_empty(),
+        "the root's claim must hold for a worktree-run approver, log: {:?}",
+        run.tmux_log
+    );
+    assert!(
+        run.output.contains(&claim.display().to_string()),
+        "the helper must report the root's claim path ({}), got: {}",
+        claim.display(),
+        run.output
+    );
+    assert!(!worktree.join(".git-paw/tmp").exists());
 }
 
 /// The complement: with no claim held the same prompt IS approved, and the

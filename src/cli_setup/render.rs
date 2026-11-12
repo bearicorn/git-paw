@@ -222,6 +222,16 @@ mod tests {
         }
     }
 
+    /// The `claude` row as it reads once the fact gate has passed for the
+    /// package-path entries — the shape a verified plan renders.
+    fn verified_row() -> CliSetupFacts {
+        CliSetupFacts {
+            verified: true,
+            verified_with: "Claude Code (test fixture)",
+            ..CLAUDE
+        }
+    }
+
     fn unverified_row() -> CliSetupFacts {
         CliSetupFacts {
             verified: false,
@@ -251,24 +261,27 @@ mod tests {
     const GOLDEN: &str = "\
 Plan for `git paw setup-cli claude --allowlist`
 
-These facts were verified against Claude Code 2.1.220, 2026-10-15.
+These facts were verified against Claude Code (test fixture).
 
 create  /repo/.claude/settings.local.json
-    permissions.allow += Bash(.git-paw/scripts/broker.sh *)
-    permissions.allow += Bash(.git-paw/scripts/docs-fetch.sh find *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh snapshot *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh capture *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh status *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh worktrees-status *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh inbox *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh detect-stuck *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh stuck-eval *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh status-publish *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh learn *)
-    permissions.allow += Bash(.git-paw/scripts/sweep.sh events *)
+    permissions.allow += Bash(.git-paw/skills/coordination/scripts/broker.sh *)
+    permissions.allow += Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh find *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh snapshot *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh capture *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh status *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh worktrees-status *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh inbox *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh detect-stuck *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh stuck-eval *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh status-publish *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh learn *)
+    permissions.allow += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh events *)
+    permissions.ask += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)
+    permissions.ask += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh tell *)
     permissions.ask += Bash(.git-paw/scripts/sweep.sh approve *)
     permissions.ask += Bash(.git-paw/scripts/sweep.sh tell *)
     permissions.ask += Edit(**/.git-paw/config.toml)
+    permissions.deny += Edit(**/.git-paw/skills/**)
     permissions.deny += Edit(**/.git-paw/scripts/**)
 
 create  /repo/.git/info/exclude
@@ -279,7 +292,7 @@ record  /repo/.git/git-paw/cli-setup.json
 
     #[test]
     fn a_verified_plan_renders_exactly_the_golden() {
-        assert_eq!(rendered(&CLAUDE, &snapshots()), GOLDEN);
+        assert_eq!(rendered(&verified_row(), &snapshots()), GOLDEN);
     }
 
     // -----------------------------------------------------------------------
@@ -323,7 +336,9 @@ record  /repo/.git/git-paw/cli-setup.json
     fn it_lists_each_entry_with_its_key_path_and_value() {
         let out = rendered(&CLAUDE, &snapshots());
         assert!(
-            out.contains("permissions.allow += Bash(.git-paw/scripts/broker.sh *)"),
+            out.contains(
+                "permissions.allow += Bash(.git-paw/skills/coordination/scripts/broker.sh *)"
+            ),
             "{out}"
         );
         assert!(
@@ -331,7 +346,13 @@ record  /repo/.git/git-paw/cli-setup.json
             "{out}"
         );
         assert!(
-            out.contains("permissions.ask += Bash(.git-paw/scripts/sweep.sh approve *)"),
+            out.contains("permissions.deny += Edit(**/.git-paw/skills/**)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "permissions.ask += Bash(.git-paw/skills/orchestrator/scripts/sweep.sh approve *)"
+            ),
             "{out}"
         );
     }
@@ -373,9 +394,9 @@ record  /repo/.git/git-paw/cli-setup.json
 
     #[test]
     fn a_verified_plan_says_what_it_was_verified_against() {
-        let out = rendered(&CLAUDE, &snapshots());
+        let out = rendered(&verified_row(), &snapshots());
         assert!(out.contains("verified against"), "{out}");
-        assert!(out.contains("2.1.220"), "{out}");
+        assert!(out.contains("(test fixture)"), "{out}");
     }
 
     #[test]
@@ -388,7 +409,9 @@ record  /repo/.git/git-paw/cli-setup.json
         );
         // The plan itself is still shown — that is the point of plan-only.
         assert!(
-            out.contains("permissions.allow += Bash(.git-paw/scripts/broker.sh *)"),
+            out.contains(
+                "permissions.allow += Bash(.git-paw/skills/coordination/scripts/broker.sh *)"
+            ),
             "{out}"
         );
         assert!(out.contains("/repo/.claude/settings.local.json"), "{out}");

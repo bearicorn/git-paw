@@ -247,12 +247,11 @@ pub fn add(
         broker_enabled: broker_config.enabled,
         docs_base_url_configured: config.docs_base_url.is_some(),
     };
-    let coordination_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "coordination", &repo_root)?;
-    // Gated on explicit `docs_base_url` (see supervisor) so an added agent
-    // is byte-identical to a start-time one.
-    let docs_fetch_template =
-        crate::skills::resolve_for_worktree(worktree_inputs, "docs-fetch", &repo_root)?;
+    // Resolve the worktree package selection once: the same packages are
+    // provisioned into each worktree and injected into its managed block.
+    // `docs-fetch` is selected only for an explicitly-configured
+    // `docs_base_url`, keeping the exported skill agnostic by default.
+    let worktree_packages = crate::skills::resolve_worktree_packages(worktree_inputs, &repo_root)?;
     let session_backends: Vec<crate::specs::SpecBackendKind> = spec_entry
         .as_ref()
         .map(|s| vec![s.backend])
@@ -274,8 +273,7 @@ pub fn add(
         broker_config: &broker_config,
         agent_cli: &agent_cli,
         approval,
-        coordination_template: coordination_template.as_ref(),
-        docs_fetch_template: docs_fetch_template.as_ref(),
+        packages: &worktree_packages,
         gate_commands: &gate_commands,
         session_backends: &session_backends,
         inter_agent_rules_peers: Some(&all_branches),

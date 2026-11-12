@@ -220,7 +220,9 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
             // The boot block's first section is REGISTER and instructs the
             // agent to publish through the bundled broker.sh helper (which
             // replaced the inline curl + pre-expanded URL).
-            if buffer.contains("REGISTER") && buffer.contains(".git-paw/scripts/broker.sh") {
+            if buffer.contains("REGISTER")
+                && buffer.contains(".git-paw/skills/coordination/scripts/broker.sh")
+            {
                 break;
             }
         }
@@ -244,7 +246,7 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         "boot block REGISTER section must appear in the agent pane buffer; got:\n{buffer}"
     );
     assert!(
-        buffer.contains(".git-paw/scripts/broker.sh"),
+        buffer.contains(".git-paw/skills/coordination/scripts/broker.sh"),
         "broker.sh helper invocation must appear in the agent pane buffer; got:\n{buffer}"
     );
     assert!(

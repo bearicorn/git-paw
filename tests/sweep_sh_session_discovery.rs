@@ -1,4 +1,4 @@
-//! Asserts that `<repo>/.git-paw/scripts/sweep.sh` discovers the session
+//! Asserts that `<repo>/.git-paw/skills/orchestrator/scripts/sweep.sh` discovers the session
 //! name from `<repo>/.git-paw/sessions/*.json` instead of hardcoding
 //! `paw-git-paw`. Spawns a tiny localhost HTTP stub on a free port,
 //! configures the script via the broker URL discovery path, and verifies
@@ -138,8 +138,10 @@ fn sweep_sh_discovers_session_name_and_broker_port() {
     let config = format!("[broker]\nenabled = true\nport = {port}\n");
     fs::write(tmp.path().join(".git-paw/config.toml"), config).expect("write config.toml");
 
-    // Run `.git-paw/scripts/sweep.sh status` and inspect stdout.
-    let sweep = tmp.path().join(".git-paw/scripts/sweep.sh");
+    // Run the package-path `sweep.sh status` and inspect stdout.
+    let sweep = tmp
+        .path()
+        .join(".git-paw/skills/orchestrator/scripts/sweep.sh");
     let output = script_cmd::bash()
         .arg(&sweep)
         .arg("status")
@@ -167,5 +169,82 @@ fn sweep_sh_discovers_session_name_and_broker_port() {
     assert!(
         stdout.contains("phantoms (use --all to show):"),
         "phantoms summary line should mention the filter; stdout:\n{stdout}"
+    );
+}
+
+// broker-agent-helper / Scenario: sweep.sh run inside an agent's worktree
+// finds the session (DF-54) — the discovery file lives in the main checkout
+// and the linked worktree has no `.git-paw/sessions/`.
+#[test]
+#[serial]
+fn sweep_sh_run_inside_an_agents_worktree_finds_the_session() {
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let init_out = cmd()
+        .current_dir(&repo)
+        .arg("init")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .timeout(Duration::from_secs(10))
+        .output()
+        .expect("git paw init");
+    assert!(init_out.status.success());
+
+    let worktree = tmp.path().join("wt-feat-x");
+    let st = StdCommand::new("git")
+        .current_dir(&repo)
+        .args(["worktree", "add", "-q", "-b", "feat/x"])
+        .arg(&worktree)
+        .status()
+        .expect("git worktree add");
+    assert!(st.success());
+    assert!(!worktree.join(".git-paw/sessions").exists());
+
+    let sessions_dir = repo.join(".git-paw/sessions");
+    fs::create_dir_all(&sessions_dir).expect("mkdir sessions");
+    let session_json = serde_json::json!({
+        "session_name": "paw-myproject",
+        "agents": [{
+            "branch_id": "feat-x",
+            "worktree_path": worktree.to_string_lossy(),
+            "cli": "claude",
+            "pane_index": 1,
+        }],
+    });
+    fs::write(
+        sessions_dir.join("paw-myproject.json"),
+        serde_json::to_string_pretty(&session_json).unwrap(),
+    )
+    .expect("write session.json");
+
+    let body = r#"{"agents":[{"agent_id":"feat-x","status":"working","last_seen_seconds":1}]}"#;
+    let (port, stop) = spawn_status_stub(body);
+    let output = script_cmd::bash()
+        .arg(repo.join(".git-paw/skills/orchestrator/scripts/sweep.sh"))
+        .arg("status")
+        .current_dir(&worktree)
+        .env("GIT_PAW_BROKER_URL", format!("http://127.0.0.1:{port}"))
+        .env_remove("PAW_SESSION")
+        .env_remove("PAW_BROKER")
+        .output()
+        .expect("run sweep.sh status");
+    stop.store(true, Ordering::SeqCst);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "sweep.sh status should succeed from a worktree; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no session found"),
+        "the session must be resolved from the main checkout; stderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("feat-x"),
+        "roster resolved; stdout:\n{stdout}"
     );
 }

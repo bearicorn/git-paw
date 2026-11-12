@@ -1248,3 +1248,50 @@ fn poll_prints_the_next_cursor() {
     );
     drop(handle);
 }
+
+/// broker-agent-helper scenario "broker.sh still identifies its agent by the
+/// current worktree" (DF-54): session state resolves from the main checkout,
+/// but the agent id still comes from the worktree's own branch.
+#[test]
+#[serial]
+fn broker_sh_still_identifies_its_agent_by_the_current_worktree() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let worktree = repo.path().join("wt-feat-x");
+    let st = StdCommand::new("git")
+        .current_dir(repo.path())
+        .args(["worktree", "add", "-q", "-b", "feat/x"])
+        .arg(&worktree)
+        .status()
+        .expect("git worktree add");
+    assert!(st.success());
+    let scripts = worktree.join(".git-paw/skills/coordination/scripts");
+    packages::install_package("coordination", &scripts);
+    let (handle, port) = spawn_broker();
+
+    let out = script_cmd::bash()
+        .arg(scripts.join("broker.sh"))
+        .args(["status", "x"])
+        .current_dir(&worktree)
+        .env("GIT_PAW_BROKER_URL", format!("http://127.0.0.1:{port}"))
+        .env_remove("TMUX")
+        .output()
+        .expect("run broker.sh");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr:\n{stderr}");
+
+    let log = fetch_log(port);
+    let parsed: serde_json::Value = serde_json::from_str(&log).expect("parse /log body");
+    let status = parsed["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["message"]["type"] == "agent.status")
+        .unwrap_or_else(|| panic!("no agent.status reached the broker; log:\n{log}"));
+    assert_eq!(
+        status["message"]["agent_id"], "feat-x",
+        "the agent id comes from the worktree's branch; log:\n{log}"
+    );
+
+    drop(handle);
+}

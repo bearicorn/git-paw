@@ -45,9 +45,10 @@ set -u
 #
 # The project root, `.git-paw` paths, Python 3 interpreter and
 # `discover_broker_url` all come from the shared preamble `_paw_common.sh`,
-# installed as a sibling of this script by `git paw init`. Resolving it relative
-# to this file's own location works from both the bundled `assets/scripts/` tree
-# and the deployed `.git-paw/scripts/` directory.
+# installed beside this script — in its package's `.git-paw/skills/<package>/scripts/`
+# and in the compatibility copy `.git-paw/scripts/` — by `git paw init` and
+# `git paw start`. Resolving it relative to this file's own location works from
+# either installed directory.
 # ---------------------------------------------------------------------------
 
 PAW_SCRIPT_NAME="sweep.sh"
@@ -58,7 +59,7 @@ if [[ ! -r "${_PAW_COMMON}" ]] || ! . "${_PAW_COMMON}"; then
   exit 3
 fi
 
-SESSIONS_DIR="${PAW_DIR}/sessions"
+SESSIONS_DIR="${MAIN_ROOT}/.git-paw/sessions"
 
 # Discover the active session name.
 #
@@ -250,7 +251,7 @@ STUCK_DEDUP_WINDOW_SECONDS=300
 # _paw_common.sh.
 STUCK_MARKERS_REGEX=$(discover_prompt_profile_field approval_markers \
   'Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]')
-STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
+STUCK_DEDUP_FILE="${MAIN_ROOT}/.git-paw/.sweep-stuck-dedup"
 
 # Live-prompt structural markers (approve-send gate). Textual markers of a
 # LIVE permission prompt, matched case-insensitively; numbered option lines
@@ -434,7 +435,7 @@ use_pane_profile() {
 }
 # No-progress heartbeat snapshot: one line per agent,
 # `agent<TAB>checkbox_count<TAB>commit_count<TAB>timestamp`.
-SWEEP_PROGRESS_FILE="${PAW_DIR}/.sweep-progress"
+SWEEP_PROGRESS_FILE="${MAIN_ROOT}/.git-paw/.sweep-progress"
 
 # Detection thresholds/windows, read from [supervisor] config with documented
 # defaults (no-progress ~25 min, context-bloat 250k tokens, blocked-on-
@@ -641,9 +642,10 @@ cmd_capture() {
 # hard-killed approver and may be stolen, bounding the wedge to one TTL.
 CLAIM_TTL_SECONDS=10
 
-# Claim file for a pane: <repo>/.git-paw/tmp/approve-pane-<N>.claim
+# Claim file for a pane: <main checkout>/.git-paw/tmp/approve-pane-<N>.claim —
+# the path the binary claims at, so the exclusion spans a worktree-run helper.
 claim_path() {
-  printf '%s\n' "${PROJECT_ROOT}/.git-paw/tmp/approve-pane-${1}.claim"
+  printf '%s\n' "${MAIN_ROOT}/.git-paw/tmp/approve-pane-${1}.claim"
 }
 
 # Succeeds when the claim file exists and has gone untouched for longer than

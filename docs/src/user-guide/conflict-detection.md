@@ -112,7 +112,7 @@ declared regions for the file describe a materially different overlap.
 record it so the detector stops asking:
 
 ```bash
-.git-paw/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> "optional note"
+.git-paw/skills/orchestrator/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> "optional note"
 ```
 
 This publishes a `[conflict-ack]`-tagged `agent.feedback` from `supervisor`

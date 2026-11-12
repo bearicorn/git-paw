@@ -3,9 +3,13 @@
 //! all of a worker's broker traffic. Each test names the `skill-agent`
 //! scenario it covers.
 
+/// The raw coordination template with the helper placeholders rendered to
+/// their package paths, as every renderer does (`skill-packages`
+/// *Requirements naming the legacy deployed helper path are satisfied by the
+/// package path*).
 fn coordination_skill() -> String {
     git_paw::skills::bundled_package("coordination")
-        .map(|p| p.skill_md.content.to_string())
+        .map(|p| git_paw::skills::substitute_helper_paths(p.skill_md.content))
         .expect("coordination.md is at the expected path")
 }
 
@@ -46,8 +50,11 @@ fn each_broker_verb_has_a_helper_example() {
     for verb in [
         "intent", "question", "blocked", "artifact", "status", "poll",
     ] {
-        let call = format!(".git-paw/scripts/broker.sh --agent {{{{BRANCH_ID}}}} {verb} ");
-        let bare_poll = ".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll\n";
+        let call = format!(
+            ".git-paw/skills/coordination/scripts/broker.sh --agent {{{{BRANCH_ID}}}} {verb} "
+        );
+        let bare_poll =
+            ".git-paw/skills/coordination/scripts/broker.sh --agent {{BRANCH_ID}} poll\n";
         assert!(
             skill.contains(&call) || (verb == "poll" && skill.contains(bare_poll)),
             "coordination skill should show a `broker.sh {verb}` example"
@@ -61,7 +68,7 @@ fn coordination_skill_asks_for_bare_helper_calls() {
     let skill = coordination_skill();
     let bare = section(&skill, "### Run dev commands bare");
     assert!(
-        bare.contains("`.git-paw/scripts/broker.sh` call"),
+        bare.contains("`.git-paw/skills/coordination/scripts/broker.sh` call"),
         "the bare-commands section should name the helper calls"
     );
     let lowered = bare.to_lowercase();
@@ -127,7 +134,9 @@ fn activity_and_region_examples_use_the_helper() {
 #[test]
 fn polling_reference_uses_the_helper_cursor() {
     let skill = coordination_skill();
-    assert!(skill.contains(".git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll"));
+    assert!(
+        skill.contains(".git-paw/skills/coordination/scripts/broker.sh --agent {{BRANCH_ID}} poll")
+    );
     assert!(!skill.contains("{{GIT_PAW_BROKER_URL}}/messages/"));
     assert!(
         skill.contains("`last_seq: <n>`")

@@ -224,15 +224,7 @@ fn every_non_ok_check_carries_a_remedy() {
                 }],
             }],
         },
-        bundled_scripts: BundledScriptsProbe {
-            scripts: vec![ScriptProbe {
-                name: "sweep.sh",
-                present: false,
-                executable: false,
-                matches_embedded: false,
-            }],
-            python3: None,
-        },
+        bundled_scripts: failing_bundled_scripts(),
         skill_sources: broken_skill_sources(),
         broker: BrokerProbe {
             enabled: true,
@@ -996,14 +988,57 @@ fn only_the_openspec_format_instructs_a_workflow_command() {
 
 // -- Bundled scripts ------------------------------------------------------
 
-#[test]
-fn bundled_script_check_grades_each_on_disk_state() {
-    let healthy = ScriptProbe {
+/// A probe with every kind of bundled-scripts finding: a stale root skill, a
+/// missing helper and no Python 3.
+fn failing_bundled_scripts() -> BundledScriptsProbe {
+    let mut package = package_with(ScriptProbe {
+        present: false,
+        executable: false,
+        matches_embedded: false,
+        ..healthy_script()
+    });
+    package.stale = vec![".git-paw/skills/orchestrator/SKILL.md".into()];
+    BundledScriptsProbe {
+        python3: None,
+        ..initialised(vec![package], Vec::new())
+    }
+}
+
+fn healthy_script() -> ScriptProbe {
+    ScriptProbe {
         name: "sweep.sh",
+        path: ".git-paw/skills/orchestrator/scripts/sweep.sh".into(),
         present: true,
         executable: true,
         matches_embedded: true,
-    };
+    }
+}
+
+fn package_with(script: ScriptProbe) -> PackageProbe {
+    PackageProbe {
+        name: "orchestrator",
+        skill_md_present: true,
+        stale: Vec::new(),
+        scripts: vec![script],
+    }
+}
+
+fn initialised(
+    packages: Vec<PackageProbe>,
+    compatibility: Vec<ScriptProbe>,
+) -> BundledScriptsProbe {
+    BundledScriptsProbe {
+        initialised: true,
+        packages,
+        compatibility,
+        python3: Some("Python 3.12.4 (python3)".into()),
+    }
+}
+
+// Scenarios: A bundled script is missing / A bundled script is stale.
+#[test]
+fn bundled_script_check_grades_each_on_disk_state() {
+    let healthy = healthy_script();
     for (probe, expected) in [
         (healthy.clone(), CheckStatus::Ok),
         (
@@ -1030,13 +1065,12 @@ fn bundled_script_check_grades_each_on_disk_state() {
             CheckStatus::Warn,
         ),
     ] {
-        let checks = check_bundled_scripts(&BundledScriptsProbe {
-            scripts: vec![probe.clone()],
-            python3: Some("Python 3.12.4 (python3)".into()),
-        });
+        let checks =
+            check_bundled_scripts(&initialised(vec![package_with(probe.clone())], Vec::new()));
         let check = named(&checks, "sweep.sh");
         assert_eq!(check.status, expected, "probe: {probe:?}");
         if expected != CheckStatus::Ok {
+            assert!(check.detail.contains(&probe.path), "{check:?}");
             let remedy = check.remedy.as_deref().unwrap_or_default();
             assert!(
                 remedy.contains("git paw init"),
@@ -1046,11 +1080,109 @@ fn bundled_script_check_grades_each_on_disk_state() {
     }
 }
 
+// Scenario: A package's SKILL.md is missing.
+#[test]
+fn a_missing_package_skill_md_fails_naming_the_package() {
+    let mut package = package_with(healthy_script());
+    package.name = "coordination";
+    package.skill_md_present = false;
+    let checks = check_bundled_scripts(&initialised(vec![package], Vec::new()));
+    let check = named(&checks, "coordination");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(
+        check
+            .detail
+            .contains(".git-paw/skills/coordination/SKILL.md")
+    );
+    assert!(
+        check
+            .remedy
+            .as_deref()
+            .unwrap_or_default()
+            .contains("git paw init")
+    );
+}
+
+// Scenario: A missing compatibility copy is a warning.
+#[test]
+fn a_missing_compatibility_copy_is_a_warning() {
+    let compat = ScriptProbe {
+        name: "broker.sh",
+        path: ".git-paw/scripts/broker.sh".into(),
+        present: false,
+        executable: false,
+        matches_embedded: false,
+    };
+    let checks = check_bundled_scripts(&initialised(
+        vec![package_with(healthy_script())],
+        vec![compat],
+    ));
+    let check = named(&checks, "broker.sh (compatibility copy)");
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        checks.iter().all(|c| c.status != CheckStatus::Fail),
+        "{checks:?}"
+    );
+}
+
+// Scenario: A root skill rendered before a config change is stale.
+#[test]
+fn a_stale_rendered_root_skill_warns_naming_start_or_init() {
+    let mut package = package_with(healthy_script());
+    package.stale = vec![".git-paw/skills/orchestrator/SKILL.md".into()];
+    let checks = check_bundled_scripts(&initialised(vec![package], Vec::new()));
+    let check = named(&checks, "orchestrator");
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.detail.contains("stale"), "{check:?}");
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(
+        remedy.contains("git paw start") && remedy.contains("git paw init"),
+        "{remedy}"
+    );
+}
+
+// Scenario: An uninitialised repository is reported once (PK-07).
+#[test]
+fn an_uninitialised_repository_is_reported_once() {
+    let mut probe = initialised(
+        vec![PackageProbe {
+            skill_md_present: false,
+            ..package_with(ScriptProbe {
+                present: false,
+                ..healthy_script()
+            })
+        }],
+        Vec::new(),
+    );
+    probe.initialised = false;
+    let checks = check_bundled_scripts(&probe);
+    let lines: Vec<&CheckResult> = checks.iter().filter(|c| c.name != "python3").collect();
+    assert_eq!(lines.len(), 1, "{checks:?}");
+    assert_eq!(lines[0].status, CheckStatus::Warn);
+    assert!(
+        lines[0].detail.contains("not initialised"),
+        "{:?}",
+        lines[0]
+    );
+    assert!(
+        lines[0]
+            .remedy
+            .as_deref()
+            .unwrap_or_default()
+            .contains("git paw init")
+    );
+    assert!(checks.iter().all(|c| c.status != CheckStatus::Fail));
+    assert!(
+        checks.iter().any(|c| c.name == "python3"),
+        "the python3 line is kept"
+    );
+}
+
 #[test]
 fn missing_python3_warns_rather_than_fails() {
     let checks = check_bundled_scripts(&BundledScriptsProbe {
-        scripts: Vec::new(),
         python3: None,
+        ..BundledScriptsProbe::default()
     });
     let check = named(&checks, "python3");
     assert_eq!(
@@ -1068,8 +1200,8 @@ fn missing_python3_warns_rather_than_fails() {
 #[test]
 fn present_python3_passes() {
     let checks = check_bundled_scripts(&BundledScriptsProbe {
-        scripts: Vec::new(),
         python3: Some("Python 3.12.4 (python3)".into()),
+        ..BundledScriptsProbe::default()
     });
     assert_eq!(named(&checks, "python3").status, CheckStatus::Ok);
 }

@@ -159,7 +159,7 @@ against an installed copy of it.
 
 | CLI | `--allowlist` | `--trust` | `--hooks` |
 |-----|---------------|-----------|-----------|
-| `claude` | Supported, **verified** against Claude Code 2.1.220 (2026-10-15) | Not supported | Not supported |
+| `claude` | Supported, **verified** against Claude Code 2.1.322 (2026-11-12) | Not supported | Not supported |
 | Every other CLI | Not supported | Not supported | Not supported |
 
 Nothing is withheld here as a judgement about those CLIs — their settings

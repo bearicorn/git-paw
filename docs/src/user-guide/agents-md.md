@@ -151,15 +151,23 @@ Each worktree's `.git-paw/AGENTS.local.md` sidecar includes:
     silently skipped.
   - **Owned files** list (from OpenSpec file-ownership declarations) when
     declared.
-  - **Boot block** that calls the bundled `.git-paw/scripts/broker.sh`
+  - A generated **`## Skills` index** of the skill packages provisioned into
+    the worktree (`coordination` when the broker is enabled, `docs-fetch` when
+    `docs_base_url` is set): each package's name, description, installed
+    `SKILL.md` path and helper path, e.g.
+    `.git-paw/skills/coordination/SKILL.md` and
+    `.git-paw/skills/coordination/scripts/broker.sh`. The skill bodies follow
+    it inline, so the sidecar stays self-sufficient. With no package
+    provisioned there is no index.
+  - **Boot block** that calls the bundled `.git-paw/skills/coordination/scripts/broker.sh`
     helper for the agent to self-report status, artifacts, blockers, and
-    questions. The helper (installed by `git paw init`, alongside the
-    supervisor's `sweep.sh`) discovers the broker URL and shapes the JSON, so
+    questions. The helper (the `coordination` package's, provisioned into the
+    worktree before the agent boots) discovers the broker URL and shapes the JSON, so
     the boot block carries no raw `curl` or broker URL. Nothing is seeded
     into the agent CLI's settings file, and git-paw answers no prompt on the
     agent's behalf. Whether the helper runs without prompting is the CLI's
     own decision; because it always lives at the stable path
-    `.git-paw/scripts/broker.sh`, one permission rule you write there covers
+    `.git-paw/skills/coordination/scripts/broker.sh`, one permission rule you write there covers
     every call instead of a broad `curl` rule — see
     [Coordination](./coordination.md#broker-helper).
 

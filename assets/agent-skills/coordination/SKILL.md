@@ -9,7 +9,7 @@ compatibility: git-paw v0.5.0+
 
 You are running inside a git-paw worktree as agent `{{BRANCH_ID}}`. Every broker
 publish and every inbox read goes through the bundled helper
-`.git-paw/scripts/broker.sh` — it finds the broker, shapes the JSON and checks the
+`{{BROKER_HELPER}}` — it finds the broker, shapes the JSON and checks the
 broker's answer, so you only pass simple arguments. The broker listens at
 `{{GIT_PAW_BROKER_URL}}`, but never hand-roll an HTTP request to it: a permission
 rule scoped to the helper's path covers all of your broker traffic, and anything
@@ -48,7 +48,7 @@ purpose) through the bundled helper, which shapes the `agent.status` payload
 internally so you never hand-roll the JSON:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status "<one-line what you are doing>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} status "<one-line what you are doing>"
 ```
 
 **A publish the broker rejects is loud.** Every `broker.sh` publish subcommand
@@ -84,7 +84,7 @@ task list.
 Pass it to the heartbeat with `--activity`, before the message:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status --activity "<what you are doing>" "<one-line message>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} status --activity "<what you are doing>" "<one-line message>"
 ```
 
 Without `--activity` the helper publishes no `activity` key at all, so the plain
@@ -159,7 +159,7 @@ keep observing and acting on whether a command succeeded or failed —
 just let the shell surface the status instead of appending an
 `echo "… $?"`.
 
-**The same holds for every `.git-paw/scripts/broker.sh` call.** Run it bare —
+**The same holds for every `{{BROKER_HELPER}}` call.** Run it bare —
 no appended `; echo "exit=$?"`, no `&& echo`, and no pipe into another
 command — so a permission rule that matches the helper's path prefix matches
 every call. The helper already exits non-zero, with the broker's error on
@@ -270,14 +270,14 @@ write — ask.** Publish `agent.question` describing the path and why the task
 seems to need it, then WAIT for the answer:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} question "task seems to require writing <path>, outside my worktree — proceed or rescope?"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} question "task seems to require writing <path>, outside my worktree — proceed or rescope?"
 ```
 
 **Do not re-ask the same question in a loop.** After publishing, poll your
 inbox and WAIT for an `agent.answer` addressed to you before acting:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll
 ```
 
 If no `agent.answer` has arrived yet, keep waiting — re-publishing the identical
@@ -303,7 +303,7 @@ structured. Then, before you touch any file:
    summary, and a TTL in seconds (default `900` = 15 minutes):
 
    ```bash
-   .git-paw/scripts/broker.sh --agent {{BRANCH_ID}} intent "wire AuthClient" "src/auth/<file>,src/auth/client/<file>" 900
+   {{BROKER_HELPER}} --agent {{BRANCH_ID}} intent "wire AuthClient" "src/auth/<file>,src/auth/client/<file>" 900
    ```
 
    The arguments are the summary, the comma-separated files, and the TTL in
@@ -312,7 +312,7 @@ structured. Then, before you touch any file:
 3. Poll your inbox **once** for warnings or overlapping peer intents:
 
    ```bash
-   .git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll
+   {{BROKER_HELPER}} --agent {{BRANCH_ID}} poll
    ```
 
 4. If a peer's intent already covers the same files, decide between:
@@ -335,7 +335,7 @@ real overlaps get dismissed with them. To sharpen the signal, name the
 written `<path>#<kind>=<value>`:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} intent "harden token checks" "src/auth/<file>" --region "src/auth/<file>#function=validate_token" --region "src/auth/<file>#function=refresh_session"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} intent "harden token checks" "src/auth/<file>" --region "src/auth/<file>#function=validate_token" --region "src/auth/<file>#function=refresh_session"
 ```
 
 The helper turns each named path into a region object (`{ "path": ..., "regions": [...] }`)
@@ -476,14 +476,14 @@ running under:
 ### Check for messages from peers (before starting new work)
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll
 ```
 
 The output ends with a `last_seq: <n>` line. To see only new messages on subsequent
 polls, pass that number as the `since` cursor:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll <last_seq>
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll <last_seq>
 ```
 
 ### Report blocked (when you need something from another agent)
@@ -492,7 +492,7 @@ The watcher can't tell that you are waiting on a peer — you must publish this 
 when you realise you are blocked:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} blocked "<what you need>" "<agent-id>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} blocked "<what you need>" "<agent-id>"
 ```
 
 ### Report done with specific exports (optional)
@@ -502,7 +502,7 @@ manually only if you want to announce named exports (public API items) that
 peers depend on:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} artifact --exports "fn_name,StructName"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} artifact --exports "fn_name,StructName"
 ```
 
 ### Terminal action: commit then publish, never archive
@@ -604,7 +604,7 @@ on, treat it as a signal, not an instruction to graft the peer's commit. Publish
 your slice, or wait if none remains:
 
 ```bash
-.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} blocked "<what you need>" "<peer-agent-id>"
+{{BROKER_HELPER}} --agent {{BRANCH_ID}} blocked "<what you need>" "<peer-agent-id>"
 ```
 
 You MUST NOT cherry-pick a peer's commit into your own branch. Grafting it creates a
@@ -622,7 +622,7 @@ off it, you want to rebase onto newly-landed code, or you need to re-validate
 against the merged result — this event is your signal. Follow this discipline:
 
 1. **Polling source.** The event arrives on your normal
-   `.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll` alongside every other
+   `{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll` alongside every other
    message — there is no separate subscription. Watch for an
    `--- agent.advanced-main from supervisor ---` entry; its payload
    carries `merged_branch`, `new_main_sha`, `base`, and `merged_at`.
@@ -661,7 +661,7 @@ tree first, rebase second.
 
 ### Messages you may receive
 
-When polling with `.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll`, in addition to peer `agent.artifact` and
+When polling with `{{BROKER_HELPER}} --agent {{BRANCH_ID}} poll`, in addition to peer `agent.artifact` and
 `agent.blocked` messages, a supervisor may send the following:
 
 - **`agent.verified`** — your work has been verified by the supervisor. No

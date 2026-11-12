@@ -63,16 +63,17 @@ on an existing config is the upgrade path after a version bump — see
 - `.git-paw/tmp/` — repo-local scratch for isolated verify worktrees and
   self-test sessions (added to `.gitignore`; preferred over OS temp because
   it is OS-independent)
-- `.git-paw/scripts/sweep.sh` — bundled supervisor helper
-- `.git-paw/scripts/broker.sh` — bundled agent-broker helper (the agent side
+- `.git-paw/skills/orchestrator/scripts/sweep.sh` — bundled supervisor helper
+- `.git-paw/skills/coordination/scripts/broker.sh` — bundled agent-broker helper (the agent side
   of `sweep.sh`); the agent boot block calls it to self-report to the broker.
   See [Coordination → Broker helper](user-guide/coordination.md#broker-helper)
-- `.git-paw/scripts/docs-fetch.sh` — bundled agent helper that fetches
+- `.git-paw/skills/docs-fetch/scripts/docs-fetch.sh` — bundled agent helper that fetches
   documentation on demand (see [Docs Fetch Skill](user-guide/docs-fetch.md))
-- `.git-paw/scripts/_paw_common.sh` — shared preamble the bundled helpers
-  source for repository-root resolution, Python 3 detection, and broker /
+- `.git-paw/skills/<package>/scripts/_paw_common.sh` — shared preamble the
+  bundled helpers source (installed beside each helper) for repository-root
+  and main-checkout resolution, Python 3 detection, and broker /
   docs URL discovery. Binary-managed like the helpers themselves: it is
-  overwritten on every `git paw init` and every supervised launch, and a
+  overwritten on every `git paw init` and every `git paw start`, and a
   helper cannot run without it. Every broker call the helpers make gives up
   after 2 seconds to connect and 10 seconds in total (the `events` long-poll
   waits longer), so a broker that never answers fails the call instead of
@@ -83,15 +84,24 @@ on an existing config is the upgrade path after a version bump — see
 - `.git-paw/skills/orchestrator/SKILL.md` — the orchestrator skill, rendered
   with your `[supervisor]` gate commands and configured spec format, for the
   agent you drive the session with; `.git-paw/skills/cli-setup/SKILL.md` beside
-  it. `git paw start` re-renders both. See
+  it. Every `git paw start` re-renders them from the current config. See
   [Quick Start: Orchestrator Mode](quick-start-orchestrator.md)
 - an orchestrator pointer section in the root `AGENTS.md`, between
   `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->`
   (the file is created when absent; see [AGENTS.md](user-guide/agents-md.md))
-- `.gitignore` entries for `.git-paw/logs/`, `.git-paw/tmp/`,
-  `.git-paw/worktrees/` (where agent worktrees live under the default `child`
-  placement), `.git-paw/skills/`, `.git-paw/session-summary.md`, and
-  `.git-paw/session-learnings.md`
+- every bundled skill package under `.git-paw/skills/<package>/` — its
+  rendered `SKILL.md`, its helpers under `scripts/` (executable) and any
+  `references/` — with each helper also copied byte-identical to the
+  deprecated compatibility path `.git-paw/scripts/<helper>`. See
+  [Skill Templates → Installed packages](user-guide/skill-templates.md#installed-packages)
+- `.gitignore` entries for every runtime path under `.git-paw/` except
+  `config.toml`: `.git-paw/logs/`, `.git-paw/tmp/`, `.git-paw/worktrees/`
+  (where agent worktrees live under the default `child` placement),
+  `.git-paw/skills/`, `.git-paw/scripts/`, `.git-paw/sessions/`,
+  `.git-paw/session-summary.md`, `.git-paw/session-learnings.md`,
+  `.git-paw/AGENTS.local.md`, `.git-paw/.sweep-progress`,
+  `.git-paw/.sweep-stuck-dedup` and `.git-paw/.add-remove.lock` — so
+  `git add .git-paw/` stages only the config
 
 A re-run reports a binary-managed file (a helper, an exported skill, the
 pointer section) as `Updated` only when its content changed, and closes with
@@ -105,6 +115,18 @@ git paw init
 ## `git paw start`
 
 Smart start: reattaches if a session is active, recovers if stopped/crashed, or launches a new interactive session. Reattach is checked before anything else — including entering supervisor mode — so re-running `start` against a repository that already has a live session never forks a second, parallel one; see [Reattaching instead of forking](user-guide/session-lifecycle.md#reattaching-instead-of-forking).
+
+Before any agent pane is launched, every `start` — bare, spec-driven or
+supervised — installs the bundled skill packages at the repository root
+exactly as `git paw init` does, writing only files that are missing or differ
+from a fresh render of the current config. A fresh clone therefore gets its
+root helpers without `git paw init`, and a `[supervisor]` gate command added
+after `init` reaches `.git-paw/skills/orchestrator/SKILL.md` on the next start.
+It never writes the config, `.gitignore` or `AGENTS.md`. Each agent worktree
+receives the packages selected for it — `coordination` when the broker is
+enabled, `docs-fetch` when `docs_base_url` is set — under its own
+`.git-paw/skills/`, and the same packages' skills are injected into its
+managed block.
 
 A session left with **no agents** never silently drops a launch selection
 (`--branches`, `--specs`, `--from-all-specs`): a stopped one is replaced by a fresh

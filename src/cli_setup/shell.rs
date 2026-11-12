@@ -1093,7 +1093,7 @@ mod tests {
             .collect();
         assert_eq!(allow[0], "z", "the user's entry keeps its place");
         assert_eq!(
-            allow[1], "Bash(.git-paw/scripts/broker.sh *)",
+            allow[1], "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
             "git-paw's entries follow it"
         );
 
@@ -1477,8 +1477,8 @@ mod tests {
         // The user edits one recorded grant, so it no longer matches.
         let text = fs::read_to_string(&target).expect("read");
         let edited = text.replace(
-            "Bash(.git-paw/scripts/broker.sh *)",
-            "Bash(.git-paw/scripts/broker.sh*)",
+            "Bash(.git-paw/skills/coordination/scripts/broker.sh *)",
+            "Bash(.git-paw/skills/coordination/scripts/broker.sh*)",
         );
         fs::write(&target, &edited).expect("write");
 
@@ -1488,7 +1488,8 @@ mod tests {
         apply_undo(&p, &record, &fresh).expect("undo");
 
         assert!(
-            allow_list(&target).contains(&"Bash(.git-paw/scripts/broker.sh*)".to_string()),
+            allow_list(&target)
+                .contains(&"Bash(.git-paw/skills/coordination/scripts/broker.sh*)".to_string()),
             "the edited entry is left in place"
         );
         assert!(
