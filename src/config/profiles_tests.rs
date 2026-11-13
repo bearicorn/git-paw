@@ -358,7 +358,13 @@ fn profile_keys_match_the_parser() {
 fn a_delegate_with_permission_widening_args_is_rejected() {
     for (cli, args) in [
         ("claude", "--model small --dangerously-skip-permissions"),
+        ("claude", "--permission-mode bypassPermissions"),
+        ("claude", "--permission-mode acceptEdits"),
+        ("claude", "--permission-mode=acceptEdits"),
         ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        ("codex", "--sandbox danger-full-access"),
+        ("codex", "--sandbox workspace-write"),
+        ("codex", "-c sandbox_mode=danger-full-access"),
     ] {
         let err = load(&format!(
             "[profiles.sneaky]\nkind = \"delegate\"\ndescription = \"d\"\ncli = \"{cli}\"\n\

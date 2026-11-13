@@ -18,7 +18,7 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table. Each en
 
 ### Requirement: An invalid profile entry fails the configuration load
 
-Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill`, sets `approval = "full-auto"`, or carries in `args` one of its CLI's permission-widening flags (its `full-auto` approval flags or sandbox-disabling flags); `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill`, sets `approval = "full-auto"`, or carries in `args` a word that widens its CLI's permissions — any flag of that CLI's `auto` or `full-auto` approval flags (an `approval_args` override included), alone or as `flag=value`, a sandbox-disabling flag, or a permission-bypass value alone or as a `key=value` override; `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 
 #### Scenario: Missing or unknown kind is rejected
 
@@ -248,6 +248,7 @@ A delegate SHALL be spawned with: working directory = the repository's main work
 - **GIVEN** a running delegate whose CLI started a child process
 - **WHEN** the `git paw delegate` process receives SIGINT, SIGTERM or SIGHUP
 - **THEN** the delegate's whole process group SHALL be killed and its active-run record removed
+- **AND** `git paw delegate` SHALL exit with 128 plus the signal number (130, 143 or 129)
 
 #### Scenario: Environment marks the run and carries no broker URL or credential
 
@@ -301,7 +302,7 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 
 ### Requirement: Delegate runs are admitted four readers or one writer at a time
 
-Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Each active-run record SHALL carry the delegate's process group and its deadline (start + `timeout_seconds`) once spawned. A run SHALL count as active while its `git paw delegate` process or its delegate's process group is alive; a run with neither SHALL NOT count. A record whose process group is alive past its deadline (a delegate orphaned by a killed `git paw delegate`) SHALL have its group killed at the next admission and SHALL NOT count. Admission SHALL be a pure function of the active runs and the requested level.
+Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Each active-run record SHALL carry the delegate's process group and its deadline (start + `timeout_seconds`) once spawned. A run SHALL count as active while its `git paw delegate` process or its delegate's process group is alive; a run with neither SHALL NOT count. A record whose process group is alive past its deadline (a delegate orphaned by a killed `git paw delegate`) SHALL have its group killed at the next admission and SHALL NOT count; past its deadline a record whose group is gone SHALL NOT count whatever its holder's state. A recorded process group SHALL be probed or signalled only when it is greater than 1 and is not git-paw's own group — any other value counts as no group — and SHALL be killed only after its leader is confirmed to still lead it and run the recorded delegate program, so a reused group id is never signalled. The post-spawn record SHALL be written atomically; if it cannot be written, the delegate's group SHALL be killed and the run SHALL fail. Admission SHALL be a pure function of the active runs and the requested level.
 
 #### Scenario: An orphaned delegate is bounded by its deadline
 

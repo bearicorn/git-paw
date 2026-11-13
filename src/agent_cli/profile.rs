@@ -192,29 +192,35 @@ impl CliProfile {
             .filter(|args| !contains_words(&approval, args))
     }
 
-    /// The flags that widen this CLI's permissions beyond `auto`: the
-    /// `full-auto` approval flags that are not also `manual` or `auto` flags,
-    /// plus the family's sandbox-disabling flags.
+    /// The first word of `args` that would widen this CLI's permissions or
+    /// switch its sandbox off, or `None`: any flag of its `auto` or
+    /// `full-auto` approval rows (the `approval_args` override included),
+    /// alone or as `flag=value`; any sandbox-disabling flag; and any
+    /// permission-bypass value, alone or as a `key=value` override.
     #[must_use]
-    pub fn permission_widening_flags(&self) -> Vec<String> {
-        let lower = format!(
+    pub fn widening_arg(&self, args: &str) -> Option<String> {
+        let rows = format!(
             "{} {}",
-            self.approval_flags(&ApprovalLevel::Manual),
-            self.approval_flags(&ApprovalLevel::Auto)
+            self.approval_flags(&ApprovalLevel::Auto),
+            self.approval_flags(&ApprovalLevel::FullAuto)
         );
-        let lower: Vec<&str> = lower.split_whitespace().collect();
-        let mut flags: Vec<String> = self
-            .approval_flags(&ApprovalLevel::FullAuto)
+        let provider = self.family.provider();
+        let flags: Vec<&str> = rows
             .split_whitespace()
-            .filter(|f| f.starts_with('-') && !lower.contains(f))
-            .map(str::to_string)
+            .filter(|w| w.starts_with('-'))
+            .chain(provider.sandbox_disabling_flags().iter().copied())
             .collect();
-        for flag in self.family.provider().sandbox_disabling_flags() {
-            if !flags.iter().any(|f| f == flag) {
-                flags.push((*flag).to_string());
-            }
-        }
-        flags
+        let values = provider.permission_bypass_values();
+        args.split_whitespace()
+            .find(|word| {
+                flags
+                    .iter()
+                    .any(|f| word == f || word.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
+                    || values.iter().any(|v| {
+                        word == v || word.rsplit_once('=').is_some_and(|(_, value)| value == *v)
+                    })
+            })
+            .map(str::to_string)
     }
 
     /// Refuses a launch that would switch off a declared native sandbox: the

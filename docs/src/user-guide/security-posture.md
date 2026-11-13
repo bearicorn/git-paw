@@ -608,8 +608,15 @@ every worktree, with no pane anyone watches. What bounds it:
   killed. The group is recorded with its deadline: an interrupted
   `git paw delegate` kills it, and an orphaned one is killed at the next
   admission once overdue, counting toward the limits until then.
-- **No widening through `args`.** A delegate profile whose `args` carry its
-  CLI's full-auto or sandbox-disabling flags fails the config load.
+- **No widening through `args`.** A delegate profile whose `args` carry any of
+  its CLI's `auto` or `full-auto` approval flags (alone or as `flag=value`),
+  sandbox-disabling flags, or a permission-bypass value (alone or as a
+  `key=value` override) fails the config load, so an editing run can never be
+  counted as read-only and no run reaches full-auto.
+- **Signalling is identity-checked.** A recorded process group is signalled
+  only when it is greater than 1, is not git-paw's own group, and its leader
+  still runs the recorded delegate program; a planted or reused record is
+  dropped without signalling anything.
 - **Operator isolation.** The run gets its CLI's operator isolation (unless
   `[clis.<name>] inherit_operator_config = true`). That matters more than for
   a worker: a delegate runs in the main checkout, whose auto memory is your

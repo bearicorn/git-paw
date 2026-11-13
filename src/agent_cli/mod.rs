@@ -204,6 +204,12 @@ pub trait CliProvider: Sync {
         &[]
     }
 
+    /// Option values that bypass the CLI's permission prompts or sandbox
+    /// whichever flag (or `key=value` config override) carries them.
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Template assigning a fresh session id at launch (contains
     /// [`crate::config::SESSION_ID_PLACEHOLDER`]), or `None`.
     fn session_id_args(&self) -> Option<&'static str> {
@@ -333,6 +339,9 @@ impl CliProvider for ClaudeProvider {
             ApprovalLevel::Manual => "",
         }
     }
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &["bypassPermissions"]
+    }
     fn session_id_args(&self) -> Option<&'static str> {
         Some("--session-id {{SESSION_ID}}")
     }
@@ -390,7 +399,13 @@ impl CliProvider for CodexProvider {
         Some("--sandbox workspace-write")
     }
     fn sandbox_disabling_flags(&self) -> &'static [&'static str] {
-        &["--dangerously-bypass-approvals-and-sandbox"]
+        &[
+            "--dangerously-bypass-approvals-and-sandbox",
+            "danger-full-access",
+        ]
+    }
+    fn permission_bypass_values(&self) -> &'static [&'static str] {
+        &["danger-full-access"]
     }
     fn headless_args(&self) -> Option<&'static str> {
         Some("exec")

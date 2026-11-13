@@ -683,7 +683,10 @@ fn only_codex_has_a_native_sandbox_and_sandbox_disabling_flags() {
             "{family}"
         );
         let expected: &[&str] = if is_codex {
-            &["--dangerously-bypass-approvals-and-sandbox"]
+            &[
+                "--dangerously-bypass-approvals-and-sandbox",
+                "danger-full-access",
+            ]
         } else {
             &[]
         };

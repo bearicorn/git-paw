@@ -209,6 +209,29 @@ pub struct ActiveRun {
     /// spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<u64>,
+    /// The program the delegate's group leader runs, once spawned: the
+    /// identity checked before the group is ever signalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+}
+
+/// Whether `pgid` may be probed or signalled at all: a real group (`> 1`;
+/// `0` means the caller's own group and `1` every process the user can
+/// signal) that is not git-paw's own group (`own`, when known).
+#[must_use]
+pub fn valid_pgid(pgid: u32, own: Option<u32>) -> bool {
+    pgid > 1 && own != Some(pgid)
+}
+
+/// Whether `ps -o pgid=,command= -p <pgid>` output (`ps_line`) shows the
+/// group's leader still leading `pgid` and still running `program` — so a
+/// group id reused by an unrelated process is never killed.
+#[must_use]
+pub fn leader_matches(ps_line: &str, pgid: u32, program: &str) -> bool {
+    let mut words = ps_line.split_whitespace();
+    words.next().and_then(|g| g.parse::<u32>().ok()) == Some(pgid)
+        && !program.is_empty()
+        && words.any(|w| w == program)
 }
 
 /// What an active-run record means at admission time.
@@ -226,26 +249,24 @@ pub enum RecordState {
 }
 
 /// Classifies one record at `now` from whether its holder process and its
-/// delegate's process group are alive. A group past its deadline is overdue
-/// whatever its holder's state, so an orphaned delegate can never outlive its
-/// timeout or keep counting toward the concurrency limit.
+/// delegate's process group are alive. Past its deadline a record is overdue
+/// while its group lives and dead once it does not, whatever its holder's
+/// state, so an orphaned delegate can never outlive its timeout or keep
+/// counting toward the concurrency limit.
 #[must_use]
 pub fn classify(run: &ActiveRun, now: u64, holder_alive: bool, group_alive: bool) -> RecordState {
-    if group_alive && run.deadline.is_some_and(|d| now >= d) {
-        return RecordState::Overdue;
+    if run.deadline.is_some_and(|d| now >= d) {
+        return if group_alive {
+            RecordState::Overdue
+        } else {
+            RecordState::Dead
+        };
     }
     if holder_alive || group_alive {
         RecordState::Live
     } else {
         RecordState::Dead
     }
-}
-
-/// The records whose process is still alive: a run whose process exited
-/// without cleaning up never counts as active.
-#[must_use]
-pub fn live_runs(records: Vec<ActiveRun>, is_alive: impl Fn(u32) -> bool) -> Vec<ActiveRun> {
-    records.into_iter().filter(|r| is_alive(r.pid)).collect()
 }
 
 /// Decides whether a run at `level` may start next to the `active` (live)

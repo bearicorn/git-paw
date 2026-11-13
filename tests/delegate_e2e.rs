@@ -335,49 +335,52 @@ fn wait_for(path: &Path, secs: u64) -> String {
     }
 }
 
-/// An interrupted `git paw delegate` (SIGTERM, as a caller's tool timeout
-/// sends) kills its delegate's whole process group and releases the run.
+/// An interrupted `git paw delegate` — SIGINT, SIGTERM or SIGHUP, as a
+/// Ctrl-C or a caller's tool timeout sends — kills its delegate's whole
+/// process group, releases the run and exits `128 +` the signal number.
 #[test]
 fn an_interrupted_delegate_kills_its_process_group() {
-    let fx = Fixture::new("");
-    let home = tempfile::TempDir::new().expect("home");
-    let mut parent = std::process::Command::new(env!("CARGO_BIN_EXE_git-paw"))
-        .current_dir(fx.root())
-        .env("HOME", home.path())
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_DATA_HOME")
-        .env_remove("GIT_PAW_DELEGATE")
-        .env("STUB_MODE", "hang")
-        .env("STUB_DIR", fx.stub_dir.path())
-        .args(["delegate", "explorer", "--task", "x"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn delegate");
-    let child = wait_for(&fx.stub_file("child.pid"), 20);
-    std::thread::sleep(Duration::from_millis(300));
-    std::process::Command::new("kill")
-        .args(["-TERM", &parent.id().to_string()])
-        .status()
-        .expect("kill -TERM");
-    let status = parent.wait().expect("wait");
-    assert!(!status.success());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while stub_child_alive(&child) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
+    for (signal, code) in [("INT", 130), ("TERM", 143), ("HUP", 129)] {
+        let fx = Fixture::new("");
+        let home = tempfile::TempDir::new().expect("home");
+        let mut parent = std::process::Command::new(env!("CARGO_BIN_EXE_git-paw"))
+            .current_dir(fx.root())
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("GIT_PAW_DELEGATE")
+            .env("STUB_MODE", "hang")
+            .env("STUB_DIR", fx.stub_dir.path())
+            .args(["delegate", "explorer", "--task", "x"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn delegate");
+        let child = wait_for(&fx.stub_file("child.pid"), 20);
+        std::thread::sleep(Duration::from_millis(300));
+        std::process::Command::new("kill")
+            .args([format!("-{signal}"), parent.id().to_string()])
+            .status()
+            .expect("kill");
+        let status = parent.wait().expect("wait");
+        assert_eq!(status.code(), Some(code), "SIG{signal}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stub_child_alive(&child) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !stub_child_alive(&child),
+            "SIG{signal}: the group must die with it"
+        );
+        let active = fx.root().join(".git-paw/logs/delegates/active");
+        assert!(
+            fs::read_dir(&active)
+                .expect("active dir")
+                .flatten()
+                .all(|e| e.path().extension().is_none_or(|x| x != "json")),
+            "SIG{signal}: no active record is left behind"
+        );
     }
-    assert!(
-        !stub_child_alive(&child),
-        "the delegate's group must die with it"
-    );
-    let active = fx.root().join(".git-paw/logs/delegates/active");
-    assert!(
-        fs::read_dir(&active)
-            .expect("active dir")
-            .flatten()
-            .all(|e| e.path().extension().is_none_or(|x| x != "json")),
-        "no active record is left behind"
-    );
 }
 
 /// An orphaned delegate group (its holder gone) counts toward admission
@@ -405,7 +408,7 @@ fn an_orphaned_delegate_group_counts_until_its_deadline_then_is_killed() {
     let record = |deadline: u64| {
         serde_json::json!({
             "profile": "fixer", "level": "auto", "pid": dead_pid,
-            "pgid": sleeper.id(), "deadline": deadline
+            "pgid": sleeper.id(), "deadline": deadline, "program": "sleep"
         })
         .to_string()
     };

@@ -315,3 +315,130 @@ fn the_result_and_ledger_reflect_the_run() {
         "the active record is released"
     );
 }
+
+/// A planted or corrupt record — pgid `0`, `1`, git-paw's own group, or a
+/// group whose leader no longer runs the delegate program — is never
+/// signalled, even overdue with its holder gone.
+#[test]
+fn a_planted_or_reused_group_is_never_signalled() {
+    let dir = TempDir::new().unwrap();
+    let dirs = RunDirs::new(dir.path());
+    dirs.create().unwrap();
+    let own_pid = std::process::id();
+    let records = [
+        (0, "/opt/agent"),
+        (1, "/opt/agent"),
+        (777, "/opt/agent"),
+        (888, "/opt/agent"),
+    ];
+    for (i, (pgid, program)) in records.iter().enumerate() {
+        let rec = ActiveRun {
+            profile: format!("p{i}"),
+            level: crate::config::ApprovalLevel::Auto,
+            pid: 900_000 + u32::try_from(i).unwrap(),
+            pgid: Some(*pgid),
+            deadline: Some(1),
+            program: Some((*program).to_string()),
+        };
+        write_record(&dirs.active.join(format!("{}.json", rec.pid)), &rec).unwrap();
+    }
+    let ok = |stdout: &str| {
+        Ok(crate::command_runner::CommandOutput {
+            success: true,
+            code: Some(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    };
+    let runner = FakeCommandRunner::scripted(move |program, args| match (program, args) {
+        // Holders are gone; every group probe answers alive.
+        ("kill", ["-0", "--", target]) if target.starts_with('-') => ok(""),
+        ("kill", ["-0", ..]) => Ok(crate::command_runner::CommandOutput {
+            success: false,
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+        // git-paw's own group is 777; group 888's leader is an unrelated
+        // program reusing the id.
+        ("ps", [_, "pgid=", ..]) => ok("777\n"),
+        ("ps", [_, "pgid=,command=", _, "888"]) => ok("888 /usr/bin/vim notes.txt\n"),
+        _ => ok(""),
+    });
+    let me = ActiveRun {
+        profile: "explorer".to_string(),
+        level: crate::config::ApprovalLevel::Manual,
+        pid: own_pid,
+        pgid: None,
+        deadline: None,
+        program: None,
+    };
+    admit_run(&dirs, &me, &runner).expect("every planted record is dropped, admission passes");
+    let kills: Vec<_> = runner
+        .calls()
+        .into_iter()
+        .filter(|(p, a)| p == "kill" && a.first().is_some_and(|f| f == "-KILL"))
+        .collect();
+    assert!(kills.is_empty(), "nothing may be killed: {kills:?}");
+    let probed: Vec<String> = runner
+        .calls()
+        .into_iter()
+        .filter(|(p, a)| p == "kill" && a.first().is_some_and(|f| f == "-0"))
+        .filter_map(|(_, a)| a.last().cloned())
+        .collect();
+    for forbidden in ["-0", "-1", "-777"] {
+        assert!(
+            !probed.iter().any(|t| t == forbidden),
+            "{forbidden} was probed: {probed:?}"
+        );
+    }
+}
+
+/// An overdue orphan whose leader is still the delegate program is killed.
+#[test]
+fn a_verified_overdue_group_is_killed() {
+    let dir = TempDir::new().unwrap();
+    let dirs = RunDirs::new(dir.path());
+    dirs.create().unwrap();
+    let rec = ActiveRun {
+        profile: "fixer".to_string(),
+        level: crate::config::ApprovalLevel::Auto,
+        pid: 900_100,
+        pgid: Some(4242),
+        deadline: Some(1),
+        program: Some("/opt/agent".to_string()),
+    };
+    write_record(&dirs.active.join("900100.json"), &rec).unwrap();
+    let ok = |success: bool, stdout: &str| {
+        Ok(crate::command_runner::CommandOutput {
+            success,
+            code: Some(i32::from(!success)),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    };
+    let runner = FakeCommandRunner::scripted(move |program, args| match (program, args) {
+        ("kill", ["-0", "--", "-4242"]) => ok(true, ""),
+        ("kill", ["-0", ..]) => ok(false, ""),
+        ("ps", [_, "pgid=", ..]) => ok(true, "777\n"),
+        ("ps", [_, "pgid=,command=", _, "4242"]) => ok(true, "4242 /opt/agent --batch\n"),
+        _ => ok(true, ""),
+    });
+    let me = ActiveRun {
+        profile: "explorer".to_string(),
+        level: crate::config::ApprovalLevel::Manual,
+        pid: std::process::id(),
+        pgid: None,
+        deadline: None,
+        program: None,
+    };
+    admit_run(&dirs, &me, &runner).expect("admitted");
+    assert!(
+        runner
+            .calls()
+            .iter()
+            .any(|(p, a)| p == "kill" && a == &["-KILL", "--", "-4242"]),
+        "{:?}",
+        runner.calls()
+    );
+}

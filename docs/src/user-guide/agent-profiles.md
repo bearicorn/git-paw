@@ -147,7 +147,9 @@ another agent's request, with no pane for anyone to watch. Its bounds:
   process group, recorded with its deadline: if `git paw delegate` is
   interrupted (SIGINT, SIGTERM, SIGHUP) it kills the group first, and a group
   orphaned some other way is killed by the next admission once its deadline
-  passes — until then it still counts toward the limits. Give the call a tool
+  passes — until then it still counts toward the limits. A recorded group is
+  only ever signalled when it is a real group other than git-paw's own and
+  its leader still runs the delegate program. Give the call a tool
   timeout of at least `timeout_seconds`, or run it in the background.
 - **Environment.** The run carries `GIT_PAW_DELEGATE=<name>` and its CLI's
   operator isolation, and has `GIT_PAW_BROKER_URL` removed. It gets no
@@ -155,8 +157,11 @@ another agent's request, with no pane for anyone to watch. Its bounds:
   `broker.sh` and `sweep.sh`, and an MCP server started inside the run all
   refuse under the marker; that MCP server also registers no publish tool
   (`publish_status`, `publish_artifact`, `publish_blocked`,
-  `publish_question`). A delegate profile's `args` may not carry its CLI's
-  full-auto or sandbox-disabling flags.
+  `publish_question`). A delegate profile's `args` may not carry any of its
+  CLI's `auto` or `full-auto` approval flags (as `flag value` or
+  `flag=value`), its sandbox-disabling flags, or a permission-bypass value
+  such as `bypassPermissions` or `danger-full-access` — the level comes from
+  `approval` alone.
 - **No prompt relay.** No pane exists, so nothing escalates or answers a
   delegate's permission prompts.
 

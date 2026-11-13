@@ -955,28 +955,22 @@ fn validate_cli_sandboxes(config: &PawConfig, path: &Path) -> Result<(), PawErro
     Ok(())
 }
 
-/// Rejects a delegate profile whose `args` carry its CLI's permission-widening
-/// flags ([`crate::agent_cli::CliProfile::permission_widening_flags`]): a
-/// delegate's level comes from `approval` alone, which refuses `full-auto`,
-/// so those flags must not be smuggled in through `args`.
+/// Rejects a delegate profile whose `args` carry a word that widens its CLI's
+/// permissions ([`crate::agent_cli::CliProfile::widening_arg`]): a delegate's
+/// level comes from `approval` alone, which refuses `full-auto` and makes an
+/// `auto` run exclusive, so neither may be smuggled in through `args` — an
+/// editing run would otherwise count as read-only.
 fn validate_delegate_args(config: &PawConfig, path: &Path) -> Result<(), PawError> {
     for (name, entry) in config.delegate_profiles() {
         let Some(args) = entry.args.as_deref() else {
             continue;
         };
-        let widening = crate::agent_cli::CliProfile::resolve(&entry.cli, &config.clis)
-            .permission_widening_flags();
-        if let Some(flag) = args.split_whitespace().find(|word| {
-            widening.iter().any(|f| {
-                *word == f.as_str()
-                    || word
-                        .strip_prefix(f.as_str())
-                        .is_some_and(|r| r.starts_with('='))
-            })
-        }) {
+        if let Some(word) =
+            crate::agent_cli::CliProfile::resolve(&entry.cli, &config.clis).widening_arg(args)
+        {
             return Err(PawError::ConfigError(format!(
-                "{}: profiles.{name}: args carries `{flag}`, which widens `{}`'s permissions; a \
-                 delegate's level comes from approval alone (manual or auto)",
+                "{}: profiles.{name}: args carries `{word}`, which widens `{}`'s permissions; \
+                 a delegate's level comes from approval alone (manual or auto)",
                 path.display(),
                 entry.cli
             )));

@@ -17,7 +17,7 @@ use crate::command_runner::{ChildState, CommandRunner, SpawnSpec};
 use crate::config::{PawConfig, ProfileEntry, ProfileKind};
 use crate::delegate::{
     ActiveRun, DELEGATE_ENV, LedgerLine, Outcome, RecordState, admit, classify, document, framing,
-    truncate_result,
+    leader_matches, truncate_result, valid_pgid,
 };
 use crate::error::PawError;
 use crate::supervisor::escalation::HeadlessInvocation;
@@ -135,6 +135,7 @@ pub fn delegate(
         pid: host.pid,
         pgid: None,
         deadline: None,
+        program: None,
     };
     let record_path = admit_run(&dirs, &record, host.runner)?;
     let result = run_admitted(
@@ -336,17 +337,25 @@ fn admit_run(
             .is_ok_and(|o| o.success)
     };
     let now = unix_now();
+    let own = own_pgid(runner);
     let mut live = Vec::new();
     for (path, run) in records {
-        let group_alive = run.pgid.is_some_and(|g| alive(&format!("-{g}")));
+        // A recorded group is probed only when it is a real, foreign group;
+        // a corrupt or planted 0, 1 or git-paw's own group counts as dead.
+        let pgid = run.pgid.filter(|g| valid_pgid(*g, own) && *g != record.pid);
+        let group_alive = pgid.is_some_and(|g| alive(&format!("-{g}")));
         match classify(&run, now, alive(&run.pid.to_string()), group_alive) {
             RecordState::Live => live.push(run),
             RecordState::Dead => {
                 let _ = fs::remove_file(&path);
             }
             RecordState::Overdue => {
-                // An orphaned delegate past its deadline: kill its group.
-                if let Some(g) = run.pgid {
+                // An orphaned delegate past its deadline: kill its group, but
+                // only after confirming its leader is still the delegate
+                // program — a reused group id is never signalled.
+                if let (Some(g), Some(program), Some(_)) = (pgid, run.program.as_deref(), own)
+                    && leader_is(runner, g, program)
+                {
                     let _ = runner.run("kill", &["-KILL", "--", &format!("-{g}")]);
                 }
                 let _ = fs::remove_file(&path);
@@ -361,12 +370,41 @@ fn admit_run(
     Ok(path)
 }
 
+/// Writes `record` to `path` atomically (a temporary file, then a rename),
+/// so a concurrent admission never reads a half-written record.
 fn write_record(path: &Path, record: &ActiveRun) -> Result<(), PawError> {
+    let tmp = path.with_extension("json.tmp");
     fs::write(
-        path,
+        &tmp,
         serde_json::to_string(record).map_err(|e| PawError::SessionError(e.to_string()))?,
     )
-    .map_err(|e| PawError::SessionError(format!("cannot record the active run: {e}")))
+    .and_then(|()| fs::rename(&tmp, path))
+    .map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        PawError::SessionError(format!("cannot record the active run: {e}"))
+    })
+}
+
+/// git-paw's own process group, or `None` when `ps` cannot tell (then no
+/// group is ever killed at admission).
+fn own_pgid(runner: &dyn CommandRunner) -> Option<u32> {
+    let out = runner
+        .run(
+            "ps",
+            &["-o", "pgid=", "-p", &std::process::id().to_string()],
+        )
+        .ok()
+        .filter(|o| o.success)?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Whether group `pgid`'s leader still leads it and runs `program`.
+fn leader_is(runner: &dyn CommandRunner, pgid: u32, program: &str) -> bool {
+    runner
+        .run("ps", &["-o", "pgid=,command=", "-p", &pgid.to_string()])
+        .ok()
+        .filter(|o| o.success)
+        .is_some_and(|o| leader_matches(&String::from_utf8_lossy(&o.stdout), pgid, program))
 }
 
 fn unix_now() -> u64 {
@@ -377,7 +415,8 @@ fn unix_now() -> u64 {
 }
 
 /// Kills the delegate's process group `pgid` when this process receives
-/// SIGINT, SIGTERM or SIGHUP, removes the run's record and exits 130, so an
+/// SIGINT, SIGTERM or SIGHUP, removes the run's record and exits `128 +` the
+/// signal number (130, 143, 129), so an
 /// interrupted `git paw delegate` (a Ctrl-C, a caller's tool timeout) never
 /// leaves its delegate running unbounded.
 fn guard_signals(pgid: u32, record_path: PathBuf) {
@@ -395,20 +434,21 @@ fn guard_signals(pgid: u32, record_path: PathBuf) {
                 signal(SignalKind::terminate()),
                 signal(SignalKind::hangup()),
             ) else {
-                return false;
+                return None;
             };
             tokio::select! {
-                _ = int.recv() => {}
-                _ = term.recv() => {}
-                _ = hup.recv() => {}
+                _ = int.recv() => Some(2),
+                _ = term.recv() => Some(15),
+                _ = hup.recv() => Some(1),
             }
-            true
         });
-        if received {
-            let _ = crate::command_runner::RealCommandRunner
-                .run("kill", &["-KILL", "--", &format!("-{pgid}")]);
+        if let Some(signo) = received {
+            if valid_pgid(pgid, None) {
+                let _ = crate::command_runner::RealCommandRunner
+                    .run("kill", &["-KILL", "--", &format!("-{pgid}")]);
+            }
             let _ = fs::remove_file(&record_path);
-            std::process::exit(130);
+            std::process::exit(128 + signo);
         }
     });
 }
@@ -469,14 +509,19 @@ fn run_admitted(
     // The child leads its own process group: record it and the deadline, so
     // admission can reap the group even if this process dies.
     let pgid = child.id();
-    let _ = write_record(
+    if let Err(e) = write_record(
         run.record_path,
         &ActiveRun {
             pgid: Some(pgid),
             deadline: Some(started_at + run.profile.effective_timeout_seconds()),
+            program: Some(run.invocation.program.clone()),
             ..run.record.clone()
         },
-    );
+    ) {
+        // An unrecorded group could escape its bounds: do not let it run.
+        let _ = child.kill_group();
+        return Err(e);
+    }
     if host.guard_signals {
         guard_signals(pgid, run.record_path.to_path_buf());
     }

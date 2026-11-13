@@ -11,6 +11,7 @@ fn run(profile: &str, level: ApprovalLevel, pid: u32) -> ActiveRun {
         pid,
         pgid: None,
         deadline: None,
+        program: None,
     }
 }
 
@@ -92,13 +93,11 @@ fn a_writing_delegate_runs_alone() {
 /// Scenario "A dead run does not block admission".
 #[test]
 fn a_dead_run_does_not_block_admission() {
-    let records = vec![
-        run("a", ApprovalLevel::Auto, 10),
-        run("b", ApprovalLevel::Manual, 11),
-    ];
-    let live = live_runs(records, |pid| pid == 11);
-    assert_eq!(live.len(), 1);
-    assert!(admit(&live, ApprovalLevel::Manual).is_ok());
+    let dead = run("a", ApprovalLevel::Auto, 10);
+    assert_eq!(classify(&dead, 0, false, false), RecordState::Dead);
+    let live = run("b", ApprovalLevel::Manual, 11);
+    assert_eq!(classify(&live, 0, true, false), RecordState::Live);
+    assert!(admit(&[live], ApprovalLevel::Manual).is_ok());
 }
 
 /// The ledger line carries metadata only, with the exit code of a failed
@@ -154,7 +153,46 @@ fn an_orphaned_delegate_counts_until_its_deadline_then_is_overdue() {
     assert_eq!(classify(&orphan, 100, true, true), RecordState::Overdue);
     assert_eq!(classify(&orphan, 150, false, false), RecordState::Dead);
     assert_eq!(
+        classify(&orphan, 150, true, false),
+        RecordState::Dead,
+        "past the deadline a dead group is dead whatever the holder"
+    );
+    assert_eq!(
         classify(&run("a", ApprovalLevel::Manual, 1), 0, true, false),
         RecordState::Live
     );
+}
+
+/// pgid 0 (the caller's own group), 1 (every signallable process) and
+/// git-paw's own group are never probed or signalled.
+#[test]
+fn only_a_real_foreign_group_is_valid() {
+    assert!(!valid_pgid(0, None));
+    assert!(!valid_pgid(1, None));
+    assert!(!valid_pgid(4242, Some(4242)));
+    assert!(valid_pgid(4242, Some(17)));
+    assert!(valid_pgid(4242, None));
+}
+
+/// A reused group id is never mistaken for the delegate's group.
+#[test]
+fn the_leader_must_still_be_the_delegate_program() {
+    assert!(leader_matches(
+        " 4242 /opt/agent --model small -p",
+        4242,
+        "/opt/agent"
+    ));
+    assert!(leader_matches(
+        "4242 /bin/sh /tmp/stub-agent --batch",
+        4242,
+        "/tmp/stub-agent"
+    ));
+    assert!(!leader_matches(
+        "4242 /usr/bin/vim notes.txt",
+        4242,
+        "/opt/agent"
+    ));
+    assert!(!leader_matches("17 /opt/agent", 4242, "/opt/agent"));
+    assert!(!leader_matches("", 4242, "/opt/agent"));
+    assert!(!leader_matches("4242 /opt/agent", 4242, ""));
 }
