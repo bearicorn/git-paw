@@ -18,7 +18,7 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table. Each en
 
 ### Requirement: An invalid profile entry fails the configuration load
 
-Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill`, sets `approval = "full-auto"`, or carries in `args` a word the CLI's delegate denylist names — any flag of that CLI's `auto` or `full-auto` approval flags (an `approval_args` override included), a sandbox-disabling flag, a flag of the family's own denylist (Codex `--sandbox`/`-s`, `--full-auto`, `--yolo`, `-a`/`--ask-for-approval`; Claude `--permission-mode`, `--allowedTools`/`--allowed-tools`, `--settings`, `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`; Qwen `-y`, `--yolo`, `--approval-mode`) whatever its value and in `flag value` or `flag=value` form, a config override (`-c key=value`) of a denied key (Codex `sandbox_mode`, `approval_policy`, `sandbox_workspace_write.*`), or a permission-bypass value, quotes stripped and values compared case-insensitively. A profile's `args` are operator-trusted configuration, like `[clis.<name>].args` (edits to `config.toml` are ask-protected by `git paw setup-cli`); the denylist is best-effort defence in depth, not a complete boundary; `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill`, sets `approval = "full-auto"`, or carries in `args` a word the CLI's delegate denylist names — any flag of that CLI's `auto` or `full-auto` approval flags (an `approval_args` override included), a sandbox-disabling flag, a flag of the family's own denylist (Codex `--sandbox`/`-s`, `--full-auto`, `--yolo`, `-a`/`--ask-for-approval`; Claude `--permission-mode`, `--allowedTools`/`--allowed-tools`, `--settings`, `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`; Qwen `-y`, `--yolo`, `--approval-mode`) whatever its value and in `flag value`, `flag=value` or, for a single-dash flag, attached (`-sX`) form, a config override (`-c key=value`) of a denied key (Codex `sandbox_mode`, `approval_policy`, `sandbox_workspace_write.*`), or a permission-bypass value, quotes stripped and values compared case-insensitively; `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. A profile's `args` are operator-trusted configuration, like `[clis.<name>].args` (edits to `config.toml` are ask-protected by `git paw setup-cli`); the delegate denylist is best-effort defence in depth, not a complete boundary.
 
 #### Scenario: Missing or unknown kind is rejected
 
@@ -55,6 +55,13 @@ Configuration loading SHALL fail with an error naming the profile and the key wh
 - **GIVEN** a delegate profile with `timeout_seconds = 0`, and separately a worker profile with `timeout_seconds = 60`
 - **WHEN** each config is loaded
 - **THEN** loading SHALL fail with an error naming `timeout_seconds`
+
+#### Scenario: A delegate's args cannot widen its permissions
+
+- **GIVEN** a delegate profile on each family with `args` naming a denied flag — Claude `--permission-mode bypassPermissions`, Codex `-c sandbox_mode=x`, `-sdanger-full-access` or `--ask-for-approval=never`, Qwen `--approval-mode yolo`
+- **WHEN** each config is loaded
+- **THEN** loading SHALL fail with an error naming `profiles.<name>` and `args`
+- **AND** ordinary arguments such as `--model small` SHALL still load
 
 #### Scenario: An invalid profile name is rejected
 
@@ -302,14 +309,39 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 
 ### Requirement: Delegate runs are admitted four readers or one writer at a time
 
-Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Each active-run record SHALL carry the delegate's process group and its deadline (start + `timeout_seconds`) once spawned. A run SHALL count as active while its `git paw delegate` process or its delegate's process group is alive; a run with neither SHALL NOT count. A record whose process group is alive past its deadline (a delegate orphaned by a killed `git paw delegate`) SHALL have its group killed at the next admission and then SHALL NOT count; a record whose group could not be killed SHALL be kept and SHALL keep counting. Past its deadline a record whose group is gone SHALL NOT count whatever its holder's state. A recorded holder pid of `0` or `1`, and any pid or process group above `i32::MAX`, SHALL count as dead. A recorded process group SHALL be probed or signalled only when it is greater than 1 and is not git-paw's own group — any other value counts as no group — and SHALL be killed only after its leader is confirmed to still lead it, with the basename of its first argv word equal to the recorded delegate program's and its start time equal to the start time recorded right after the spawn, so a reused group id is never signalled. The post-spawn record SHALL be written atomically; if it cannot be written, the delegate's group SHALL be killed and the run SHALL fail. Admission SHALL be a pure function of the active runs and the requested level.
+Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Each active-run record SHALL carry the delegate's process group and its deadline (start + `timeout_seconds`) once spawned. A run SHALL count as active while its `git paw delegate` process or its delegate's process group is alive; a run with neither SHALL NOT count. A record whose process group is alive past its deadline (a delegate orphaned by a killed `git paw delegate`) SHALL have its group killed at the next admission and then SHALL NOT count; a record whose group could not be killed SHALL be kept and SHALL keep counting. Past its deadline a record whose group is gone SHALL NOT count whatever its holder's state. A recorded holder pid of `0` or `1`, and any pid or process group above `i32::MAX`, SHALL count as dead. A recorded process group SHALL be probed or signalled only when it is greater than 1 and is not git-paw's own group — any other value counts as no group — and SHALL be killed only after its leader is confirmed to still lead it, with the basename of its first or second argv word (the second for a script run through its interpreter) equal to the recorded delegate program's and its start time — read with `LC_ALL=C` and `TZ=UTC` — equal to the start time recorded right after the spawn, so a reused group id is never signalled. The post-spawn record SHALL be written atomically; if it cannot be written, or the leader's start time cannot be read, the delegate's group SHALL be killed and the run SHALL fail. Admission SHALL be a pure function of the active runs and the requested level.
 
 #### Scenario: An orphaned delegate is bounded by its deadline
 
-- **GIVEN** an active-run record whose `git paw delegate` process has exited but whose delegate process group is alive
+- **GIVEN** an active-run record whose `git paw delegate` process has exited but whose delegate process group is alive and whose leader identity is verified
 - **WHEN** admission is decided before the record's deadline
 - **THEN** the run SHALL count as active
 - **AND** when admission is decided after the deadline, its process group SHALL be killed and it SHALL NOT count
+
+#### Scenario: An unkilled overdue record keeps counting
+
+- **GIVEN** an overdue active-run record whose process group is alive but whose leader identity cannot be confirmed
+- **WHEN** admission is decided
+- **THEN** its group SHALL NOT be signalled
+- **AND** the record SHALL be kept and SHALL count as active
+
+#### Scenario: Out-of-range ids count as dead
+
+- **GIVEN** active-run records whose holder pid is `0`, `1` or above `i32::MAX`, or whose process group is `0`, `1`, git-paw's own group or above `i32::MAX`
+- **WHEN** admission is decided
+- **THEN** no such holder or group SHALL be probed as alive or signalled
+
+#### Scenario: Leader identity requires the recorded start time
+
+- **GIVEN** an overdue record whose group leader's first or second argv word matches the recorded program but whose start time differs from the one recorded at spawn
+- **WHEN** admission is decided
+- **THEN** the group SHALL NOT be killed
+
+#### Scenario: A delegate whose identity cannot be recorded does not run
+
+- **GIVEN** a spawned delegate whose leader start time cannot be read
+- **WHEN** the run's record is written
+- **THEN** its process group SHALL be killed and the run SHALL fail
 
 #### Scenario: A fifth read-only delegate is refused
 

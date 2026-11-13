@@ -411,9 +411,23 @@ fn own_pgid(runner: &dyn CommandRunner) -> Option<u32> {
 }
 
 /// The start time `ps -o lstart=` reports for process `pid`, or `None`.
+///
+/// Run under `LC_ALL=C` and `TZ=UTC`, so the text is the same however the
+/// caller's locale and time zone are set.
 fn leader_start(runner: &dyn CommandRunner, pid: u32) -> Option<String> {
     let out = runner
-        .run("ps", &["-o", "lstart=", "-p", &pid.to_string()])
+        .run(
+            "env",
+            &[
+                "LC_ALL=C",
+                "TZ=UTC",
+                "ps",
+                "-o",
+                "lstart=",
+                "-p",
+                &pid.to_string(),
+            ],
+        )
         .ok()
         .filter(|o| o.success)?;
     let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -531,13 +545,23 @@ fn run_admitted(
     // The child leads its own process group: record it and the deadline, so
     // admission can reap the group even if this process dies.
     let pgid = child.id();
+    // Without the leader's start time the group's identity can never be
+    // confirmed, so it could never be reaped: do not let it run.
+    let Some(start) = leader_start(host.runner, pgid) else {
+        let _ = child.kill_group();
+        return Err(PawError::SessionError(format!(
+            "delegate '{}': cannot read the start time of its process (ps -o lstart=); \
+             refusing to run a delegate whose identity cannot be recorded",
+            run.name
+        )));
+    };
     if let Err(e) = write_record(
         run.record_path,
         &ActiveRun {
             pgid: Some(pgid),
             deadline: Some(started_at + run.profile.effective_timeout_seconds()),
             program: Some(run.invocation.program.clone()),
-            leader_start: leader_start(host.runner, pgid),
+            leader_start: Some(start),
             ..run.record.clone()
         },
     ) {

@@ -234,7 +234,25 @@ impl CliProfile {
                 None => key == *d,
             })
         };
+        // A single-dash short option with its value attached (`-sX`,
+        // `-anever`, `-ckey=value`): the two-character flag and the rest.
+        let attached = |word: &str| -> Option<(String, String)> {
+            (word.len() > 2 && word.starts_with('-') && !word.starts_with("--"))
+                .then(|| (word[..2].to_string(), word[2..].to_string()))
+        };
         for (i, word) in words.iter().enumerate() {
+            if let Some((short, rest)) = attached(word) {
+                let rest = rest.strip_prefix('=').unwrap_or(&rest);
+                if flags.contains(&short.as_str()) {
+                    return Some(word.clone());
+                }
+                if config_flags.contains(&short.as_str())
+                    && (denied_key(rest)
+                        || rest.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v)))
+                {
+                    return Some(word.clone());
+                }
+            }
             let (name, inline) = match word.split_once('=') {
                 Some((n, v)) if n.starts_with('-') => (n, Some(v)),
                 _ => (word.as_str(), None),

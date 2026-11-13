@@ -1171,6 +1171,12 @@ fn delegate_args_denylist_catches_every_known_bypass() {
         (CliFamily::Qwen, "--yolo"),
         (CliFamily::Qwen, "--approval-mode yolo"),
         (CliFamily::Qwen, "--approval-mode=auto-edit"),
+        (CliFamily::Codex, "-sdanger-full-access"),
+        (CliFamily::Codex, "-sread-only"),
+        (CliFamily::Codex, "-anever"),
+        (CliFamily::Codex, "-csandbox_mode=x"),
+        (CliFamily::Codex, "-c=approval_policy=never"),
+        (CliFamily::Qwen, "-yfoo"),
     ];
     for (family, args) in denied {
         assert!(
@@ -1182,6 +1188,7 @@ fn delegate_args_denylist_catches_every_known_bypass() {
         (CliFamily::Claude, "--model small --effort high"),
         (CliFamily::Codex, "-c model=o3 --model x"),
         (CliFamily::Codex, "--config model_reasoning_effort=high"),
+        (CliFamily::Codex, "-cmodel=o3"),
         (CliFamily::Qwen, "--model qwen3"),
     ];
     for (family, args) in allowed {

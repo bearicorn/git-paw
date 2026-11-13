@@ -406,6 +406,8 @@ fn an_orphaned_delegate_group_counts_until_its_deadline_then_is_killed() {
         .expect("clock")
         .as_secs();
     let lstart = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
         .args(["-o", "lstart=", "-p", &sleeper.id().to_string()])
         .output()
         .expect("ps lstart");

@@ -185,8 +185,24 @@ fn the_leader_must_still_be_the_delegate_program() {
         "/opt/agent"
     ));
     assert!(leader_matches("4242 agent --batch", 4242, "/opt/bin/agent"));
+    // A script CLI run through its interpreter.
+    assert!(leader_matches(
+        "4242 node /usr/lib/node_modules/agent/cli.js agent",
+        4242,
+        "/usr/bin/cli.js"
+    ));
+    assert!(leader_matches(
+        "4242 /bin/sh /tmp/stub-agent --batch",
+        4242,
+        "/tmp/stub-agent"
+    ));
     assert!(!leader_matches(
-        "4242 /usr/bin/vim /opt/agent",
+        "4242 node /srv/other.js /opt/agent",
+        4242,
+        "/opt/agent"
+    ));
+    assert!(!leader_matches(
+        "4242 /usr/bin/vim notes.txt /opt/agent",
         4242,
         "/opt/agent"
     ));

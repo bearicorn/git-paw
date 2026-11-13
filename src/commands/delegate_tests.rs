@@ -95,7 +95,7 @@ fn run(
     let mut host = DelegateHost {
         cwd,
         delegate_marker: marker.map(str::to_string),
-        runner: &RealCommandRunner,
+        runner: &ProbeRunner,
         spawner,
         read_stdin: &mut stdin,
         pid: std::process::id(),
@@ -440,7 +440,7 @@ fn a_verified_overdue_group_is_killed() {
         ("kill", ["-0", ..]) => ok(false, ""),
         ("ps", [_, "pgid=", ..]) => ok(true, "777\n"),
         ("ps", [_, "pgid=,command=", _, "4242"]) => ok(true, "4242 /opt/agent --batch\n"),
-        ("ps", [_, "lstart=", _, "4242"]) => ok(true, &format!("{START}\n")),
+        ("env", [.., "lstart=", "-p", "4242"]) => ok(true, &format!("{START}\n")),
         _ => ok(true, ""),
     });
     let me = ActiveRun {
@@ -495,7 +495,7 @@ fn a_group_whose_leader_restarted_is_not_killed() {
         ("kill", ["-0", ..]) => ok(false, ""),
         ("ps", [_, "pgid=", ..]) => ok(true, "777\n"),
         ("ps", [_, "pgid=,command=", _, "4343"]) => ok(true, "4343 /opt/agent\n"),
-        ("ps", [_, "lstart=", _, "4343"]) => ok(true, "Fri Nov 14 09:00:00 2026\n"),
+        ("env", [.., "lstart=", "-p", "4343"]) => ok(true, "Fri Nov 14 09:00:00 2026\n"),
         _ => ok(true, ""),
     });
     let me = ActiveRun {
@@ -547,6 +547,89 @@ fn a_failed_post_spawn_record_kills_the_group_and_fails_the_run() {
         task("explorer", "x"),
         None,
     );
+    assert!(result.is_err(), "the run fails");
+    assert!(killed.get(), "the spawned group is killed");
+}
+
+/// The real runner for git and liveness probes, except that the leader
+/// start-time probe answers [`START`] — fake children have no real process.
+struct ProbeRunner;
+
+impl crate::command_runner::CommandRunner for ProbeRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> std::io::Result<crate::command_runner::CommandOutput> {
+        if program == "env" && args.contains(&"lstart=") {
+            return Ok(crate::command_runner::CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: format!("{START}\n").into_bytes(),
+                stderr: Vec::new(),
+            });
+        }
+        RealCommandRunner.run(program, args)
+    }
+
+    fn run_inheriting_stdio(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> std::io::Result<crate::command_runner::CommandStatus> {
+        RealCommandRunner.run_inheriting_stdio(program, args)
+    }
+}
+
+/// A delegate whose leader start time cannot be read is killed and the run
+/// fails: its identity could never be confirmed for reaping.
+#[test]
+fn an_unreadable_leader_start_time_kills_the_group_and_fails_the_run() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    struct NoPs;
+    impl crate::command_runner::CommandRunner for NoPs {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+        ) -> std::io::Result<crate::command_runner::CommandOutput> {
+            if program == "env" {
+                return Err(std::io::Error::other("ps unavailable"));
+            }
+            RealCommandRunner.run(program, args)
+        }
+        fn run_inheriting_stdio(
+            &self,
+            program: &str,
+            args: &[&str],
+        ) -> std::io::Result<crate::command_runner::CommandStatus> {
+            RealCommandRunner.run_inheriting_stdio(program, args)
+        }
+    }
+    let fx = fixture();
+    let killed = Rc::new(Cell::new(false));
+    let seen = Rc::clone(&killed);
+    let spawner = FakeCommandRunner::succeeding("").with_spawn(move |_| {
+        Ok(Box::new(FakeChild::new(
+            Rc::new(Cell::new(crate::command_runner::ChildState::Running)),
+            Rc::clone(&seen),
+        )))
+    });
+    let mut out = CaptureOutput::default();
+    let mut stdin = || Ok(String::new());
+    let mut host = DelegateHost {
+        cwd: &fx.repo,
+        delegate_marker: None,
+        runner: &NoPs,
+        spawner: &spawner,
+        read_stdin: &mut stdin,
+        pid: std::process::id(),
+        poll_interval: Duration::from_millis(1),
+        guard_signals: false,
+    };
+    let cfg = agent_config(&fx, "");
+    let result = delegate(&mut host, move |_| Ok(cfg), task("explorer", "x"), &mut out);
     assert!(result.is_err(), "the run fails");
     assert!(killed.get(), "the spawned group is killed");
 }

@@ -239,10 +239,11 @@ pub fn valid_pgid(pgid: u32, own: Option<u32>) -> bool {
 }
 
 /// Whether `ps -o pgid=,command= -p <pgid>` output (`ps_line`) shows the
-/// group's leader still leading `pgid`, with the basename of its first argv
-/// word equal to `program`'s — half of the identity a kill requires (the
-/// other half is the leader's recorded start time), so a group id reused by
-/// an unrelated process is never killed.
+/// group's leader still leading `pgid`, with the basename of its first or
+/// second argv word equal to `program`'s — the second covering a script CLI
+/// run through its interpreter (`node /…/agent …`). This is half of the
+/// identity a kill requires; the leader's recorded start time is the other,
+/// so a group id reused by an unrelated process is never killed.
 #[must_use]
 pub fn leader_matches(ps_line: &str, pgid: u32, program: &str) -> bool {
     let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
@@ -250,8 +251,8 @@ pub fn leader_matches(ps_line: &str, pgid: u32, program: &str) -> bool {
     words.next().and_then(|g| g.parse::<u32>().ok()) == Some(pgid)
         && !program.is_empty()
         && words
-            .next()
-            .is_some_and(|argv0| basename(argv0) == basename(program))
+            .take(2)
+            .any(|argv| basename(argv) == basename(program))
 }
 
 /// What an active-run record means at admission time.
