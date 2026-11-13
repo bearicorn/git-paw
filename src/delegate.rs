@@ -202,6 +202,43 @@ pub struct ActiveRun {
     pub level: ApprovalLevel,
     /// The process id of the `git paw delegate` process holding the run.
     pub pid: u32,
+    /// The delegate's own process group (its leader's pid), once spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgid: Option<u32>,
+    /// When the run's timeout elapses, in seconds since the Unix epoch, once
+    /// spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<u64>,
+}
+
+/// What an active-run record means at admission time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordState {
+    /// The run is still going: its `git paw delegate` process or its
+    /// delegate's process group is alive, within the deadline.
+    Live,
+    /// Nothing of the run is left; the record is stale.
+    Dead,
+    /// The delegate's group outlived its deadline — typically orphaned by a
+    /// `git paw delegate` that was killed. Its group must be killed and the
+    /// record dropped.
+    Overdue,
+}
+
+/// Classifies one record at `now` from whether its holder process and its
+/// delegate's process group are alive. A group past its deadline is overdue
+/// whatever its holder's state, so an orphaned delegate can never outlive its
+/// timeout or keep counting toward the concurrency limit.
+#[must_use]
+pub fn classify(run: &ActiveRun, now: u64, holder_alive: bool, group_alive: bool) -> RecordState {
+    if group_alive && run.deadline.is_some_and(|d| now >= d) {
+        return RecordState::Overdue;
+    }
+    if holder_alive || group_alive {
+        RecordState::Live
+    } else {
+        RecordState::Dead
+    }
 }
 
 /// The records whose process is still alive: a run whose process exited

@@ -600,10 +600,16 @@ every worktree, with no pane anyone watches. What bounds it:
   non-interactive mode decides what may run. `full-auto` is refused at config
   load, so an orchestrator cannot launder full execution power through a
   delegate. Nothing relays or answers a delegate's permission prompts.
-- **Where it may start.** Only from the main working tree (a worker in a linked
-  worktree cannot use a delegate to reach outside it), never inside another
-  delegate run, at most four `manual` runs at once and an `auto` run alone,
-  for at most `timeout_seconds` before its whole process group is killed.
+- **Where it may start.** Only when the caller's working directory is the
+  main working tree — the guard checks only that, so a worker able to run
+  shell commands can `cd` into the main checkout and pass it — never inside
+  another delegate run, at most four `manual` runs at once and an `auto` run
+  alone, for at most `timeout_seconds` before its whole process group is
+  killed. The group is recorded with its deadline: an interrupted
+  `git paw delegate` kills it, and an orphaned one is killed at the next
+  admission once overdue, counting toward the limits until then.
+- **No widening through `args`.** A delegate profile whose `args` carry its
+  CLI's full-auto or sandbox-disabling flags fails the config load.
 - **Operator isolation.** The run gets its CLI's operator isolation (unless
   `[clis.<name>] inherit_operator_config = true`). That matters more than for
   a worker: a delegate runs in the main checkout, whose auto memory is your
@@ -613,7 +619,8 @@ every worktree, with no pane anyone watches. What bounds it:
   credential, `git paw __send` refuses (exit 3) before touching any pane, the
   bundled `broker.sh` and `sweep.sh` refuse every subcommand before reaching
   the broker, and an MCP server started inside the run is never a root
-  session.
+  session and registers no publish tool at all (`publish_status`,
+  `publish_artifact`, `publish_blocked`, `publish_question` included).
 
 **The limit.** The marker refusals are defence in depth. A delegate allowed to
 run shell commands could unset the variable, or run public commands such as

@@ -1185,6 +1185,10 @@ fn a_delegates_mcp_server_has_no_root_tools() {
         "purge_session",
         "create_spec",
         "write_spec_artifact",
+        "publish_status",
+        "publish_artifact",
+        "publish_blocked",
+        "publish_question",
     ] {
         assert!(
             !names.iter().any(|n| n == root_only),
@@ -1197,5 +1201,15 @@ fn a_delegates_mcp_server_has_no_root_tools() {
     );
     let message = resp["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("delegate run"), "{resp}");
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "publish_status", "arguments": { "status": "working" } }),
+    );
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("delegate run"), "{resp}");
+    assert!(
+        names.iter().any(|n| n == "get_session_status"),
+        "read tools stay: {names:?}"
+    );
     client.shutdown_and_assert_clean_exit(Duration::from_secs(10));
 }

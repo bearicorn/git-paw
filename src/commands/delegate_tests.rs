@@ -100,6 +100,7 @@ fn run(
         read_stdin: &mut stdin,
         pid: std::process::id(),
         poll_interval: Duration::from_millis(1),
+        guard_signals: false,
     };
     let result = delegate(&mut host, move |_| Ok(cfg), opts, &mut out);
     (result, out)

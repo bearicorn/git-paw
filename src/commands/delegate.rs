@@ -16,7 +16,7 @@ use crate::agent_cli::CliProfile;
 use crate::command_runner::{ChildState, CommandRunner, SpawnSpec};
 use crate::config::{PawConfig, ProfileEntry, ProfileKind};
 use crate::delegate::{
-    ActiveRun, DELEGATE_ENV, LedgerLine, Outcome, admit, document, framing, live_runs,
+    ActiveRun, DELEGATE_ENV, LedgerLine, Outcome, RecordState, admit, classify, document, framing,
     truncate_result,
 };
 use crate::error::PawError;
@@ -51,6 +51,9 @@ pub struct DelegateHost<'a> {
     pub pid: u32,
     /// How often the running delegate is polled.
     pub poll_interval: Duration,
+    /// Whether to kill the delegate's process group when this process gets
+    /// SIGINT, SIGTERM or SIGHUP (the binary does; tests do not).
+    pub guard_signals: bool,
 }
 
 /// Runs `git paw delegate`. Returns the exit status: `0` only when the
@@ -85,7 +88,7 @@ pub fn delegate(
     let config = load_config(&root)?;
 
     if opts.list {
-        list(&config, &root, out);
+        list(&config, out);
         return Ok(0);
     }
 
@@ -130,6 +133,8 @@ pub fn delegate(
         profile: name.clone(),
         level,
         pid: host.pid,
+        pgid: None,
+        deadline: None,
     };
     let record_path = admit_run(&dirs, &record, host.runner)?;
     let result = run_admitted(
@@ -144,6 +149,8 @@ pub fn delegate(
             root: &root,
             stdin,
             dirs: &dirs,
+            record: &record,
+            record_path: &record_path,
         },
         out,
     );
@@ -173,7 +180,7 @@ fn delegate_profile<'a>(
 
 /// Prints every delegate profile with its name, description, CLI, role
 /// skill, effective level and whether its CLI resolves a headless form.
-fn list(config: &PawConfig, _root: &Path, out: &mut dyn Output) {
+fn list(config: &PawConfig, out: &mut dyn Output) {
     let delegates: Vec<_> = config.delegate_profiles().collect();
     if delegates.is_empty() {
         out.line("No delegate profiles configured ([profiles.<name>] with kind = \"delegate\").");
@@ -323,27 +330,87 @@ fn admit_run(
             records.push((path, run));
         }
     }
-    let alive = |pid: u32| {
+    let alive = |target: &str| {
         runner
-            .run("kill", &["-0", &pid.to_string()])
+            .run("kill", &["-0", "--", target])
             .is_ok_and(|o| o.success)
     };
-    for (path, run) in &records {
-        if !alive(run.pid) {
-            let _ = fs::remove_file(path);
+    let now = unix_now();
+    let mut live = Vec::new();
+    for (path, run) in records {
+        let group_alive = run.pgid.is_some_and(|g| alive(&format!("-{g}")));
+        match classify(&run, now, alive(&run.pid.to_string()), group_alive) {
+            RecordState::Live => live.push(run),
+            RecordState::Dead => {
+                let _ = fs::remove_file(&path);
+            }
+            RecordState::Overdue => {
+                // An orphaned delegate past its deadline: kill its group.
+                if let Some(g) = run.pgid {
+                    let _ = runner.run("kill", &["-KILL", "--", &format!("-{g}")]);
+                }
+                let _ = fs::remove_file(&path);
+            }
         }
     }
-    let live = live_runs(records.into_iter().map(|(_, r)| r).collect(), alive);
     admit(&live, record.level).map_err(|reason| {
         PawError::SessionError(format!("delegate '{}' refused: {reason}", record.profile))
     })?;
     let path = dirs.active.join(format!("{}.json", record.pid));
+    write_record(&path, record)?;
+    Ok(path)
+}
+
+fn write_record(path: &Path, record: &ActiveRun) -> Result<(), PawError> {
     fs::write(
-        &path,
+        path,
         serde_json::to_string(record).map_err(|e| PawError::SessionError(e.to_string()))?,
     )
-    .map_err(|e| PawError::SessionError(format!("cannot record the active run: {e}")))?;
-    Ok(path)
+    .map_err(|e| PawError::SessionError(format!("cannot record the active run: {e}")))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Kills the delegate's process group `pgid` when this process receives
+/// SIGINT, SIGTERM or SIGHUP, removes the run's record and exits 130, so an
+/// interrupted `git paw delegate` (a Ctrl-C, a caller's tool timeout) never
+/// leaves its delegate running unbounded.
+fn guard_signals(pgid: u32, record_path: PathBuf) {
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let received = runtime.block_on(async {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
+                signal(SignalKind::interrupt()),
+                signal(SignalKind::terminate()),
+                signal(SignalKind::hangup()),
+            ) else {
+                return false;
+            };
+            tokio::select! {
+                _ = int.recv() => {}
+                _ = term.recv() => {}
+                _ = hup.recv() => {}
+            }
+            true
+        });
+        if received {
+            let _ = crate::command_runner::RealCommandRunner
+                .run("kill", &["-KILL", "--", &format!("-{pgid}")]);
+            let _ = fs::remove_file(&record_path);
+            std::process::exit(130);
+        }
+    });
 }
 
 /// Everything one admitted run needs.
@@ -357,6 +424,8 @@ struct RunInputs<'a> {
     root: &'a Path,
     stdin: String,
     dirs: &'a RunDirs,
+    record: &'a ActiveRun,
+    record_path: &'a Path,
 }
 
 /// Spawns the admitted run, waits for it, records it and prints its result.
@@ -397,6 +466,20 @@ fn run_admitted(
     let mut child = host.spawner.spawn(&spec).map_err(|e| {
         PawError::SessionError(format!("cannot start delegate '{}': {e}", run.name))
     })?;
+    // The child leads its own process group: record it and the deadline, so
+    // admission can reap the group even if this process dies.
+    let pgid = child.id();
+    let _ = write_record(
+        run.record_path,
+        &ActiveRun {
+            pgid: Some(pgid),
+            deadline: Some(started_at + run.profile.effective_timeout_seconds()),
+            ..run.record.clone()
+        },
+    );
+    if host.guard_signals {
+        guard_signals(pgid, run.record_path.to_path_buf());
+    }
     let state = loop {
         match child.poll() {
             Ok(ChildState::Running) => std::thread::sleep(host.poll_interval),

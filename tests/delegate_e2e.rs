@@ -22,6 +22,7 @@ case "$STUB_MODE" in
   marker) echo "RESULT-MARKER" ;;
   big) head -c 200000 /dev/zero | tr '\0' 'x' ;;
   fail) echo "partial"; exit 3 ;;
+  env) env > "$STUB_DIR/env.txt" ;;
   hang)
     sleep 30 &
     echo $! > "$STUB_DIR/child.pid"
@@ -306,4 +307,185 @@ fn listing_shows_delegates_only() {
         .expect("run");
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("No delegate profiles configured"));
+}
+
+fn stub_child_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .output()
+        .expect("kill -0")
+        .status
+        .success()
+}
+
+fn wait_for(path: &Path, secs: u64) -> String {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// An interrupted `git paw delegate` (SIGTERM, as a caller's tool timeout
+/// sends) kills its delegate's whole process group and releases the run.
+#[test]
+fn an_interrupted_delegate_kills_its_process_group() {
+    let fx = Fixture::new("");
+    let home = tempfile::TempDir::new().expect("home");
+    let mut parent = std::process::Command::new(env!("CARGO_BIN_EXE_git-paw"))
+        .current_dir(fx.root())
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("GIT_PAW_DELEGATE")
+        .env("STUB_MODE", "hang")
+        .env("STUB_DIR", fx.stub_dir.path())
+        .args(["delegate", "explorer", "--task", "x"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn delegate");
+    let child = wait_for(&fx.stub_file("child.pid"), 20);
+    std::thread::sleep(Duration::from_millis(300));
+    std::process::Command::new("kill")
+        .args(["-TERM", &parent.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    let status = parent.wait().expect("wait");
+    assert!(!status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while stub_child_alive(&child) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !stub_child_alive(&child),
+        "the delegate's group must die with it"
+    );
+    let active = fx.root().join(".git-paw/logs/delegates/active");
+    assert!(
+        fs::read_dir(&active)
+            .expect("active dir")
+            .flatten()
+            .all(|e| e.path().extension().is_none_or(|x| x != "json")),
+        "no active record is left behind"
+    );
+}
+
+/// An orphaned delegate group (its holder gone) counts toward admission
+/// until its deadline, then is killed and no longer counts.
+#[test]
+fn an_orphaned_delegate_group_counts_until_its_deadline_then_is_killed() {
+    let fx = Fixture::new("");
+    let mut sleeper = {
+        use std::os::unix::process::CommandExt as _;
+        std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("spawn orphan group")
+    };
+    let mut gone = std::process::Command::new("true").spawn().expect("true");
+    let dead_pid = gone.id();
+    gone.wait().expect("reap");
+    let active = fx.root().join(".git-paw/logs/delegates/active");
+    fs::create_dir_all(&active).expect("active dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let record = |deadline: u64| {
+        serde_json::json!({
+            "profile": "fixer", "level": "auto", "pid": dead_pid,
+            "pgid": sleeper.id(), "deadline": deadline
+        })
+        .to_string()
+    };
+
+    fs::write(active.join(format!("{dead_pid}.json")), record(now + 300)).expect("record");
+    let refused = fx.delegate("ok", &["explorer", "--task", "x"]);
+    assert!(!refused.status.success(), "the orphan still runs alone");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fixer"));
+
+    fs::write(
+        active.join(format!("{dead_pid}.json")),
+        record(now.saturating_sub(1)),
+    )
+    .expect("record");
+    let admitted = fx.delegate("ok", &["explorer", "--task", "x"]);
+    assert!(admitted.status.success(), "{admitted:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sleeper.try_wait().expect("try_wait").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the overdue group was not killed"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Scenario "Environment marks the run and carries no broker URL or
+/// credential", end to end: with an active broker session holding a
+/// credential and `GIT_PAW_BROKER_URL` exported, the delegate's environment
+/// carries the marker and neither of those.
+#[test]
+fn the_delegate_environment_carries_no_broker_url_or_credential() {
+    use git_paw::session::{Session, SessionMode, SessionStatus, save_session_in};
+    let fx = Fixture::new("");
+    let home = tempfile::TempDir::new().expect("home");
+    let credential = "5ec7".repeat(16);
+    let sessions = if cfg!(target_os = "macos") {
+        home.path()
+            .join("Library/Application Support/git-paw/sessions")
+    } else {
+        home.path().join(".local/share/git-paw/sessions")
+    };
+    save_session_in(
+        &Session {
+            session_name: "paw-delegate-env".to_string(),
+            repo_path: git_paw::git::validate_repo(fx.root()).expect("repo"),
+            project_name: "delegate-env".to_string(),
+            created_at: std::time::SystemTime::now(),
+            status: SessionStatus::Active,
+            worktrees: Vec::new(),
+            broker_port: Some(9119),
+            broker_bind: Some("127.0.0.1".to_string()),
+            broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: None,
+            layout: None,
+            broker_authority: Some(credential.clone()),
+        },
+        &sessions,
+    )
+    .expect("save session");
+    let out = Command::cargo_bin("git-paw")
+        .expect("binary")
+        .current_dir(fx.root())
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("GIT_PAW_DELEGATE")
+        .env("GIT_PAW_BROKER_URL", "http://127.0.0.1:9119")
+        .env("STUB_MODE", "env")
+        .env("STUB_DIR", fx.stub_dir.path())
+        .args(["delegate", "explorer", "--task", "x"])
+        .output()
+        .expect("run delegate");
+    assert!(out.status.success(), "{out:?}");
+    let env = fs::read_to_string(fx.stub_file("env.txt")).expect("env dump");
+    assert!(
+        env.lines().any(|l| l == "GIT_PAW_DELEGATE=explorer"),
+        "{env}"
+    );
+    assert!(!env.contains("GIT_PAW_BROKER_URL"), "{env}");
+    assert!(!env.contains(&credential), "the credential leaked: {env}");
 }

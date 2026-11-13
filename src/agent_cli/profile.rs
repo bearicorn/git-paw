@@ -192,6 +192,31 @@ impl CliProfile {
             .filter(|args| !contains_words(&approval, args))
     }
 
+    /// The flags that widen this CLI's permissions beyond `auto`: the
+    /// `full-auto` approval flags that are not also `manual` or `auto` flags,
+    /// plus the family's sandbox-disabling flags.
+    #[must_use]
+    pub fn permission_widening_flags(&self) -> Vec<String> {
+        let lower = format!(
+            "{} {}",
+            self.approval_flags(&ApprovalLevel::Manual),
+            self.approval_flags(&ApprovalLevel::Auto)
+        );
+        let lower: Vec<&str> = lower.split_whitespace().collect();
+        let mut flags: Vec<String> = self
+            .approval_flags(&ApprovalLevel::FullAuto)
+            .split_whitespace()
+            .filter(|f| f.starts_with('-') && !lower.contains(f))
+            .map(str::to_string)
+            .collect();
+        for flag in self.family.provider().sandbox_disabling_flags() {
+            if !flags.iter().any(|f| f == flag) {
+                flags.push((*flag).to_string());
+            }
+        }
+        flags
+    }
+
     /// Refuses a launch that would switch off a declared native sandbox: the
     /// effective approval flags for `level` — built-in row or `approval_args`
     /// override alike — carry one of the family's sandbox-disabling flags, or

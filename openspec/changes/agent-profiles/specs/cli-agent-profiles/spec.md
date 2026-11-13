@@ -18,7 +18,7 @@ The system SHALL accept an optional top-level `[profiles.<name>]` table. Each en
 
 ### Requirement: An invalid profile entry fails the configuration load
 
-Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill` or sets `approval = "full-auto"`; `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+Configuration loading SHALL fail with an error naming the profile and the key when: `kind` is missing or not `worker` or `delegate`; `description` is missing, empty or contains a line break; `cli` is missing; a delegate omits `skill`, sets `approval = "full-auto"`, or carries in `args` one of its CLI's permission-widening flags (its `full-auto` approval flags or sandbox-disabling flags); `timeout_seconds` is `0` or is set on a worker; `skill` names `orchestrator` or its alias `supervisor`; or the profile name does not match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 
 #### Scenario: Missing or unknown kind is rejected
 
@@ -241,7 +241,13 @@ A delegate's argv SHALL be built from its CLI record with no shell, each part sp
 
 ### Requirement: A delegate runs at the root with a marked, credential-free environment
 
-A delegate SHALL be spawned with: working directory = the repository's main working tree root; the delegate document on stdin; no controlling terminal; and the inherited environment plus `GIT_PAW_DELEGATE=<name>` and its CLI's operator-isolation environment, without `GIT_PAW_BROKER_URL` and without any authority credential. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
+A delegate SHALL be spawned with: working directory = the repository's main working tree root; the delegate document on stdin; its own process group, with no terminal on its standard streams; and the inherited environment plus `GIT_PAW_DELEGATE=<name>` and its CLI's operator-isolation environment, without `GIT_PAW_BROKER_URL` and without any authority credential. A delegate SHALL never be driven by the drive loop, and git-paw SHALL answer none of its permission prompts.
+
+#### Scenario: An interrupted delegate takes its process group with it
+
+- **GIVEN** a running delegate whose CLI started a child process
+- **WHEN** the `git paw delegate` process receives SIGINT, SIGTERM or SIGHUP
+- **THEN** the delegate's whole process group SHALL be killed and its active-run record removed
 
 #### Scenario: Environment marks the run and carries no broker URL or credential
 
@@ -295,7 +301,14 @@ A delegate run SHALL be terminated, together with its process group, when the pr
 
 ### Requirement: Delegate runs are admitted four readers or one writer at a time
 
-Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. A run whose process no longer exists SHALL NOT count as active. Admission SHALL be a pure function of the active runs and the requested level.
+Per repository, at most four delegate runs at level `manual` SHALL run at once, and a run at level `auto` SHALL run only when no other delegate run is active and SHALL exclude every other run while active. A run that cannot be admitted SHALL be refused immediately, never queued, with an error naming the active runs' profiles. Each active-run record SHALL carry the delegate's process group and its deadline (start + `timeout_seconds`) once spawned. A run SHALL count as active while its `git paw delegate` process or its delegate's process group is alive; a run with neither SHALL NOT count. A record whose process group is alive past its deadline (a delegate orphaned by a killed `git paw delegate`) SHALL have its group killed at the next admission and SHALL NOT count. Admission SHALL be a pure function of the active runs and the requested level.
+
+#### Scenario: An orphaned delegate is bounded by its deadline
+
+- **GIVEN** an active-run record whose `git paw delegate` process has exited but whose delegate process group is alive
+- **WHEN** admission is decided before the record's deadline
+- **THEN** the run SHALL count as active
+- **AND** when admission is decided after the deadline, its process group SHALL be killed and it SHALL NOT count
 
 #### Scenario: A fifth read-only delegate is refused
 

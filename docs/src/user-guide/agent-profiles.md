@@ -133,19 +133,30 @@ another agent's request, with no pane for anyone to watch. Its bounds:
 - **Level.** `manual` by default: git-paw passes no permission-widening flag,
   and the CLI's own non-interactive mode decides what may run. `auto` is the
   opt-in for a role that edits. `full-auto` is refused at load.
-- **Where.** Only from the main working tree (refused from a linked worktree),
-  with the main working tree as its working directory. No nesting: a run
-  inside a delegate run is refused.
+- **Where.** Only from the main working tree (refused when the caller's
+  working directory is a linked worktree), with the main working tree as its
+  working directory. The guard checks only the caller's working directory: a
+  worker that can run shell commands can `cd` into the main checkout first,
+  so it is defence in depth, not a boundary. No nesting: a run inside a
+  delegate run is refused.
 - **Concurrency.** At most four `manual` runs at once; an `auto` run runs
   alone and excludes every other run. A run that cannot be admitted is
   refused immediately, never queued. A run whose process died does not count.
 - **Time.** `timeout_seconds` (default 600); on expiry the run's whole process
-  group is killed and the outcome is `timeout`.
+  group is killed and the outcome is `timeout`. The delegate runs in its own
+  process group, recorded with its deadline: if `git paw delegate` is
+  interrupted (SIGINT, SIGTERM, SIGHUP) it kills the group first, and a group
+  orphaned some other way is killed by the next admission once its deadline
+  passes — until then it still counts toward the limits. Give the call a tool
+  timeout of at least `timeout_seconds`, or run it in the background.
 - **Environment.** The run carries `GIT_PAW_DELEGATE=<name>` and its CLI's
   operator isolation, and has `GIT_PAW_BROKER_URL` removed. It gets no
   authority credential: `git paw __authority`, `git paw __send`, the bundled
   `broker.sh` and `sweep.sh`, and an MCP server started inside the run all
-  refuse under the marker.
+  refuse under the marker; that MCP server also registers no publish tool
+  (`publish_status`, `publish_artifact`, `publish_blocked`,
+  `publish_question`). A delegate profile's `args` may not carry its CLI's
+  full-auto or sandbox-disabling flags.
 - **No prompt relay.** No pane exists, so nothing escalates or answers a
   delegate's permission prompts.
 

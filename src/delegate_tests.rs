@@ -9,6 +9,8 @@ fn run(profile: &str, level: ApprovalLevel, pid: u32) -> ActiveRun {
         profile: profile.to_string(),
         level,
         pid,
+        pgid: None,
+        deadline: None,
     }
 }
 
@@ -135,5 +137,24 @@ fn the_framing_is_an_audited_asset() {
     assert!(
         !source.contains("one-shot delegate: an agent"),
         "prose lives in the asset"
+    );
+}
+
+/// An orphaned delegate (its holder gone, its group alive) still counts as
+/// live until its deadline, and is overdue — to be killed — after it.
+#[test]
+fn an_orphaned_delegate_counts_until_its_deadline_then_is_overdue() {
+    let orphan = ActiveRun {
+        pgid: Some(42),
+        deadline: Some(100),
+        ..run("explorer", ApprovalLevel::Manual, 7)
+    };
+    assert_eq!(classify(&orphan, 50, false, true), RecordState::Live);
+    assert_eq!(classify(&orphan, 100, false, true), RecordState::Overdue);
+    assert_eq!(classify(&orphan, 100, true, true), RecordState::Overdue);
+    assert_eq!(classify(&orphan, 150, false, false), RecordState::Dead);
+    assert_eq!(
+        classify(&run("a", ApprovalLevel::Manual, 1), 0, true, false),
+        RecordState::Live
     );
 }

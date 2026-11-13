@@ -148,8 +148,14 @@ repository's `.claude/settings.local.json` applies, so any helper grant the user
 - **Level:** `manual` by default — git-paw passes no permission-widening flag, and the CLI's own
   non-interactive mode decides what runs. `auto` is the opt-in for a role that edits. `full-auto` is
   refused at load: an orchestrator could otherwise launder full execution power through a delegate.
-- **Where:** main working tree only (refused from linked worktrees, so a worker cannot use a delegate
-  to reach outside its worktree); no nesting.
+- **Where:** main working tree only (refused when the caller's working directory is a linked
+  worktree); no nesting. The guard checks only the caller's working directory: a worker allowed to
+  run shell commands can `cd` into the main checkout and pass it, so it is defence in depth, not a
+  boundary.
+- **Lifetime:** the delegate leads its own process group; the active-run record carries that group
+  and its deadline, `git paw delegate` kills the group on SIGINT/SIGTERM/SIGHUP, and admission kills
+  an orphaned group past its deadline, so a delegate never outlives its timeout or escapes the
+  concurrency limit when its caller dies.
 - **Authority:** the run carries `GIT_PAW_DELEGATE`; `git paw __authority` refuses under it, the
   bundled `broker.sh` and `sweep.sh` refuse under it (at the root they would otherwise read the
   broker address from `.git-paw/config.toml`, and a `setup-cli` grant lets them run without a

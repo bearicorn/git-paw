@@ -293,6 +293,7 @@ fn run(command: Command) -> Result<(), PawError> {
                 read_stdin: &mut read_stdin,
                 pid: std::process::id(),
                 poll_interval: std::time::Duration::from_millis(100),
+                guard_signals: true,
             };
             let code = commands::delegate::delegate(
                 &mut host,

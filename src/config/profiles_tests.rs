@@ -351,3 +351,38 @@ fn profile_keys_match_the_parser() {
     expected.sort_unstable();
     assert_eq!(keys, expected);
 }
+
+/// A delegate profile cannot smuggle its CLI's full-auto or
+/// sandbox-disabling flags in through `args`.
+#[test]
+fn a_delegate_with_permission_widening_args_is_rejected() {
+    for (cli, args) in [
+        ("claude", "--model small --dangerously-skip-permissions"),
+        ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+    ] {
+        let err = load(&format!(
+            "[profiles.sneaky]\nkind = \"delegate\"\ndescription = \"d\"\ncli = \"{cli}\"\n\
+             skill = \"explorer\"\nargs = \"{args}\"\n"
+        ))
+        .expect_err(cli);
+        assert!(
+            err.contains("profiles.sneaky") && err.contains("args"),
+            "{err}"
+        );
+    }
+    // Ordinary arguments, and the same flag on a worker profile, still load.
+    assert!(
+        load(
+            "[profiles.ok]\nkind = \"delegate\"\ndescription = \"d\"\ncli = \"claude\"\n\
+         skill = \"explorer\"\nargs = \"--model small\"\n"
+        )
+        .is_ok()
+    );
+    assert!(
+        load(
+            "[profiles.w]\nkind = \"worker\"\ndescription = \"d\"\ncli = \"claude\"\n\
+         args = \"--dangerously-skip-permissions\"\n"
+        )
+        .is_ok()
+    );
+}

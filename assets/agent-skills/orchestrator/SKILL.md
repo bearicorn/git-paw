@@ -1122,7 +1122,10 @@ isolated context, so the context-heavy audit work need not flood yours.
   subagents. A delegate's standard output is its verdict (or its map). At
   most four read-only delegates run at once, so the three audits and one
   exploration fit together; a further one is refused, not queued. A
-  delegate never publishes.
+  delegate never publishes. A run lasts up to its profile's
+  `timeout_seconds` (600 by default): give the call a tool timeout at least
+  that long, or run it in the background and read its output when it ends —
+  a call your tool kills early kills the delegate with it.
 - **Otherwise, when your CLI can run isolated subagents**, you MAY run the
   three audit gates concurrently, each in its own isolated context given
   only its reference plus the branch, the re-resolved tip and the change id.

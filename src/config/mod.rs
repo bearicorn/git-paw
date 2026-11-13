@@ -732,6 +732,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_cli_families(&config, path)?;
             validate_prompt_profile_patterns(&config, path)?;
             validate_cli_sandboxes(&config, path)?;
+            validate_delegate_args(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -954,6 +955,36 @@ fn validate_cli_sandboxes(config: &PawConfig, path: &Path) -> Result<(), PawErro
     Ok(())
 }
 
+/// Rejects a delegate profile whose `args` carry its CLI's permission-widening
+/// flags ([`crate::agent_cli::CliProfile::permission_widening_flags`]): a
+/// delegate's level comes from `approval` alone, which refuses `full-auto`,
+/// so those flags must not be smuggled in through `args`.
+fn validate_delegate_args(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, entry) in config.delegate_profiles() {
+        let Some(args) = entry.args.as_deref() else {
+            continue;
+        };
+        let widening = crate::agent_cli::CliProfile::resolve(&entry.cli, &config.clis)
+            .permission_widening_flags();
+        if let Some(flag) = args.split_whitespace().find(|word| {
+            widening.iter().any(|f| {
+                *word == f.as_str()
+                    || word
+                        .strip_prefix(f.as_str())
+                        .is_some_and(|r| r.starts_with('='))
+            })
+        }) {
+            return Err(PawError::ConfigError(format!(
+                "{}: profiles.{name}: args carries `{flag}`, which widens `{}`'s permissions; a \
+                 delegate's level comes from approval alone (manual or auto)",
+                path.display(),
+                entry.cli
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Collects non-fatal warnings about the `[worktree]` runtime-provisioning
 /// tables.
 ///
@@ -1066,6 +1097,8 @@ pub fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfi
     let global = load_config_file(global_path)?.unwrap_or_default();
     let repo = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
     let mut merged = global.merged_with(&repo);
+    // A profile in one file may name a CLI declared in the other.
+    validate_delegate_args(&merged, &repo_config_path(repo_root))?;
     auto_wire_governance(&mut merged, repo_root);
     Ok(merged)
 }

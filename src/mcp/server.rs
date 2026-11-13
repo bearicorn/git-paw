@@ -29,6 +29,16 @@ pub(crate) const ROOT_ONLY_TOOL_NAMES: &[&str] = &[
     "publish_feedback",
 ];
 
+/// The identity-scoped agent publish tools. A server started inside a
+/// delegate run (`GIT_PAW_DELEGATE` set) registers none of them: a delegate's
+/// result is its standard output, never a broker message.
+pub(crate) const AGENT_PUBLISH_TOOL_NAMES: &[&str] = &[
+    "publish_status",
+    "publish_artifact",
+    "publish_blocked",
+    "publish_question",
+];
+
 /// The tools that write file content into the repository working tree. They
 /// exist only when [`repo_write::repo_write_access`] passes — a root session
 /// of a repository whose own config sets `[mcp] allow_repo_writes = true` —
@@ -65,8 +75,12 @@ impl GitPawMcpServer {
             + Self::git_router()
             + Self::docs_router()
             + Self::source_router()
-            + Self::publish_router()
             + Self::spec_check_router();
+        // Inside a delegate run no publish tool exists at all: the run's
+        // result is its standard output.
+        if crate::delegate::current_delegate_run().is_none() {
+            tool_router += Self::publish_router();
+        }
         if ctx.is_main_worktree {
             tool_router = tool_router + Self::lifecycle_router() + Self::verdict_router();
         }
@@ -103,7 +117,8 @@ impl ServerHandler for GitPawMcpServer {
         // say why.
         if let Some(run) = crate::delegate::current_delegate_run()
             && (ROOT_ONLY_TOOL_NAMES.contains(&request.name.as_ref())
-                || REPO_WRITE_TOOL_NAMES.contains(&request.name.as_ref()))
+                || REPO_WRITE_TOOL_NAMES.contains(&request.name.as_ref())
+                || AGENT_PUBLISH_TOOL_NAMES.contains(&request.name.as_ref()))
         {
             return Err(ErrorData::invalid_request(
                 format!(

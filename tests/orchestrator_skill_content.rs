@@ -1059,3 +1059,12 @@ fn publishing_stays_with_the_orchestrator() {
         "you publish `agent.verified` only when testing and regression passed and all three audit verdicts are `pass`"
     ));
 }
+
+// skill-agent: a delegate call's tool timeout covers the delegate's own
+#[test]
+fn a_delegate_call_gets_a_tool_timeout_covering_the_run() {
+    let s = section("### Delegating gates");
+    assert!(
+        s.contains("give the call a tool timeout at least that long, or run it in the background")
+    );
+}
