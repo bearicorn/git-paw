@@ -2,7 +2,12 @@
 
 ### Requirement: A server running inside a delegate run is never a root session
 
-An MCP server whose environment carries `GIT_PAW_DELEGATE` SHALL treat itself as a non-root session regardless of the repository it resolves: it SHALL load no authority credential, SHALL NOT advertise any root-only tool — the lifecycle tools, the authority publish tools and the repository write tools — nor any agent publish tool (`publish_status`, `publish_artifact`, `publish_blocked`, `publish_question`), and a by-name call to any of them SHALL return an MCP-level error stating the tool is unavailable inside a delegate run. Read-only tools stay available.
+An MCP server whose environment carries `GIT_PAW_DELEGATE` SHALL treat itself as a non-root session wherever it runs: it SHALL load no authority credential and SHALL NOT advertise any root-only tool or any agent publish tool, and a by-name call to one SHALL return an MCP-level error stating the tool is unavailable inside a delegate run. Read-only tools stay available.
+
+#### Scenario: Root-only tools are the lifecycle, authority publish and repository write tools
+
+- **WHEN** a server inside a delegate run decides which tools exist
+- **THEN** the root-only tools SHALL be the lifecycle tools, the authority publish tools and the repository write tools, and the agent publish tools SHALL be `publish_status`, `publish_artifact`, `publish_blocked` and `publish_question`
 
 #### Scenario: A delegate's MCP server has no root tools
 
