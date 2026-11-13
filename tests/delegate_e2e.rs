@@ -405,10 +405,16 @@ fn an_orphaned_delegate_group_counts_until_its_deadline_then_is_killed() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs();
+    let lstart = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &sleeper.id().to_string()])
+        .output()
+        .expect("ps lstart");
+    let lstart = String::from_utf8_lossy(&lstart.stdout).trim().to_string();
     let record = |deadline: u64| {
         serde_json::json!({
             "profile": "fixer", "level": "auto", "pid": dead_pid,
-            "pgid": sleeper.id(), "deadline": deadline, "program": "sleep"
+            "pgid": sleeper.id(), "deadline": deadline, "program": "sleep",
+            "leader_start": lstart
         })
         .to_string()
     };

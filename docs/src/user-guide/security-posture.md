@@ -608,15 +608,20 @@ every worktree, with no pane anyone watches. What bounds it:
   killed. The group is recorded with its deadline: an interrupted
   `git paw delegate` kills it, and an orphaned one is killed at the next
   admission once overdue, counting toward the limits until then.
-- **No widening through `args`.** A delegate profile whose `args` carry any of
-  its CLI's `auto` or `full-auto` approval flags (alone or as `flag=value`),
-  sandbox-disabling flags, or a permission-bypass value (alone or as a
-  `key=value` override) fails the config load, so an editing run can never be
-  counted as read-only and no run reaches full-auto.
+- **Profile `args` are trusted config, checked best-effort.** A profile's
+  `args` are operator-trusted configuration, like `[clis.<name>].args`, and
+  `git paw setup-cli` keeps `config.toml` edits ask-protected. A delegate
+  profile's `args` are still checked against a per-family denylist (approval
+  and sandbox flags, each family's permission-mode, sandbox and tool-grant
+  flags, Codex `-c` overrides of `sandbox_mode`, `approval_policy` and
+  `sandbox_workspace_write.*`, and bypass values), so an editing run is not
+  counted as read-only by accident. That check is defence in depth: no
+  denylist over arbitrary CLI arguments is complete.
 - **Signalling is identity-checked.** A recorded process group is signalled
-  only when it is greater than 1, is not git-paw's own group, and its leader
-  still runs the recorded delegate program; a planted or reused record is
-  dropped without signalling anything.
+  only when it is greater than 1 (and at most `i32::MAX`), is not git-paw's
+  own group, and its leader still runs the recorded delegate program with the
+  start time recorded at spawn; a planted or reused group is never signalled,
+  and a record whose group could not be confirmed and killed keeps counting.
 - **Operator isolation.** The run gets its CLI's operator isolation (unless
   `[clis.<name>] inherit_operator_config = true`). That matters more than for
   a worker: a delegate runs in the main checkout, whose auto memory is your

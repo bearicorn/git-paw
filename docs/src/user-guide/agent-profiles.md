@@ -149,7 +149,8 @@ another agent's request, with no pane for anyone to watch. Its bounds:
   orphaned some other way is killed by the next admission once its deadline
   passes — until then it still counts toward the limits. A recorded group is
   only ever signalled when it is a real group other than git-paw's own and
-  its leader still runs the delegate program. Give the call a tool
+  its leader is still the delegate (same program, same start time); a group
+  that cannot be confirmed is never killed, and its record keeps counting. Give the call a tool
   timeout of at least `timeout_seconds`, or run it in the background.
 - **Environment.** The run carries `GIT_PAW_DELEGATE=<name>` and its CLI's
   operator isolation, and has `GIT_PAW_BROKER_URL` removed. It gets no
@@ -157,11 +158,18 @@ another agent's request, with no pane for anyone to watch. Its bounds:
   `broker.sh` and `sweep.sh`, and an MCP server started inside the run all
   refuse under the marker; that MCP server also registers no publish tool
   (`publish_status`, `publish_artifact`, `publish_blocked`,
-  `publish_question`). A delegate profile's `args` may not carry any of its
-  CLI's `auto` or `full-auto` approval flags (as `flag value` or
-  `flag=value`), its sandbox-disabling flags, or a permission-bypass value
-  such as `bypassPermissions` or `danger-full-access` — the level comes from
-  `approval` alone.
+  `publish_question`).
+- **Profile `args` are trusted config.** A profile's `args` are
+  operator-trusted configuration, exactly like `[clis.<name>].args` (and
+  `git paw setup-cli` keeps `config.toml` edits behind a prompt). As defence
+  in depth, a delegate profile's `args` are checked against a per-family
+  denylist — the CLI's approval-row flags, its permission, sandbox and
+  tool-grant flags (Claude `--permission-mode`, `--allowedTools`,
+  `--settings`, …; Codex `--sandbox`, `-a`, `--full-auto`, `-c sandbox_mode=…`,
+  …; Qwen `-y`, `--approval-mode`), and bypass values such as
+  `bypassPermissions` or `danger-full-access` — and a match fails the load.
+  No such list over arbitrary arguments is complete; the level comes from
+  `approval`, and the boundary is that level plus the sandbox.
 - **No prompt relay.** No pane exists, so nothing escalates or answers a
   delegate's permission prompts.
 

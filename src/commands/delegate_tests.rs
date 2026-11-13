@@ -339,6 +339,7 @@ fn a_planted_or_reused_group_is_never_signalled() {
             pgid: Some(*pgid),
             deadline: Some(1),
             program: Some((*program).to_string()),
+            leader_start: Some(START.to_string()),
         };
         write_record(&dirs.active.join(format!("{}.json", rec.pid)), &rec).unwrap();
     }
@@ -372,8 +373,24 @@ fn a_planted_or_reused_group_is_never_signalled() {
         pgid: None,
         deadline: None,
         program: None,
+        leader_start: None,
     };
-    admit_run(&dirs, &me, &runner).expect("every planted record is dropped, admission passes");
+    // Records 0, 1 and 777 name no group: dead and dropped. Record 888's
+    // group is alive but unverifiable, so it is kept and still counts.
+    let err = admit_run(&dirs, &me, &runner)
+        .expect_err("the unverified overdue writer still counts")
+        .to_string();
+    assert!(err.contains("p3"), "{err}");
+    for pid in [900_000, 900_001, 900_002] {
+        assert!(
+            !dirs.active.join(format!("{pid}.json")).exists(),
+            "{pid} dropped"
+        );
+    }
+    assert!(
+        dirs.active.join("900003.json").exists(),
+        "the unkilled record is kept"
+    );
     let kills: Vec<_> = runner
         .calls()
         .into_iter()
@@ -407,6 +424,7 @@ fn a_verified_overdue_group_is_killed() {
         pgid: Some(4242),
         deadline: Some(1),
         program: Some("/opt/agent".to_string()),
+        leader_start: Some(START.to_string()),
     };
     write_record(&dirs.active.join("900100.json"), &rec).unwrap();
     let ok = |success: bool, stdout: &str| {
@@ -422,6 +440,7 @@ fn a_verified_overdue_group_is_killed() {
         ("kill", ["-0", ..]) => ok(false, ""),
         ("ps", [_, "pgid=", ..]) => ok(true, "777\n"),
         ("ps", [_, "pgid=,command=", _, "4242"]) => ok(true, "4242 /opt/agent --batch\n"),
+        ("ps", [_, "lstart=", _, "4242"]) => ok(true, &format!("{START}\n")),
         _ => ok(true, ""),
     });
     let me = ActiveRun {
@@ -431,6 +450,7 @@ fn a_verified_overdue_group_is_killed() {
         pgid: None,
         deadline: None,
         program: None,
+        leader_start: None,
     };
     admit_run(&dirs, &me, &runner).expect("admitted");
     assert!(
@@ -441,4 +461,92 @@ fn a_verified_overdue_group_is_killed() {
         "{:?}",
         runner.calls()
     );
+}
+
+const START: &str = "Thu Nov 13 10:00:00 2026";
+
+/// A leader whose start time differs from the recorded one is a different
+/// process reusing the group id: it is not killed, and the record is kept.
+#[test]
+fn a_group_whose_leader_restarted_is_not_killed() {
+    let dir = TempDir::new().unwrap();
+    let dirs = RunDirs::new(dir.path());
+    dirs.create().unwrap();
+    let rec = ActiveRun {
+        profile: "fixer".to_string(),
+        level: crate::config::ApprovalLevel::Auto,
+        pid: 900_200,
+        pgid: Some(4343),
+        deadline: Some(1),
+        program: Some("/opt/agent".to_string()),
+        leader_start: Some(START.to_string()),
+    };
+    write_record(&dirs.active.join("900200.json"), &rec).unwrap();
+    let ok = |success: bool, stdout: &str| {
+        Ok(crate::command_runner::CommandOutput {
+            success,
+            code: Some(i32::from(!success)),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    };
+    let runner = FakeCommandRunner::scripted(move |program, args| match (program, args) {
+        ("kill", ["-0", "--", "-4343"]) => ok(true, ""),
+        ("kill", ["-0", ..]) => ok(false, ""),
+        ("ps", [_, "pgid=", ..]) => ok(true, "777\n"),
+        ("ps", [_, "pgid=,command=", _, "4343"]) => ok(true, "4343 /opt/agent\n"),
+        ("ps", [_, "lstart=", _, "4343"]) => ok(true, "Fri Nov 14 09:00:00 2026\n"),
+        _ => ok(true, ""),
+    });
+    let me = ActiveRun {
+        profile: "explorer".to_string(),
+        level: crate::config::ApprovalLevel::Manual,
+        pid: std::process::id(),
+        pgid: None,
+        deadline: None,
+        program: None,
+        leader_start: None,
+    };
+    assert!(
+        admit_run(&dirs, &me, &runner).is_err(),
+        "the kept record still counts"
+    );
+    assert!(
+        !runner
+            .calls()
+            .iter()
+            .any(|(p, a)| p == "kill" && a.first().is_some_and(|f| f == "-KILL")),
+        "{:?}",
+        runner.calls()
+    );
+    assert!(dirs.active.join("900200.json").exists());
+}
+
+/// When the post-spawn record cannot be written, the delegate's group is
+/// killed and the run fails — an unrecorded group never runs on.
+#[test]
+fn a_failed_post_spawn_record_kills_the_group_and_fails_the_run() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let fx = fixture();
+    let killed = Rc::new(Cell::new(false));
+    let seen = Rc::clone(&killed);
+    let active = fx.repo.join(".git-paw/logs/delegates/active");
+    let spawner = FakeCommandRunner::succeeding("").with_spawn(move |_| {
+        // The record's directory vanishes between admission and the rewrite.
+        let _ = std::fs::remove_dir_all(&active);
+        Ok(Box::new(FakeChild::new(
+            Rc::new(Cell::new(crate::command_runner::ChildState::Running)),
+            Rc::clone(&seen),
+        )))
+    });
+    let (result, _) = run(
+        &fx.repo,
+        agent_config(&fx, ""),
+        &spawner,
+        task("explorer", "x"),
+        None,
+    );
+    assert!(result.is_err(), "the run fails");
+    assert!(killed.get(), "the spawned group is killed");
 }

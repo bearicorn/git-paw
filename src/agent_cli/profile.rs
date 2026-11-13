@@ -193,10 +193,18 @@ impl CliProfile {
     }
 
     /// The first word of `args` that would widen this CLI's permissions or
-    /// switch its sandbox off, or `None`: any flag of its `auto` or
-    /// `full-auto` approval rows (the `approval_args` override included),
-    /// alone or as `flag=value`; any sandbox-disabling flag; and any
-    /// permission-bypass value, alone or as a `key=value` override.
+    /// switch its sandbox off, or `None`. Best-effort defence in depth: a
+    /// profile's `args` are operator-trusted configuration, like
+    /// `[clis.<id>].args`, and no denylist over arbitrary arguments is
+    /// complete. Denied, with quotes stripped and both `flag value` and
+    /// `flag=value` forms:
+    ///
+    /// - any flag of the `auto` or `full-auto` approval rows (the
+    ///   `approval_args` override included), any sandbox-disabling flag and
+    ///   the family's own delegate denylist, whatever the value;
+    /// - a config override (`-c key=value`) of a denied key;
+    /// - any permission-bypass value, compared case-insensitively, alone or
+    ///   as the value of `key=value`.
     #[must_use]
     pub fn widening_arg(&self, args: &str) -> Option<String> {
         let rows = format!(
@@ -209,18 +217,45 @@ impl CliProfile {
             .split_whitespace()
             .filter(|w| w.starts_with('-'))
             .chain(provider.sandbox_disabling_flags().iter().copied())
+            .chain(provider.delegate_denied_flags().iter().copied())
             .collect();
-        let values = provider.permission_bypass_values();
-        args.split_whitespace()
-            .find(|word| {
-                flags
-                    .iter()
-                    .any(|f| word == f || word.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
-                    || values.iter().any(|v| {
-                        word == v || word.rsplit_once('=').is_some_and(|(_, value)| value == *v)
-                    })
+        let (config_flags, denied_keys) = provider.denied_config_overrides();
+        let bypass = provider.permission_bypass_values();
+        let unquote = |w: &str| w.trim_matches(|c| c == '"' || c == '\'').to_string();
+        let words: Vec<String> = args.split_whitespace().map(unquote).collect();
+        let is_bypass = |value: &str| {
+            let value = unquote(value);
+            bypass.iter().any(|b| b.eq_ignore_ascii_case(&value))
+        };
+        let denied_key = |pair: &str| {
+            let key = unquote(pair.split_once('=').map_or(pair, |(k, _)| k)).to_ascii_lowercase();
+            denied_keys.iter().any(|d| match d.strip_suffix(".*") {
+                Some(table) => key == table || key.starts_with(&format!("{table}.")),
+                None => key == *d,
             })
-            .map(str::to_string)
+        };
+        for (i, word) in words.iter().enumerate() {
+            let (name, inline) = match word.split_once('=') {
+                Some((n, v)) if n.starts_with('-') => (n, Some(v)),
+                _ => (word.as_str(), None),
+            };
+            if flags.contains(&name) {
+                return Some(word.clone());
+            }
+            if config_flags.contains(&name)
+                && inline
+                    .or_else(|| words.get(i + 1).map(String::as_str))
+                    .is_some_and(|pair| {
+                        denied_key(pair) || pair.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v))
+                    })
+            {
+                return Some(word.clone());
+            }
+            if is_bypass(word) || word.rsplit_once('=').is_some_and(|(_, v)| is_bypass(v)) {
+                return Some(word.clone());
+            }
+        }
+        None
     }
 
     /// Refuses a launch that would switch off a declared native sandbox: the
@@ -257,6 +292,16 @@ impl CliProfile {
             .find(|flag| words.contains(flag))
         {
             return refuse(format!("contain `{flag}`, which turns that sandbox off"));
+        }
+        if let Some(word) = words.iter().find(|w| {
+            let value = w.rsplit_once('=').map_or(**w, |(_, v)| v);
+            self.family
+                .provider()
+                .permission_bypass_values()
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(value))
+        }) {
+            return refuse(format!("contain `{word}`, which turns that sandbox off"));
         }
         if let Some(args) = self.native_sandbox_args()
             && let Some(name) = args.split_whitespace().next()

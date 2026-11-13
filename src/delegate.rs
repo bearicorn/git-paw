@@ -213,6 +213,21 @@ pub struct ActiveRun {
     /// identity checked before the group is ever signalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
+    /// The group leader's start time as `ps -o lstart=` reported it right
+    /// after the spawn: with `program`, the identity a kill requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_start: Option<String>,
+}
+
+/// The largest process or group id a signal can name: anything above
+/// `i32::MAX` wraps to a negative `pid_t` (a group, or every process).
+const MAX_PID: u32 = 0x7fff_ffff;
+
+/// Whether a record's holder `pid` names a real, single process: `0` and `1`
+/// (the caller's group, init) and ids above `i32::MAX` count as dead.
+#[must_use]
+pub fn valid_holder(pid: u32) -> bool {
+    pid > 1 && pid <= MAX_PID
 }
 
 /// Whether `pgid` may be probed or signalled at all: a real group (`> 1`;
@@ -220,18 +235,23 @@ pub struct ActiveRun {
 /// signal) that is not git-paw's own group (`own`, when known).
 #[must_use]
 pub fn valid_pgid(pgid: u32, own: Option<u32>) -> bool {
-    pgid > 1 && own != Some(pgid)
+    pgid > 1 && pgid <= MAX_PID && own != Some(pgid)
 }
 
 /// Whether `ps -o pgid=,command= -p <pgid>` output (`ps_line`) shows the
-/// group's leader still leading `pgid` and still running `program` — so a
-/// group id reused by an unrelated process is never killed.
+/// group's leader still leading `pgid`, with the basename of its first argv
+/// word equal to `program`'s — half of the identity a kill requires (the
+/// other half is the leader's recorded start time), so a group id reused by
+/// an unrelated process is never killed.
 #[must_use]
 pub fn leader_matches(ps_line: &str, pgid: u32, program: &str) -> bool {
+    let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     let mut words = ps_line.split_whitespace();
     words.next().and_then(|g| g.parse::<u32>().ok()) == Some(pgid)
         && !program.is_empty()
-        && words.any(|w| w == program)
+        && words
+            .next()
+            .is_some_and(|argv0| basename(argv0) == basename(program))
 }
 
 /// What an active-run record means at admission time.

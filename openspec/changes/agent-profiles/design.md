@@ -152,6 +152,11 @@ repository's `.claude/settings.local.json` applies, so any helper grant the user
   worktree); no nesting. The guard checks only the caller's working directory: a worker allowed to
   run shell commands can `cd` into the main checkout and pass it, so it is defence in depth, not a
   boundary.
+- **Profile args are operator-trusted:** a profile's `args` are configuration like
+  `[clis.<name>].args` — written by the operator, and `config.toml` edits are ask-protected by
+  `git paw setup-cli`. The per-family delegate denylist (approval-row flags, sandbox-disabling
+  flags, each family's permission/sandbox/tool-grant flags, Codex `-c` keys, bypass values) is
+  best-effort defence in depth: no denylist over arbitrary CLI arguments can be complete.
 - **Lifetime:** the delegate leads its own process group; the active-run record carries that group
   and its deadline, `git paw delegate` kills the group on SIGINT/SIGTERM/SIGHUP, and admission kills
   an orphaned group past its deadline, so a delegate never outlives its timeout or escapes the

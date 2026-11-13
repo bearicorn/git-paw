@@ -17,7 +17,7 @@ use crate::command_runner::{ChildState, CommandRunner, SpawnSpec};
 use crate::config::{PawConfig, ProfileEntry, ProfileKind};
 use crate::delegate::{
     ActiveRun, DELEGATE_ENV, LedgerLine, Outcome, RecordState, admit, classify, document, framing,
-    leader_matches, truncate_result, valid_pgid,
+    leader_matches, truncate_result, valid_holder, valid_pgid,
 };
 use crate::error::PawError;
 use crate::supervisor::escalation::HeadlessInvocation;
@@ -136,6 +136,7 @@ pub fn delegate(
         pgid: None,
         deadline: None,
         program: None,
+        leader_start: None,
     };
     let record_path = admit_run(&dirs, &record, host.runner)?;
     let result = run_admitted(
@@ -344,21 +345,32 @@ fn admit_run(
         // a corrupt or planted 0, 1 or git-paw's own group counts as dead.
         let pgid = run.pgid.filter(|g| valid_pgid(*g, own) && *g != record.pid);
         let group_alive = pgid.is_some_and(|g| alive(&format!("-{g}")));
-        match classify(&run, now, alive(&run.pid.to_string()), group_alive) {
+        let holder_alive = valid_holder(run.pid) && alive(&run.pid.to_string());
+        match classify(&run, now, holder_alive, group_alive) {
             RecordState::Live => live.push(run),
             RecordState::Dead => {
                 let _ = fs::remove_file(&path);
             }
             RecordState::Overdue => {
                 // An orphaned delegate past its deadline: kill its group, but
-                // only after confirming its leader is still the delegate
-                // program — a reused group id is never signalled.
-                if let (Some(g), Some(program), Some(_)) = (pgid, run.program.as_deref(), own)
-                    && leader_is(runner, g, program)
-                {
-                    let _ = runner.run("kill", &["-KILL", "--", &format!("-{g}")]);
+                // only after confirming the leader is still the delegate
+                // (program and start time) — a reused group id is never
+                // signalled. A record whose group was not killed keeps
+                // counting: it is dropped only once its group is gone.
+                let killed = matches!(
+                    (pgid, run.program.as_deref(), run.leader_start.as_deref(), own),
+                    (Some(g), Some(program), Some(start), Some(_))
+                        if leader_is(runner, g, program)
+                            && leader_start(runner, g).as_deref() == Some(start)
+                            && runner
+                                .run("kill", &["-KILL", "--", &format!("-{g}")])
+                                .is_ok_and(|o| o.success)
+                );
+                if killed {
+                    let _ = fs::remove_file(&path);
+                } else {
+                    live.push(run);
                 }
-                let _ = fs::remove_file(&path);
             }
         }
     }
@@ -396,6 +408,16 @@ fn own_pgid(runner: &dyn CommandRunner) -> Option<u32> {
         .ok()
         .filter(|o| o.success)?;
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// The start time `ps -o lstart=` reports for process `pid`, or `None`.
+fn leader_start(runner: &dyn CommandRunner, pid: u32) -> Option<String> {
+    let out = runner
+        .run("ps", &["-o", "lstart=", "-p", &pid.to_string()])
+        .ok()
+        .filter(|o| o.success)?;
+    let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!start.is_empty()).then_some(start)
 }
 
 /// Whether group `pgid`'s leader still leads it and runs `program`.
@@ -515,6 +537,7 @@ fn run_admitted(
             pgid: Some(pgid),
             deadline: Some(started_at + run.profile.effective_timeout_seconds()),
             program: Some(run.invocation.program.clone()),
+            leader_start: leader_start(host.runner, pgid),
             ..run.record.clone()
         },
     ) {

@@ -12,6 +12,7 @@ fn run(profile: &str, level: ApprovalLevel, pid: u32) -> ActiveRun {
         pgid: None,
         deadline: None,
         program: None,
+        leader_start: None,
     }
 }
 
@@ -174,7 +175,8 @@ fn only_a_real_foreign_group_is_valid() {
     assert!(valid_pgid(4242, None));
 }
 
-/// A reused group id is never mistaken for the delegate's group.
+/// A reused group id is never mistaken for the delegate's group: the
+/// leader must lead it and its first argv word's basename must match.
 #[test]
 fn the_leader_must_still_be_the_delegate_program() {
     assert!(leader_matches(
@@ -182,17 +184,24 @@ fn the_leader_must_still_be_the_delegate_program() {
         4242,
         "/opt/agent"
     ));
-    assert!(leader_matches(
-        "4242 /bin/sh /tmp/stub-agent --batch",
-        4242,
-        "/tmp/stub-agent"
-    ));
+    assert!(leader_matches("4242 agent --batch", 4242, "/opt/bin/agent"));
     assert!(!leader_matches(
-        "4242 /usr/bin/vim notes.txt",
+        "4242 /usr/bin/vim /opt/agent",
         4242,
         "/opt/agent"
     ));
     assert!(!leader_matches("17 /opt/agent", 4242, "/opt/agent"));
     assert!(!leader_matches("", 4242, "/opt/agent"));
     assert!(!leader_matches("4242 /opt/agent", 4242, ""));
+}
+
+/// Holder ids 0 and 1, and any id above `i32::MAX`, are never real.
+#[test]
+fn out_of_range_ids_count_as_dead() {
+    assert!(!valid_holder(0));
+    assert!(!valid_holder(1));
+    assert!(!valid_holder(0x8000_0000));
+    assert!(valid_holder(4242));
+    assert!(!valid_pgid(0x8000_0000, None));
+    assert!(!valid_pgid(u32::MAX, None));
 }
