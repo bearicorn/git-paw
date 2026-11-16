@@ -43,22 +43,6 @@ When a `committed` artifact arrives from an agent that has unread orchestrator `
 - **WHEN** `feat-x` commits again without polling
 - **THEN** no further `[delivery]` question SHALL be emitted for `seq` 42
 
-### Requirement: Watch-target withdrawal endpoint
-
-The broker SHALL serve `DELETE /watch` with a JSON body naming a `worktree_path`. For a registered target it SHALL stop that target's watcher before answering, forget the target, and withdraw its agent from the conflict detector, then answer `204`. An unknown path SHALL answer `204` with no effect.
-
-#### Scenario: A withdrawn worktree is no longer watched
-
-- **GIVEN** a registered watch target for `feat-x`
-- **WHEN** `DELETE /watch` names its worktree path and the worktree is then deleted
-- **THEN** no `agent.status` for `feat-x` SHALL be published after the `204` response
-
-#### Scenario: Withdrawing an unknown path is harmless
-
-- **GIVEN** no watch target at `/tmp/nowhere`
-- **WHEN** `DELETE /watch` names `/tmp/nowhere`
-- **THEN** the response SHALL be `204` and the broker state SHALL be unchanged
-
 ### Requirement: A visibly busy agent keeps the wave from reading stalled
 
 The broker host SHALL sample each registered agent's pane at a fixed interval. A pane classified mid-response whose capture changed since the previous sample SHALL count as activity, not progress. `wave` SHALL add `last_activity_unix_secs` and `busy_agents`, and `stalled` SHALL also require no activity within the threshold.
