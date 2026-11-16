@@ -1332,7 +1332,7 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
   that show as modified in worktrees → `upgrade-hygiene`.
 - **EF-31** — `git paw add` has no `--dry-run` → `add-dry-run`.
 
-**Specs refreshed 2026-11-16 on `feat/v0.21.0-specs`** (rebased onto v0.20.0; 27 changes, all
+**Specs refreshed 2026-11-16 on `feat/v0.21.0-specs`** (rebased onto v0.20.0; 29 changes, all
 `--strict` valid with 0 errors).
 - **Rebased:** the 15 original drafts now carry the scenarios v0.19.0 and v0.20.0 added. Stale
   asset paths point at the v0.20.0 skill packages. `readme-landing-page` was dropped; it shipped
