@@ -1325,14 +1325,14 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
 - **EF-26, EF-32** — recovery resumes a conversation that never started ("No conversation
   found"), and resumed workers sit idle with no continue message → `worker-resume-recovery`.
 - **EF-33** — feedback sent to a busy worker goes unread, and nothing tells the orchestrator
-  → `broker-event-semantics`.
+  → `broker-delivery-and-activity`.
 - **EF-21** — after a TOML parse error, doctor reports fallback defaults as the real config
   → `config-check-command`.
 - **EF-24, EF-27** — an upgrade from 0.19 leaves `.gitignore` short and tracked helper copies
   that show as modified in worktrees → `upgrade-hygiene`.
 - **EF-31** — `git paw add` has no `--dry-run` → `add-dry-run`.
 
-**Specs refreshed 2026-11-16 on `feat/v0.21.0-specs`** (rebased onto v0.20.0; 25 changes, all
+**Specs refreshed 2026-11-16 on `feat/v0.21.0-specs`** (rebased onto v0.20.0; 27 changes, all
 `--strict` valid with 0 errors).
 - **Rebased:** the 15 original drafts now carry the scenarios v0.19.0 and v0.20.0 added. Stale
   asset paths point at the v0.20.0 skill packages. `readme-landing-page` was dropped; it shipped
@@ -1340,9 +1340,14 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
 - **Folded into existing drafts:** DV-19 → `configurable-agent-grid`; PK-15 →
   `dashboard-usage-view`; EF-21 → `config-check-command`.
 - **New drafts** covering the findings carried above and the external feedback:
-  - `broker-event-semantics`: DF-21/35/37/40/50/56, DV-08/09/10/13/15/17, PK-12/13/14/16, EF-33.
-    It can be split into three changes: commit-event truth, the verification lifecycle, and
-    delivery and activity.
+  - Broker event semantics, split into three changes that land in this order:
+    - `commit-event-truth`: DF-35/50/56, DV-08/09/10/13/15. Rebases publish one event, the
+      orchestrator's commits are not credited to workers, acknowledgements hold, and `remove`
+      withdraws the agent first.
+    - `verification-lifecycle`: DF-21/37/40, PK-12/13/14/16. An explicit `done`, a freeze while
+      the gates run, and merges checked against the verified tip.
+    - `broker-delivery-and-activity`: EF-33, DV-17. Per-agent read cursors, a `[delivery]`
+      question for a commit over unread feedback, and pane activity that is not a stall.
   - `approval-level-truth`: EF-28/23/29. It adds four levels, `manual < accept-edits < auto <
     full-auto`; a version-1 `auto` value loads as `accept-edits`. It must ship with the config
     version 2 bump.
@@ -1364,7 +1369,7 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
   rebases its delta:
   - `configurable-agent-grid` and `dashboard-usage-view` (three requirements)
   - `session-state-reconciliation` and `supervisor-vocabulary-split` (doctor read-only)
-  - `broker-event-semantics` and `spec-hygiene` (exit summary)
+  - `verification-lifecycle` and `spec-hygiene` (exit summary)
 ---
 
 ## v0.22.0 — Session recording & replay, rethought (planned)
