@@ -15,9 +15,11 @@
 
 ## 3. Tests per scenario
 
-- [ ] 3.1 Unit (`supervisor/layout.rs`): default table unchanged; `agents_per_row = 3` with 7 agents → rows 3/3/1 and `50/3`%; cap error text for 26 with defaults
+- [ ] 3.1 Unit (`src/surface.rs`): default table unchanged; `agents_per_row = 3` with 7 agents → rows 3/3/1 and `50/3`%; cap error text for 26 with defaults
+- [ ] 3.1a Drop the stale "Configurable max_agents is planned for v1.0.0" note in `src/surface.rs:129`
 - [ ] 3.2 Builder tests (`tmux/command.rs`): row splits and resize pass for non-default columns; no `swap-pane`
-- [ ] 3.3 E2E (real tmux): `max_agents = 30` with 28 stub agents launches; `--max-agents 12` overrides config 10; `agents_per_row = 0` load error; `add` refused at the recorded cap 12 despite config 25; recovery of 20 agents with config 10; old session file → defaults on `add`; bare session with `max_agents = 2` and 3 branches launches tiled; re-tile on `add` uses recorded `agents_per_row = 3`
+- [ ] 3.3 E2E (real tmux): `max_agents = 30` with 28 stub agents launches; `--max-agents 12` overrides config 10; `agents_per_row = 0` load error; `add` refused at the recorded cap 12 despite config 25; recovery of 20 agents with config 10; old session file → defaults on `add`; bare session with `max_agents = 2` and 3 branches is refused naming the effective cap; bare session with `agents_per_row = 3` and 5 branches lays out rows of 3 and 2; re-tile on `add` uses recorded `agents_per_row = 3`
+- [ ] 3.4 DV-19: the add re-tile sizes each row's panes from the row's full width, not from the split pane; E2E (real tmux) for *A remove followed by two adds keeps equal-width columns* — 3 agents, `remove` one, `add` two, every agent pane within one column of a quarter of the window width (reproduce the one-column-wide newest pane first)
 
 ## 4. Docs
 

@@ -21,7 +21,7 @@
 
 ## 4. Skill
 
-- [ ] 4.1 `assets/agent-skills/coordination.md` orientation section: shared-cache sentence (no stack or directory names); update the coordination-skill content test; `tests/lang_agnostic_skill_audit.rs` green
+- [ ] 4.1 `assets/agent-skills/coordination/SKILL.md` orientation section: shared-cache sentence (no stack or directory names); update the coordination-skill content test; `tests/lang_agnostic_skill_audit.rs` green
 
 ## 5. Tests per scenario (`tests/worktree_shared_deps.rs`, real repos via `tempfile`)
 

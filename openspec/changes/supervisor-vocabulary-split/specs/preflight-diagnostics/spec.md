@@ -24,11 +24,11 @@ records" requirement allows.
 - **AND** each check SHALL carry a ✓, ⚠, or ✗ status
 - **AND** every ⚠ or ✗ check SHALL include a remedy line
 
-#### Scenario: Doctor does not mutate state without --fix
+#### Scenario: Doctor does not mutate state
 
 - **GIVEN** a repository with a `.git-paw/` directory and a drifted session record
 - **WHEN** `git paw doctor` is run without `--fix`
-- **THEN** no file under `.git-paw/`, no session file, and no git worktree registration SHALL be created, modified, or deleted
+- **THEN** no file under `.git-paw/` (config, scripts, session state), no session file, and no git worktree registration SHALL be created, modified, or deleted
 
 ### Requirement: Coordination check
 
@@ -40,9 +40,11 @@ When coordinated mode is the configured default (`default_mode = "coordinated"`,
 - **WHEN** `git paw doctor` is run
 - **THEN** the Coordination group SHALL report ✗ for that gate command with a remedy naming its `[orchestrator.gates]` key
 
-#### Scenario: Coordinated mode not the default
+#### Scenario: Supervisor disabled
 
-- **GIVEN** `default_mode = "bare"`
+The title keeps the version-1 name; the scenario now covers both spellings of "coordinated mode is not the default".
+
+- **GIVEN** `default_mode = "bare"`, or a version-1 file with `[supervisor] enabled = false`
 - **WHEN** `git paw doctor` is run
 - **THEN** the Coordination group SHALL report an informational ✓
 

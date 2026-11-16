@@ -21,6 +21,11 @@ the `tmux-orchestration` "Supervisor-mode pane layout" requirement, so
 an incrementally-added grid matches a start-time grid of the same agent
 count in both pane count and pane widths. The first coding-agent index SHALL come from the session's recorded layout, not from a mode constant.
 
+The rebalance SHALL size every pane of each agent row from that row's
+full width, never from the width of the pane the new agent was split
+from, so any sequence of `add` and `remove` operations leaves each row
+at equal widths, the same as a fresh `start` of the same count would.
+
 #### Scenario: Grid re-tiles for the new agent count
 
 - **GIVEN** an active session with default grid settings and 4 agent panes (single row)
@@ -53,6 +58,17 @@ count in both pane count and pane widths. The first coding-agent index SHALL com
 - **THEN** the 3 agent panes SHALL each render at approximately one
   third of the window width (within a one-column rounding tolerance),
   matching what a 3-agent `start` would produce
+
+#### Scenario: A remove followed by two adds keeps equal-width columns
+
+- **GIVEN** an active session with default grid settings and 3 agent
+  panes in one row
+- **WHEN** the user runs `git paw remove` for one agent and then
+  `git paw add` twice, and the re-tile is applied to a live tmux window
+- **THEN** the 4 agent panes SHALL each render at approximately one
+  quarter of the window width (within a one-column rounding tolerance)
+- **AND** the most recently added pane SHALL NOT be narrower than the
+  others beyond that tolerance
 
 #### Scenario: Adding past the agent cap is rejected
 

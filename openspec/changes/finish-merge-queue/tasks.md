@@ -33,7 +33,8 @@
 
 ## 5. Skill + docs
 
-- [ ] 5.1 `assets/agent-skills/orchestrator.md` (renamed from `supervisor.md` by v0.18 `orchestrator-skill-export`; a package directory after v0.20 `skill-package-layout`) "Merge orchestration": replace the raw `git checkout`/`git merge --ff-only`/`git reset --hard` loop with the `git paw finish --rebase` procedure and exit-code handling; update `src/skills.rs` content tests (the `git merge --ff-only` assertion at the merge-orchestration test) and `tests/lang_agnostic_skill_audit.rs` stays green
+- [ ] 5.1 `assets/agent-skills/orchestrator/SKILL.md` (renamed from `supervisor.md` by v0.18 `orchestrator-skill-export`; a package directory after v0.20 `skill-package-layout`) "Merge orchestration": replace the raw `git checkout`/`git merge --ff-only`/`git reset --hard` loop with the `git paw finish --rebase` procedure and exit-code handling; update `src/skills.rs` content tests (the `git merge --ff-only` assertion at the merge-orchestration test) and `tests/lang_agnostic_skill_audit.rs` stays green
+- [ ] 5.1a Keep v0.20's merge-landing check (`git merge-base --is-ancestor`) after `git paw finish` reports a branch integrated and before archive / `advanced-main`; update `tests/orchestrator_skill_content.rs::per_branch_merge_loop_names_no_literal_branch_and_confirms_the_merge` and `merge_landing_is_checked_before_archive_and_publish` to the queue wording (scenario title *Supervisor skill describes the per-branch merge + test loop* is kept; the loop now runs inside `finish`)
 - [ ] 5.2 `docs/src/user-guide/supervisor.md` merge-orchestration mirror (or its v0.18 replacement chapter; the v0.17 *Agent permissions* section stays as is), `docs/src/cli-reference.md` queue flags, `docs/src/user-guide/session-lifecycle.md` (merging a wave), README `finish` row mentions batches
 
 ## 6. Gates

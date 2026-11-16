@@ -58,7 +58,7 @@ No breaking change: every config that loads today loads the same way, with the s
   (`check_config`, and `unknown_config_keys` treats `version` as a known key), and
   `src/init.rs` (no code change: `migrate_existing_config` already backfills a new template
   key).
-- **Scripts:** none change. `assets/scripts/_paw_common.sh` and `sweep.sh` ignore the new
+- **Scripts:** none change. `assets/agent-skills/_shared/scripts/_paw_common.sh` and `sweep.sh` ignore the new
   top-level key, and their regex fallbacks key on section headers.
 - **Tests:** `src/config/tests.rs` and `tests/config_integration.rs` (golden v1 fixtures load
   unchanged, a version-2 file is refused, mapper round-trip), `src/doctor_tests.rs`, and the

@@ -11,7 +11,7 @@ For each CLI identity whose fact row declares an allowlist item, when that item'
 5. a prefix grant for git-paw itself (`git paw` or `git-paw`) with no subcommand or with a subcommand that changes state (`start`, `add`, `remove`, `stop`, `pause`, `purge`, `init`, `add-cli`, `remove-cli`, `setup-cli`, `finish`);
 6. a prefix grant whose first word is `rm`, `chmod`, `chown`, `dd`, `curl` or `wget`, except a `curl` grant to a loopback address;
 7. a file-tool rule (`Read`, `Edit`, `Write`) anchored at the filesystem root or the home directory and ending in a wildcard;
-8. a grant naming a git-paw helper script that is broader than the setup item's own entry for that helper (for example `Bash(.git-paw/scripts/sweep.sh *)`).
+8. a grant naming a git-paw helper script, at its package path or at its compatibility path, that is broader than the setup item's own entry for that helper (for example `Bash(.git-paw/skills/orchestrator/scripts/sweep.sh *)` or `Bash(.git-paw/scripts/sweep.sh *)`).
 
 The check SHALL be ⚠ when at least one entry matches, listing the file and each matching entry — abbreviated to its tool name and the first two words of its specifier, followed by `…` when anything was cut, so a credential embedded later in a rule is not echoed — with a remedy stating that git-paw does not edit these entries and that the user should review and remove the ones they did not intend; it SHALL be ✓ when none matches, and ⚠ stating the file was not inspected when the file is not valid JSON. The check SHALL NOT report ✗, SHALL NOT print any other content of the file, SHALL NOT create, modify or delete the file, and SHALL NOT influence how any permission prompt is handled. An entry equal to one of the setup item's own planned entries SHALL NOT be listed, whoever added it.
 
@@ -54,6 +54,14 @@ Test: `cli_setup::doctor::tests::a_long_rule_is_abbreviated_and_never_echoes_a_c
 - **THEN** the advisory check SHALL be ⚠ listing `Bash(.git-paw/scripts/sweep.sh *)`
 
 Test: `cli_setup::doctor::tests::a_wide_helper_grant_is_listed`
+
+#### Scenario: A wide grant at the package path is listed whole
+
+- **GIVEN** `permissions.allow` holds `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh *)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the advisory check SHALL be ⚠ listing `Bash(.git-paw/skills/docs-fetch/scripts/docs-fetch.sh *)` with the helper path unabbreviated
+
+Test: `cli_setup::doctor::tests::a_wide_grant_at_the_package_path_is_listed_whole`, `cli_setup::doctor::tests::a_long_non_helper_word_is_still_cut`
 
 #### Scenario: The advisory never edits the file
 

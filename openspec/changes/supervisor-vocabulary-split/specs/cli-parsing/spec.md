@@ -1,7 +1,13 @@
+## REMOVED Requirements
+
+### Requirement: --no-supervisor flag
+
+**Reason**: `--no-supervisor` becomes a hidden deprecated alias of `--bare`. This requirement's scenario "--no-supervisor appears in help output" contradicts that, and strict validation rejects a MODIFIED or RENAMED block that drops it.
+
+**Migration**: Replaced by ADDED *--bare flag* (the canonical flag, with the same three checks for `--bare`) and *--supervisor and --no-supervisor are deprecated aliases* (`--no-supervisor` still parses to the same `StartArgs` as `--bare`, warns once, and is absent from help and completions).
+
 ## RENAMED Requirements
 
-- FROM: `### Requirement: --no-supervisor flag`
-- TO: `### Requirement: --bare flag`
 - FROM: `### Requirement: --supervisor and --no-supervisor are mutually exclusive`
 - TO: `### Requirement: --coordinated and --bare are mutually exclusive`
 
@@ -37,6 +43,27 @@ The `--no-rebase` flag MAY be combined with any other `start` flags including `-
 - **WHEN** the CLI is parsed
 - **THEN** `coordinated` SHALL be `false`
 
+#### Scenario: Start with --supervisor flag
+
+- **GIVEN** `start --supervisor` (the deprecated alias of `--coordinated`)
+- **WHEN** the CLI is parsed
+- **THEN** `coordinated` SHALL be `true`
+
+#### Scenario: Start with --supervisor combined with other flags
+
+- **GIVEN** `start --supervisor --cli claude --branches feat/a,feat/b`
+- **WHEN** the CLI is parsed
+- **THEN** `coordinated` SHALL be `true`
+- **AND** `cli` SHALL be `Some("claude")`
+- **AND** `branches` SHALL be `["feat/a", "feat/b"]`
+
+#### Scenario: Start without --supervisor defaults to false
+
+- **GIVEN** `start --cli claude`, with neither `--coordinated` nor its alias `--supervisor`
+- **WHEN** the CLI is parsed
+- **THEN** `coordinated` SHALL be `false`
+- **AND** `StartArgs` SHALL have no separate `supervisor` field
+
 #### Scenario: Start with --no-rebase flag
 
 - **GIVEN** `start --no-rebase`
@@ -69,31 +96,6 @@ The `--no-rebase` flag MAY be combined with any other `start` flags including `-
 - **WHEN** the dispatch reaches the worktree-creation loop
 - **THEN** `create_worktree(repo_root, "feat/a", rebase_onto_main)` SHALL be called with `rebase_onto_main = true`
 
-### Requirement: --bare flag
-
-The `start` subcommand SHALL accept a `--bare` flag (boolean, default `false`). When passed, the parsed `StartArgs` SHALL have `bare: bool` set to `true`, and the session SHALL run in bare mode whatever `default_mode` says. The flag SHALL appear in `git paw start --help` output with a description that names the use case (running one session without coordination, overriding `default_mode = "coordinated"`).
-
-#### Scenario: --bare sets the flag
-
-- **GIVEN** the user invokes `git paw start --bare`
-- **WHEN** the CLI is parsed
-- **THEN** the parsed `StartArgs.bare` SHALL be `true`
-- **AND** `StartArgs.coordinated` SHALL be `false`
-
-#### Scenario: --bare absent leaves flag false
-
-- **GIVEN** the user invokes `git paw start` with neither `--coordinated` nor `--bare`
-- **WHEN** the CLI is parsed
-- **THEN** `StartArgs.bare` SHALL be `false`
-- **AND** `StartArgs.coordinated` SHALL be `false`
-
-#### Scenario: --bare appears in help output
-
-- **WHEN** `git paw start --help` is run
-- **THEN** the output contains `--bare` and `--coordinated`
-- **AND** the output describes `--bare` as running the session without coordination and overriding `default_mode = "coordinated"`
-- **AND** the output SHALL NOT contain the substring `supervisor`
-
 ### Requirement: --coordinated and --bare are mutually exclusive
 
 The system SHALL reject any invocation that combines `--coordinated` and `--bare` on the same `start` command, under any spelling of either flag. clap's parse step SHALL produce an error before the command runs. The error message SHALL clearly state that the two flags express opposing intents and SHALL list both.
@@ -107,6 +109,15 @@ The system SHALL reject any invocation that combines `--coordinated` and `--bare
 #### Scenario: --bare combines with other flags
 
 - **GIVEN** `start --bare --cli claude --branches feat/a,feat/b`
+- **WHEN** the CLI is parsed
+- **THEN** `bare` SHALL be `true`
+- **AND** `cli` SHALL be `Some("claude")`
+- **AND** `branches` SHALL contain `feat/a` and `feat/b`
+- **AND** parsing SHALL succeed
+
+#### Scenario: --no-supervisor combines with other flags
+
+- **GIVEN** `start --no-supervisor --cli claude --branches feat/a,feat/b` (the deprecated alias of `--bare`)
 - **WHEN** the CLI is parsed
 - **THEN** `bare` SHALL be `true`
 - **AND** `cli` SHALL be `Some("claude")`
@@ -164,7 +175,46 @@ The flag SHALL appear in `git paw start --help` output with a description naming
 - **WHEN** the CLI is parsed
 - **THEN** parsing SHALL fail with an error mentioning both `--unattended` and `--bare`
 
+#### Scenario: --unattended engages supervisor mode
+
+The title keeps the pre-v0.21 name for coordinated mode.
+
+- **GIVEN** `git paw start --unattended` is invoked with `default_mode = "bare"` (or a version-1 `[supervisor] enabled = false`) and no `--coordinated`
+- **WHEN** the dispatch resolves the start-mode resolution chain
+- **THEN** coordinated mode SHALL resolve active and the dispatch SHALL route to the coordinated launch path (`cmd_supervisor`)
+
+#### Scenario: --unattended with --no-supervisor is rejected
+
+- **GIVEN** `start --unattended --no-supervisor` (the deprecated alias of `--bare`)
+- **WHEN** the CLI is parsed
+- **THEN** parsing SHALL fail with an error naming `--unattended` and the conflicting flag
+
 ## ADDED Requirements
+
+### Requirement: --bare flag
+
+The `start` subcommand SHALL accept a `--bare` flag (boolean, default `false`). When passed, the parsed `StartArgs` SHALL have `bare: bool` set to `true`, and the session SHALL run in bare mode whatever `default_mode` says. The flag SHALL appear in `git paw start --help` output with a description that names the use case (running one session without coordination, overriding `default_mode = "coordinated"`).
+
+#### Scenario: --bare sets the flag
+
+- **GIVEN** the user invokes `git paw start --bare`
+- **WHEN** the CLI is parsed
+- **THEN** the parsed `StartArgs.bare` SHALL be `true`
+- **AND** `StartArgs.coordinated` SHALL be `false`
+
+#### Scenario: --bare absent leaves flag false
+
+- **GIVEN** the user invokes `git paw start` with neither `--coordinated` nor `--bare`
+- **WHEN** the CLI is parsed
+- **THEN** `StartArgs.bare` SHALL be `false`
+- **AND** `StartArgs.coordinated` SHALL be `false`
+
+#### Scenario: --bare appears in help output
+
+- **WHEN** `git paw start --help` is run
+- **THEN** the output contains `--bare` and `--coordinated`
+- **AND** the output describes `--bare` as running the session without coordination and overriding `default_mode = "coordinated"`
+- **AND** the output SHALL NOT contain the substring `supervisor`
 
 ### Requirement: --supervisor and --no-supervisor are deprecated aliases
 

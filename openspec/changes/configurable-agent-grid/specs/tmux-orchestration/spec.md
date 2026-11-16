@@ -50,9 +50,9 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **AND** the dashboard row's height SHALL be 50%
 - **AND** each of the 4 agent rows' height SHALL be 12.5%
 
-#### Scenario: Agents beyond the cap are rejected
+#### Scenario: 26-agent supervised session is rejected
 
-- **GIVEN** default grid settings and 26 agent branches resolved
+- **GIVEN** default grid settings (no `--max-agents`, no `[layout] max_agents`) and 26 agent branches resolved
 - **WHEN** the supervised launch flow runs
 - **THEN** the launch SHALL be rejected with a `PawError` stating the requested count (26), the maximum (25), and hints naming `--branches <subset>` and `--max-agents` / `[layout] max_agents`
 - **AND** no tmux session SHALL be created
@@ -85,12 +85,57 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **THEN** pane 0 (dashboard) SHALL remain at the full window width
 - **AND** the vertical height proportions SHALL be unchanged: the dashboard row at 50% and each agent row at `50 / agent_rows` percent
 
-#### Scenario: Full agent row stays at equal-width columns
+#### Scenario: Full agent row stays at five equal-width columns
 
-- **GIVEN** a supervised session with `agents_per_row` agents in a single row
+- **GIVEN** a supervised session with default grid settings and 5 agents in a single row
 - **WHEN** the layout is applied to a live tmux window
-- **THEN** each agent pane SHALL occupy approximately `100 / agents_per_row` percent of the window width
-- **AND** no agent row SHALL contain more than `agents_per_row` panes
+- **THEN** each of the 5 agent panes SHALL occupy approximately 20% of the window width
+- **AND** no agent row SHALL contain more than 5 panes
+- **AND** with `[layout] agents_per_row = 3` and 3 agents, each agent pane SHALL instead occupy approximately one third of the window width and no agent row SHALL contain more than 3 panes
+
+### Requirement: Every pane-less session uses the agent grid
+
+Every launch path — bare `start`, spec-driven `start`, and supervised `start` — and the recovery of a stopped session SHALL build the window with the agent-grid geometry defined by "Supervisor-mode pane layout": the dashboard as the full-width top row when the broker is enabled, coding agents row-major below at no more than the session's effective `agents_per_row` per row, each row rebalanced to equal width, and the session's effective `max_agents` cap (see "Agent grid dimensions are configurable"; defaults 5 and 25). When the session has no dashboard (broker disabled), there SHALL be no top row: coding agents SHALL start at pane 0 and the agent rows SHALL share the full window height evenly. The whole-window `select-layout tiled` and `main-horizontal` layouts SHALL NOT be used to arrange coding agents. Every coding agent's pane index SHALL be its row-major position — the session's first agent index plus the agent's position — at any agent count: each split that creates an agent pane, including the one that opens a new row and the one `git paw add` performs, SHALL target the session's last pane, so the new pane takes the next index and no existing pane is renumbered.
+
+#### Scenario: Bare start builds the grid
+
+- **GIVEN** `[broker] enabled = true`, no supervisor mode and default grid settings
+- **WHEN** `git paw start` launches 7 branches
+- **THEN** pane 0 SHALL be the dashboard spanning the full width
+- **AND** panes 1-5 SHALL form the first agent row and panes 6-7 the second, each row at equal widths
+
+#### Scenario: Spec-driven start builds the grid
+
+- **GIVEN** a spec-driven `git paw start --specs a b c` without supervisor mode and the broker enabled
+- **WHEN** the session is built
+- **THEN** pane 0 SHALL be the dashboard and panes 1-3 SHALL be a single equal-width agent row
+
+#### Scenario: Broker-less start uses the full height
+
+- **GIVEN** `[broker] enabled = false` and default grid settings
+- **WHEN** `git paw start` launches 6 branches
+- **THEN** there SHALL be no dashboard pane
+- **AND** panes 0-4 SHALL form the first agent row and pane 5 the second, the two rows sharing the full height evenly
+
+#### Scenario: Every agent's pane index holds that agent
+
+- **GIVEN** a bare session started with 7 branches, with the broker enabled and again with it disabled
+- **WHEN** the window is built, and again when `git paw add` attaches a sixth agent to a 5-agent session
+- **THEN** pane `first_agent + i` SHALL run in the worktree of the i-th agent and run that agent's CLI, for every agent
+- **AND** no launch command or prompt SHALL be typed into a pane other than the one its agent occupies
+
+#### Scenario: Recovery rebuilds a grid
+
+- **GIVEN** a stopped bare session saved with the earlier tiled layout and 3 recorded worktrees with the broker enabled
+- **WHEN** `git paw start` recovers it
+- **THEN** the rebuilt window SHALL be the grid (dashboard row + one agent row of 3)
+- **AND** the re-saved session SHALL record the grid layout
+
+#### Scenario: A bare session uses the configured column count
+
+- **GIVEN** `[layout] agents_per_row = 3`, the broker enabled and no supervisor mode
+- **WHEN** `git paw start` launches 5 branches
+- **THEN** panes 1-3 SHALL form the first agent row and panes 4-5 the second, each row at equal widths
 
 ## ADDED Requirements
 

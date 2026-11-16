@@ -2,10 +2,26 @@
 
 - FROM: `### Requirement: Supervisor enabled resolution chain`
 - TO: `### Requirement: Start-mode resolution chain`
-- FROM: `### Requirement: Init prompts for supervisor configuration`
-- TO: `### Requirement: Init prompts for the default start mode`
-- FROM: ### Requirement: `git paw init` SHALL write a commented-out [supervisor] block enumerating gate keys
-- TO: ### Requirement: `git paw init` SHALL write commented-out coordination tables enumerating gate keys
+
+## REMOVED Requirements
+
+### Requirement: Init prompts for supervisor configuration
+
+**Reason**: `git paw init` no longer writes a `[supervisor]` table: a yes writes `default_mode = "coordinated"` (plus `[orchestrator.gates] test_command`), a no writes `default_mode = "bare"`. The scenarios "Init with supervisor enabled" and "Init with supervisor disabled" assert the `[supervisor]` output, and strict validation rejects a MODIFIED or RENAMED block that drops them.
+
+**Migration**: Replaced by *Init prompts for the default start mode* ("Init with coordinated mode enabled", "Init with coordinated mode declined", "Init leaves a version-1 table alone"). An existing `[supervisor]` table is left byte-identical and still read through migration.
+
+### Requirement: `git paw init` SHALL write a commented-out [supervisor] block enumerating gate keys
+
+**Reason**: The generated config carries no `[supervisor]` text; its commented examples are the version-2 `[orchestrator]`, `[orchestrator.gates]`, `[workers]` and `[drive]` tables. Both scenarios ("`git paw init` writes the commented block", "The written commented block is valid TOML when uncommented") assert the `# [supervisor]` block.
+
+**Migration**: Replaced by *`git paw init` SHALL write commented-out coordination tables enumerating gate keys*. Every key the old block listed appears in the new blocks at its version-2 path (`core-configuration`, "Configuration schema version 2 relocates the supervisor table"); `enabled` becomes `default_mode`.
+
+### Requirement: Deprecated auto-approval tables are parsed but have no effect
+
+**Reason**: Its scenario "Declared tables round-trip" contradicts version 2, which drops both tables on migration and never writes them, and strict validation rejects a MODIFIED block that drops it.
+
+**Migration**: Replaced by *Deprecated auto-approval tables are parsed, have no effect and are not saved*. The tables still load from a version-1 file, still have no effect, and still warn once per file. "Declared tables round-trip" becomes "A rewrite drops the tables" and "A repository file is never rewritten to drop them"; "An undeclared table is not written on save" and the other scenarios carry over.
 
 ## MODIFIED Requirements
 
@@ -28,11 +44,23 @@ The system SHALL decide whether a session runs in coordinated mode or bare mode 
 - **WHEN** `--coordinated` is passed
 - **THEN** coordinated mode SHALL be active without prompting
 
+#### Scenario: CLI flag enables supervisor regardless of config
+
+- **GIVEN** a version-1 config with `[supervisor] enabled = false`
+- **WHEN** the deprecated `--supervisor` flag is passed
+- **THEN** coordinated mode SHALL be active without prompting
+
 #### Scenario: Config selects coordinated mode without a flag
 
 - **GIVEN** a config with `default_mode = "coordinated"`
 - **WHEN** no mode flag is passed
 - **THEN** coordinated mode SHALL be active without prompting
+
+#### Scenario: Config enables supervisor without flag
+
+- **GIVEN** a version-1 config with `[supervisor] enabled = true`
+- **WHEN** no mode flag is passed
+- **THEN** coordinated mode SHALL be active without prompting, `default_mode` having resolved to `"coordinated"`
 
 #### Scenario: The bare flag overrides config
 
@@ -47,13 +75,14 @@ The system SHALL decide whether a session runs in coordinated mode or bare mode 
 - **THEN** the session SHALL run in bare mode
 - **AND** the user SHALL NOT be prompted
 
-#### Scenario: A version-1 table resolves through default_mode
+#### Scenario: Config explicitly disables supervisor without prompt
 
-- **GIVEN** a version-1 config with `[supervisor] enabled = true`
+- **GIVEN** a version-1 config with `[supervisor] enabled = false`
 - **WHEN** no mode flag is passed
-- **THEN** coordinated mode SHALL be active without prompting
+- **THEN** the session SHALL run in bare mode
+- **AND** the user SHALL NOT be prompted
 
-#### Scenario: No default_mode prompts the user
+#### Scenario: No supervisor section prompts the user
 
 - **GIVEN** a config with no `default_mode` and no `[supervisor]` table, and an interactive terminal
 - **WHEN** no mode flag is passed
@@ -64,6 +93,8 @@ The system SHALL decide whether a session runs in coordinated mode or bare mode 
 - **GIVEN** a config with no `default_mode`
 - **WHEN** `--dry-run` is passed without a mode flag
 - **THEN** the dry run SHALL assume bare mode (no prompt)
+
+## ADDED Requirements
 
 ### Requirement: Init prompts for the default start mode
 
@@ -110,7 +141,7 @@ The config `git paw init` writes SHALL include commented-out `[orchestrator]`, `
 - **THEN** the resulting TOML SHALL parse as a version-2 config without error
 - **AND** the eight gate commands, `[orchestrator] cli` and `approval` SHALL carry the example values
 
-### Requirement: Deprecated auto-approval tables are parsed but have no effect
+### Requirement: Deprecated auto-approval tables are parsed, have no effect and are not saved
 
 The system SHALL continue to accept, in a version-1 configuration, the `[supervisor.auto_approve]` table (`enabled`, `safe_commands`, `stall_threshold_seconds`, `approval_level` with the values `off` / `conservative` / `safe`, and `approve_worktree_writes`) and the `[supervisor.common_dev_allowlist]` table (`enabled`, `stacks`, `extra`) with their existing field names and types, so configurations written for earlier versions load without error. Neither table nor any of its fields SHALL have any behavioural effect. No prompt is approved, no skill text is rendered and no threshold is applied because of them, and a value that previously triggered a clamp warning (such as `stall_threshold_seconds = 0`) SHALL NOT trigger one.
 
@@ -145,6 +176,12 @@ When a configuration file declares either table, the system SHALL print exactly 
 - **WHEN** it is loaded and saved back by `git paw add-cli`
 - **THEN** the saved file SHALL contain neither table, under `[supervisor]`, `[workers]` or any other name
 - **AND** the rewrite notice SHALL name both tables as dropped
+
+#### Scenario: An undeclared table is not written on save
+
+- **GIVEN** a configuration with coordination settings and no `[supervisor.common_dev_allowlist]` table
+- **WHEN** it is loaded and saved back
+- **THEN** the saved file SHALL NOT contain a `[supervisor.common_dev_allowlist]` table, or a `common_dev_allowlist` table under any other name
 
 #### Scenario: A repository file is never rewritten to drop them
 

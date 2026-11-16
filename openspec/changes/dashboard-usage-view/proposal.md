@@ -24,10 +24,13 @@ once the roster is gone only two panels are left.
   - A live, paused or stopped session keeps the dashboard pane it was started with. Restart and
     recovery follow the session record, not the current config.
 - **New content.**
-  - A **usage panel**: one row per worker with CLI, tier, tokens in/out, cost when the CLI
-    reports one, or `unknown` with the reason; a subtotal per tier; an orchestrator-invocations
-    row; and a known-usage total with progress against `budget_max_tokens` / `budget_max_cost`.
-    The figures come from the same query as `status --json`. There is no price table.
+  - A **usage panel**: one row per worker with CLI, tier, fresh input, cache-read, cache-write
+    and output tokens in separate columns, cost when the CLI reports one, or `unknown` with the
+    reason; a subtotal per tier; an orchestrator-invocations row; and a known-usage total with its
+    cache-read share and progress against `budget_max_tokens` (all four token kinds, as the cap
+    counts them) / `budget_max_cost`. The figures come from the same query as `status --json`.
+    There is no price table. PK-15 (v0.20 dogfood): 68.5M tokens for three small workers in 34
+    minutes were 99% cache reads, which a single "tokens in" figure hides.
   - The **broker log**, read through the broker's event cursor. Heartbeats collapse per agent.
 - **BREAKING (view):** the agent roster (status table, symbols, counters, pinned root row) is
   removed from the dashboard.
@@ -50,14 +53,19 @@ once the roster is gone only two panels are left.
 
 - `broker-dashboard`:
   - ADDED: usage panel, pure view state, `Tab` focus and usage scrolling.
-  - MODIFIED: entry point, polling, quit keybind, title, pane layout, no-inbox panel, log panel,
-    toggle hotkey, chapter, heartbeat dedup (per agent), degraded state, minimum size.
+  - MODIFIED: entry point, polling, quit keybind, title, pane layout, log panel, toggle hotkey,
+    chapter, heartbeat dedup (per agent), degraded state, minimum size.
   - REMOVED: agent status table, agent row formatting, status symbols, committed counter, legacy
-    message panel.
+    message panel, and *No prompt-inbox panel*, re-ADDED as *Dashboard has no prompt-inbox panel*
+    because its "Tab key is not handled" scenario contradicts `Tab` focus and strict validation
+    will not let a MODIFIED block drop it.
 - `broker-runtime`: MODIFIED start-flow dashboard pane (opt-in), the thin-client subcommand, the
   host lifecycle, and restart from pause.
 - `session-state`:
-  - MODIFIED: dashboard pane record ("has a dashboard"), recovery data, recovery pane count.
+  - MODIFIED: recovery data, recovery pane count.
+  - REMOVED *Dashboard pane index persisted in session state*, re-ADDED as *Session records its
+    dashboard pane and pane layout* ("has a dashboard"): its "A broker-less supervised start still
+    records the dashboard" scenario contradicts the broker-only dashboard.
   - ADDED: recorded orchestrator invocations, `orchestrator_usage`, agent state in `status`.
 - `tmux-orchestration`: MODIFIED dynamic pane count, *Supervisor-mode pane layout*, and *Every
   pane-less session uses the agent grid* (no top row without a dashboard).

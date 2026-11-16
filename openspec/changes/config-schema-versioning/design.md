@@ -20,7 +20,7 @@ Config is written in three places:
 The bundled scripts read `[broker].port`/`bind`, `docs_base_url`, `[supervisor].test_command`
 and `[supervisor].no_progress_window_seconds` / `context_bloat_threshold_k` /
 `blocked_on_supervisor_window_seconds`, using `tomllib` with a regex fallback
-(`assets/scripts/_paw_common.sh`, `sweep.sh`).
+(`assets/agent-skills/_shared/scripts/_paw_common.sh`, `sweep.sh`).
 
 `code-architecture` freezes two config serde surfaces: `SpecsConfig` `rename = "type"` and
 `PawConfig::merged_with`'s default-as-unset merge.
@@ -121,7 +121,7 @@ collide with any edit the other track makes to the existing "Config check" requi
 ### D7 — Script-read keys are named as contract
 The configuration reference lists the keys the bundled scripts read and states that renaming
 any of them is a version bump plus a script change in the same release. A standing test keeps
-the list in step: it greps `assets/scripts/*.sh` for `data.get(` / `sup.get(` section keys and
+the list in step: it greps `assets/agent-skills/*/scripts/*.sh` for `data.get(` / `sup.get(` section keys and
 asserts each one is listed in the reference. This follows the `spec-organization` §7 guard
 pattern.
 

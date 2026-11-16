@@ -38,7 +38,9 @@ agents — in one pass, with one batch of rebase directives.
 
 - `git-branch-finish` (from `finish-command`): ADDED queue, mechanical rebase, batched directives,
   queue exit status, queue JSON document.
-- `skill-agent`: **Supervisor skill — Merge orchestration** uses the queue command.
+- `skill-agent`: **Supervisor skill — Merge orchestration** uses the queue command; v0.20's
+  **Orchestrator skill confirms a merge landed before archiving** runs its ancestor check on each
+  branch the queue reports integrated (it said "after each fast-forward" the orchestrator ran).
 - `supervisor-launch`: **`docs/src/user-guide/supervisor.md` SHALL consolidate the supervisor
   surfaces** — the merge-orchestration mirror names the queue, not `git merge --ff-only`. Written against
   v0.17 `classifier-retirement`'s version of this requirement (its item 2 *Agent permissions* replaces
@@ -54,7 +56,7 @@ agents — in one pass, with one batch of rebase directives.
   restore-to-tip); reuse `supervisor::claim` (surface claim) and the idle check used by
   `supervisor-branch-refresh`; the configured `[supervisor] test_command`; broker publish of
   `agent.feedback`; `src/cli.rs` (`branch` becomes `branches: Vec<String>`, `--verified`, `--rebase`);
-  `assets/agent-skills/orchestrator.md` merge section (formerly `supervisor.md`, relocated by v0.18).
+  `assets/agent-skills/orchestrator/SKILL.md` merge section (formerly `supervisor.md`, relocated by v0.18).
 - **Enum-variant ripple:** none — `agent.feedback` and `agent.advanced-main` already exist.
 - **Docs:** `--help`, `docs/src/cli-reference.md`, `docs/src/user-guide/session-lifecycle.md` (merging a
   wave), the orchestrator workflow chapter written in v0.18, README row.

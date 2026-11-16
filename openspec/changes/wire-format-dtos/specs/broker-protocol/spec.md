@@ -1,10 +1,18 @@
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: Broker message envelope
 
+**Reason**: It enumerates seven message types and a scenario titled "Envelope enumerates all seven wire-format type values"; the binary has eleven. Strict validation rejects a MODIFIED block that drops or retitles that scenario, so the requirement is replaced under a new name.
+
+**Migration**: Replaced by *Broker message envelope and wire type*. The three round-trip scenarios and "Unknown message type is rejected" carry over unchanged in substance; the seven-value scenario becomes "Envelope enumerates all eleven wire-format type values", and "Every variant's bytes match the pre-change fixture" is new.
+
+## ADDED Requirements
+
+### Requirement: Broker message envelope and wire type
+
 The system SHALL define a single in-memory `BrokerMessage` type that represents every message exchanged between agents, the supervisor, and the git-paw broker, and a separate broker wire type that alone defines its JSON form; the two SHALL be converted by total mappers in both directions, and the in-memory type SHALL NOT derive `Serialize` or `Deserialize`.
 
-The wire format SHALL be JSON with an internally tagged discriminator field named `type`, taking exactly these eleven values: `agent.status`, `agent.artifact`, `agent.blocked`, `agent.verified`, `agent.feedback`, `agent.answer`, `agent.question`, `agent.intent`, `agent.advanced-main`, `agent.learning`, and `supervisor.verify-now`. The eight `agent.*` variants other than `agent.advanced-main` and `agent.learning` SHALL carry `agent_id` and `payload` at the top level alongside `type`. `agent.advanced-main` SHALL carry its payload fields flattened at the top level. `agent.learning` SHALL carry only `payload`, which holds its own `agent_id`. `supervisor.verify-now` SHALL carry only `branch_id`. The envelope SHALL carry no version field; the broker's protocol version is reported by its HTTP responses. The serialized bytes of every variant SHALL be identical to those produced before the wire type was separated.
+The wire format SHALL be JSON with an internally tagged discriminator field named `type`, taking exactly these eleven values: `agent.status`, `agent.artifact`, `agent.blocked`, `agent.verified`, `agent.feedback`, `agent.answer`, `agent.question`, `agent.intent`, `agent.advanced-main`, `agent.learning`, and `supervisor.verify-now`. Each variant's top-level layout SHALL be as the scenario "Each variant keeps its top-level layout" states. The envelope SHALL carry no version field. The serialized bytes of every variant SHALL be identical to those produced before the wire type was separated.
 
 #### Scenario: Status message round-trips through serde
 
@@ -36,14 +44,21 @@ The wire format SHALL be JSON with an internally tagged discriminator field name
 - **WHEN** one message of each variant is encoded
 - **THEN** the set of emitted `type` values SHALL equal exactly the eleven values listed in this requirement
 
+#### Scenario: Each variant keeps its top-level layout
+
+- **WHEN** one message of each variant is encoded
+- **THEN** the eight `agent.*` variants other than `agent.advanced-main` and `agent.learning` SHALL carry `agent_id` and `payload` at the top level alongside `type`
+- **AND** `agent.advanced-main` SHALL carry its payload fields flattened at the top level
+- **AND** `agent.learning` SHALL carry only `payload`, which holds its own `agent_id`
+- **AND** `supervisor.verify-now` SHALL carry only `branch_id`
+- **AND** no variant SHALL carry a version field; the protocol version is reported by the broker's HTTP responses
+
 #### Scenario: Every variant's bytes match the pre-change fixture
 
 - **GIVEN** a golden JSON fixture per variant captured before the wire type was separated
 - **WHEN** the equivalent `BrokerMessage` is encoded
 - **THEN** the emitted bytes SHALL equal the fixture
 - **AND** decoding the fixture SHALL produce an equal `BrokerMessage`
-
-## ADDED Requirements
 
 ### Requirement: Broker HTTP shapes are shared wire types with a protocol schema version
 

@@ -92,11 +92,11 @@ Disposition: **R** renamed here (old form aliased or read, with a warning where 
 | 35 | `[supervisor] no_progress_window_seconds` | config | R → `[drive]` |
 | 36 | `[supervisor] context_bloat_threshold_k` | config | R → `[drive]` |
 | 37 | `[supervisor] blocked_on_supervisor_window_seconds` | config | R → `[drive] blocked_on_orchestrator_window_seconds` |
-| 38 | `[supervisor] budget_max_tokens` / `budget_max_cost` (v0.19.0) | config | R → `[drive]` (refined, D1) |
+| 38 | `[supervisor] budget_max_tokens` / `budget_max_cost` (v0.19.0), `budget_on_exhausted` (v0.20.0) | config | R → `[drive]` (refined, D1) |
 | 39 | `[broker] wave_stall_minutes` (v0.18.0) | config | K — not a `[supervisor]` key; already in its right table |
 | 40 | config `version` | `config/migrate.rs` | R → 2; v1→v2 step (D3) |
 | 41 | `init` default config template | `config::generate_default_config` | R → commented `[orchestrator]`, `[orchestrator.gates]`, `[workers]`, `[drive]` blocks |
-| 42 | Script-read keys (`sweep.sh`) | `assets/scripts/sweep.sh` | R → new keys first, `[supervisor]` fallback (D12) |
+| 42 | Script-read keys (`sweep.sh`) | `assets/agent-skills/orchestrator/scripts/sweep.sh` | R → new keys first, `[supervisor]` fallback (D12) |
 | 43 | Config error / warning texts (`[supervisor.correction]`, stall clamp) | `config/supervisor.rs` | P → new table names |
 | 44 | Pre-commit hook remedy (`[supervisor] strict_branch_guard`) | `assets/hooks/pre-commit.sh` | P → `[workers]` |
 | 45 | Role-guard feedback (`[supervisor] auto_revert`) | `opsx/role_guard.rs` | P → `[orchestrator]` |
@@ -117,8 +117,8 @@ Disposition: **R** renamed here (old form aliased or read, with a warning where 
 | 60 | `sweep.sh` phantom filter, `inbox`, `status-publish`, `learn`, usage text | `sweep.sh` | R follows 52/54 |
 | 61 | Correction / escalation texts ("Supervisor gate … failed", "supervisor correction budget") | `supervisor/drive.rs` | P |
 | 62 | Skill name `supervisor` (v0.18.0 alias) and `supervisor.md` override | `skills.rs`, MCP `get_skill` | R warns; 1.0 removes |
-| 63 | Coordination skill prose | `assets/agent-skills/coordination.md` | P |
-| 64 | Orchestrator skill prose (`/messages/supervisor`, keys) | `assets/agent-skills/orchestrator.md` | P |
+| 63 | Coordination skill prose | `assets/agent-skills/coordination/SKILL.md` | P |
+| 64 | Orchestrator skill prose (`/messages/supervisor`, keys) | `assets/agent-skills/orchestrator/SKILL.md` | P |
 | 65 | Boot-block templates | `assets/boot-block*.md` | P |
 | 66 | Inter-agent rules | `assets/inter-agent-rules.md` | P |
 | 67 | Governance section header | `assets/governance-section-header.md` | P |
@@ -134,7 +134,7 @@ Disposition: **R** renamed here (old form aliased or read, with a warning where 
 | 77 | CLI reference | `docs/src/cli-reference.md` | R flags + Deprecations section |
 | 78 | README, architecture, other user-guide pages | docs | P |
 
-78 rows. Kept surfaces: 39 (wave_stall_minutes), 50 (discovery `orchestrator` entry), 51
+78 rows (inventoried 2026-10-19; re-run the inventory against main before building: v0.19.0 and v0.20.0 added surfaces, e.g. the `budget_on_exhausted` key and the skill-package paths). Kept surfaces: 39 (wave_stall_minutes), 50 (discovery `orchestrator` entry), 51
 (`PAW_SUPERVISOR_PID`), 72 (env vars), 73 (Rust items), 74 (capability names, until 1.0).
 
 ## Decisions

@@ -136,7 +136,7 @@ The configuration reference SHALL list every config key that the bundled helper 
 
 #### Scenario: Every script-read key is documented
 
-- **GIVEN** the bundled scripts under `assets/scripts/`
+- **GIVEN** the bundled scripts under `assets/agent-skills/*/scripts/`
 - **WHEN** the config keys they read are collected
 - **THEN** each key SHALL appear in the configuration reference's script-read key list
 

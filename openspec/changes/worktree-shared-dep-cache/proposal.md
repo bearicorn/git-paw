@@ -52,7 +52,7 @@ output, which must stay per worktree. This change serves (a) and refuses (b).
   `plan_shared_links(entries, facts) -> Vec<LinkDecision>` + the symlink step before `run_hook`, reusing
   `contained_relative_path`, and the built-in forbidden-output list), `src/main.rs::detach_worktree`
   (unlink before `git worktree remove`), `src/git.rs` (`check_ignore_with`, `ls_files_under_with`),
-  `assets/agent-skills/coordination.md` (shared-cache sentence).
+  `assets/agent-skills/coordination/SKILL.md` (shared-cache sentence).
 - **Enum-variant ripple:** none.
 - **Docs:** `docs/src/user-guide/runtime-isolation.md` (shared caches vs copied env files; when it helps),
   configuration reference `[worktree.shared_deps]`, `docs/src/user-guide/sandbox.md` (a linked cache is

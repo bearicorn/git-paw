@@ -58,15 +58,22 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
 - `core-configuration`: ADDED schema version 2 and its key relocation, version-1 warnings, the
   old/new conflict rule, refusal of `[supervisor]` in a version-2 file, one-unit merge of the
   coordination tables, init's version guard, and the helper scripts' key fallback.
-- `supervisor-config`: RENAMED + MODIFIED the enabled-mode resolution chain, the init prompt and the
-  init commented block into start-mode / coordination-table terms; MODIFIED v0.17.0's *Deprecated
-  auto-approval tables are parsed but have no effect* (written on its text): the tables are dropped
-  by the version-2 migration instead of round-tripping, and the warning goes through the shared
-  helper.
-- `cli-parsing`: RENAMED + MODIFIED `--no-supervisor flag` and the mutual-exclusion requirement;
-  MODIFIED *Start subcommand with optional flags* and *--unattended flag* (the latter written on
-  v0.17.0 `classifier-retirement`'s text, keeping its escalate-not-approve help); ADDED the
-  deprecated aliases (with the reading rule for requirements that still name them).
+- `supervisor-config`: RENAMED + MODIFIED the enabled-mode resolution chain into start-mode terms
+  (its version-1 scenarios kept: they still hold through migration and the flag aliases). The init
+  prompt, the init commented block and v0.17.0's *Deprecated auto-approval tables are parsed but
+  have no effect* are REMOVED and re-ADDED under new names (*Init prompts for the default start
+  mode*, *`git paw init` SHALL write commented-out coordination tables enumerating gate keys*,
+  *Deprecated auto-approval tables are parsed, have no effect and are not saved*), because each has
+  scenarios that version 2 contradicts (init writing `[supervisor]`, the tables round-tripping) and
+  strict validation will not let a MODIFIED block drop a scenario. The auto-approval tables are
+  dropped by the version-2 migration instead of round-tripping, and the warning goes through the
+  shared helper.
+- `cli-parsing`: REMOVED `--no-supervisor flag` and ADDED `--bare flag` in its place (its "appears
+  in help output" scenario contradicts the hidden alias); RENAMED + MODIFIED the mutual-exclusion
+  requirement; MODIFIED *Start subcommand with optional flags* and *--unattended flag* (the latter
+  written on v0.17.0 `classifier-retirement`'s text, keeping its escalate-not-approve help); ADDED
+  the deprecated aliases (with the reading rule for requirements that still name them). The MODIFIED
+  blocks keep their `--supervisor` / `--no-supervisor` scenarios as alias checks.
 - `broker-protocol`: ADDED the root identity `orchestrator` with the `supervisor` inbound alias and
   the `orchestrator.verify-now` type.
 - `session-state`: ADDED both session-mode spellings are read.
@@ -87,7 +94,7 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
   `src/coordination/inventory.rs` (one root-identity constant); `src/session.rs` (session wire mode
   alias); `src/mcp/query/session.rs`, `src/mcp/tools/*`; `src/doctor.rs`; `src/skills.rs`;
   `src/opsx/role_guard.rs`; `src/broker/learnings.rs`.
-- **Scripts and exported assets:** `assets/scripts/sweep.sh` (+ tracked `.git-paw/scripts/sweep.sh`),
+- **Scripts and exported assets:** `assets/agent-skills/orchestrator/scripts/sweep.sh` (+ tracked `.git-paw/scripts/sweep.sh`),
   `assets/hooks/*.sh`, `assets/boot-block*.md`, `assets/inter-agent-rules.md`,
   `assets/governance-section-header.md`, `assets/agent-skills/{coordination,orchestrator}.md`, the
   escalation-framing asset, the `init` default config.
@@ -98,7 +105,7 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
 - **Dependencies:** none new.
 - **Cross-version dependencies:**
   - v0.17.0 `classifier-retirement` (archived first): this change's *--unattended flag* delta and its
-    *Deprecated auto-approval tables are parsed but have no effect* delta copy that change's text and
+    *Deprecated auto-approval tables are parsed, have no effect and are not saved* delta copy that change's text and
     only apply the vocabulary and the version-2 drop, so archiving here never reverts v0.17.0; its
     `deprecated_table_warning` is re-routed through `deprecation::warn`; its parse-only
     `AutoApproveConfig` / `CommonDevAllowlistConfig` stay for version-1 reading
@@ -117,7 +124,8 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
     `supervisor` skill alias), `broker-verdict-authority` (its gate on feedback claiming the root
     identity must see the normalized identity), `orchestrator-read-surface` (`[broker]
     wave_stall_minutes` stays where it is).
-  - v0.19.0 `worker-usage-budget` (`budget_max_tokens` / `budget_max_cost` land in `[drive]`).
+  - v0.19.0 `worker-usage-budget` (`budget_max_tokens` / `budget_max_cost` land in `[drive]`), and
+    v0.20.0's `budget_on_exhausted` with them.
   - v0.24.0 `error-exit-code-contract` (edited to register `--from-specs` here instead of defining
     its own warn function).
   - v1.0.0 `remove-supervisor-vocabulary` removes every alias this change adds; `cli-contract-freeze`

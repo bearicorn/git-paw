@@ -1,6 +1,6 @@
 ## Context
 
-`supervisor_layout(agent_count)` (`src/supervisor/layout.rs`) rejects counts above
+`supervisor_layout(agent_count)` (`src/surface.rs`) rejects counts above
 `SUPERVISOR_MAX_AGENTS` with `PawError::ConfigError` and computes
 `agent_rows = ceil(count / SUPERVISOR_AGENTS_PER_ROW)`; `layout_for` is the alias used by `add`,
 `remove` and `recover`. The column constant is also read by `tmux/command.rs` (row splits, resize

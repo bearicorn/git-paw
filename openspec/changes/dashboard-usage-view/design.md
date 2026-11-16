@@ -32,7 +32,7 @@ Usage (v0.19 `worker-usage-budget`) is computed when it is asked for, not stored
   of a CLI session that git-paw launched;
 - `status --json` exposes each worktree's `usage` and a workers-only `usage_total`;
 - the drive loop keeps its one-shots' session ids **in memory** for the run and checks
-  `budget_max_tokens` (input plus output) and `budget_max_cost` (`[drive]` after the v0.21
+  `budget_max_tokens` (input, output, cache-read and cache-write summed, as v0.19 archived it) and `budget_max_cost` (`[drive]` after the v0.21
   vocabulary split).
 
 Nothing outside the drive-loop process can see the one-shot ids today.

@@ -9,7 +9,7 @@
 
 - [ ] 2.1 `sweep.sh::resolve_agent_for_path`: the Python prints the matched branch; bash applies `slugify`; delete the inline `slug()`; keep the heredoc apostrophe-free; `bash -n`
 - [ ] 2.2 Comment `CLAIM_TTL_SECONDS` in `sweep.sh` as the mirror of `supervisor::claim::CLAIM_TTL`, pointing at the parity test
-- [ ] 2.3 Sync the tracked `.git-paw/scripts/` copies with `assets/scripts/` if the repo tracks any
+- [ ] 2.3 Sync the tracked `.git-paw/scripts/` copies with `assets/agent-skills/*/scripts/` if the repo tracks any
 
 ## 3. Typed identifiers (after v0.18 `terminal-backend-seam` and `cmd-library-surface`)
 
@@ -21,7 +21,7 @@
 
 - [ ] 4.1 `BranchName` table test: `feat/Auth#2` gives `feat-auth-2` / `feat-Auth2` / `feat--Auth#2`, and `from_log_file_stem` reverses it; the existing tables run against both the methods and the wrappers
 - [ ] 4.2 `tests/slugify_shell_parity.rs`: source `_paw_common.sh` in a temp git repo and compare `slugify` with `BranchName::agent_id` over the shared table (mixed case, nested, underscore, runs, trims, non-ASCII, empty, all-separator)
-- [ ] 4.3 Asset check: the `[^a-z0-9_]` agent-id replacement appears only in `_paw_common.sh::slugify` across `assets/scripts/*.sh` (asset/parity layer per `test-strategy`); `sweep.sh::resolve_agent_for_path` output is unchanged for its current input shape (driver test)
+- [ ] 4.3 Asset check: the `[^a-z0-9_]` agent-id replacement appears only in `_paw_common.sh::slugify` across `assets/agent-skills/*/scripts/*.sh` (asset/parity layer per `test-strategy`); `sweep.sh::resolve_agent_for_path` output is unchanged for its current input shape (driver test)
 - [ ] 4.4 `tests/claim_ttl_parity.rs`: a claim aged TTL−2s is held for `PaneClaim::try_acquire` and for `sweep.sh`'s `claim_is_abandoned`; one aged TTL+2s is abandoned for both; `claim_path 3` is equal on both sides
 - [ ] 4.5 Signature guard (`tests/source_audit.rs` style): no `pub fn` with `session_name: &str` outside the tmux adapter
 - [ ] 4.6 Recovery of a session file with a pre-hardening name (e.g. `paw-my.app`) uses the recorded name verbatim
@@ -35,6 +35,6 @@
 
 - [ ] 6.1 `cargo fmt`, then `just lint`
 - [ ] 6.2 `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test --no-fail-fast`, checking the real exit code
-- [ ] 6.3 `bash -n assets/scripts/*.sh` and the `sweep_sh_conventions` / `broker_sh_conventions` lints
+- [ ] 6.3 `bash -n assets/agent-skills/*/scripts/*.sh` and the `sweep_sh_conventions` / `broker_sh_conventions` lints
 - [ ] 6.4 `mdbook build docs/`
 - [ ] 6.5 `openspec validate domain-value-objects --strict`

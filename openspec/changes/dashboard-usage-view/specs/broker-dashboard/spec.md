@@ -4,20 +4,27 @@
 
 The dashboard SHALL render a usage panel below its title line, built from the same attributed usage that `git paw status --json` reports: each worker's usage from its CLI's usage report, and the usage of each headless orchestrator invocation the session records. The panel SHALL show:
 
-- one row per worker with its agent id, its CLI's provider family, its tier (the CLI id the worker was launched with), input tokens, output tokens, and cost. Cost SHALL be shown only when the CLI reports one; otherwise the cell SHALL show `—`. A worker whose usage is unknown SHALL show `unknown` and the reason instead of figures, and SHALL NOT be counted as zero;
+- one row per worker with its agent id, its CLI's provider family, its tier (the CLI id the worker was launched with), fresh input tokens, cache-read tokens, cache-write tokens, output tokens, and cost. Cache-read and cache-write tokens SHALL be shown in their own columns and SHALL NOT be folded into the fresh input figure. Cost SHALL be shown only when the CLI reports one; otherwise the cell SHALL show `—`. A worker whose usage is unknown SHALL show `unknown` and the reason instead of figures, and SHALL NOT be counted as zero;
 - one subtotal row per tier, summing that tier's known figures;
 - one row for the orchestrator's headless invocations, giving their count and their summed known figures;
-- a total row over all known figures, labelled as covering known usage only, with the number of workers and invocations whose usage is unknown;
-- for each configured budget cap (`budget_max_tokens` counting input plus output tokens, and `budget_max_cost`), the known total beside the cap, the percentage used and a text progress bar, marked as exceeded at or above 100%. A cost cap for which no attributed source reports cost SHALL be shown as not evaluable;
+- a total row over all known figures, labelled as covering known usage only, with the number of workers and invocations whose usage is unknown, and the cache-read share of the known token total as a percentage;
+- for each configured budget cap (`budget_max_tokens` counting input, output, cache-read and cache-write tokens, the formula the cap itself uses, and `budget_max_cost`), the known total beside the cap, the percentage used and a text progress bar, marked as exceeded at or above 100%. A cost cap for which no attributed source reports cost SHALL be shown as not evaluable;
 - a note that the figures exclude the operator's own session.
 
 Token counts SHALL be shown in a compact form (for example `12.3k`, `1.2M`). The panel SHALL show how old the figures are, and SHALL show that usage is loading until the first read completes. The exceeded mark SHALL be a text marker plus a text attribute, so it is visible without colour. The panel SHALL NOT show agent status, phase, last-update or pane information.
 
 #### Scenario: Workers, tiers and totals
 
-- **GIVEN** workers `feat-a` (tier `sonnet`, 100 in / 20 out), `feat-b` (tier `sonnet`, 50 in / 10 out) and `feat-c` (tier `opus`, 200 in / 40 out), and no recorded orchestrator invocation
+- **GIVEN** workers `feat-a` (tier `sonnet`, 100 in / 20 out), `feat-b` (tier `sonnet`, 50 in / 10 out) and `feat-c` (tier `opus`, 200 in / 40 out), none with cache tokens, and no recorded orchestrator invocation
 - **WHEN** the usage panel renders
 - **THEN** it SHALL show three worker rows, a `sonnet` subtotal of 150 in / 30 out, an `opus` subtotal of 200 in / 40 out, and a total of 350 in / 70 out
+
+#### Scenario: Cache reads are shown apart from fresh tokens
+
+- **GIVEN** worker `feat-a` with 2,000 fresh input, 990,000 cache-read, 6,000 cache-write and 2,000 output tokens
+- **WHEN** the usage panel renders
+- **THEN** the `feat-a` row SHALL show `2.0k` fresh input, `990k` cache read, `6.0k` cache write and `2.0k` output in separate columns
+- **AND** the total row SHALL show a cache-read share of 99%
 
 #### Scenario: Unknown usage is not counted as zero
 
@@ -41,9 +48,9 @@ Token counts SHALL be shown in a compact form (for example `12.3k`, `1.2M`). The
 
 #### Scenario: Progress against the token cap
 
-- **GIVEN** `budget_max_tokens = 1000` and known usage totalling 600 input plus output tokens
+- **GIVEN** `budget_max_tokens = 1000` and known usage of 100 input, 50 output, 400 cache-read and 50 cache-write tokens
 - **WHEN** the usage panel renders
-- **THEN** it SHALL show 600 of 1000 tokens at 60% without the exceeded mark
+- **THEN** it SHALL show 600 of 1000 tokens at 60% without the exceeded mark, counting the cache tokens as the cap does
 - **AND** when the known total reaches 1100 it SHALL show 110% with the exceeded mark
 
 #### Scenario: A cost cap without a cost source is not evaluable
@@ -121,6 +128,44 @@ The worker rows SHALL scroll to keep the selection visible while the orchestrato
 - **WHEN** the user presses `l`
 - **THEN** the broker log SHALL be hidden and `Down` SHALL move the usage selection
 
+### Requirement: Dashboard has no prompt-inbox panel
+
+The dashboard SHALL NOT render a prompt-inbox panel for `agent.question` messages. Specifically, the dashboard layout SHALL NOT include:
+
+- A "Questions (N pending)" titled block listing pending `agent.question` messages
+- An input field for replying to questions
+- A focused-question cursor, or any keybinding (Enter, Backspace, printable characters) for selecting a question or composing a reply in the dashboard
+
+`agent.question` messages SHALL continue to flow through the broker per the `message-delivery` capability, routed to the root identity's inbox. The orchestrator — the operator's own agent session outside the tmux session, or a person — SHALL read and answer them through the bundled helpers or the MCP tools. The dashboard's role is observation only: the usage panel and the broker log.
+
+#### Scenario: Dashboard layout has no Questions panel
+
+- **GIVEN** a running dashboard with at least one `agent.question` in the broker's root inbox
+- **WHEN** the dashboard renders a frame
+- **THEN** the rendered output does NOT contain the substring `"Questions ("`
+- **AND** the rendered output does NOT contain a "Reply to" input prompt
+
+#### Scenario: Printable character keys do not enter an input buffer
+
+- **GIVEN** a running dashboard
+- **WHEN** the user presses any printable character (e.g. `a`, `1`, space) other than `q`
+- **THEN** the dashboard continues running without buffering the character
+- **AND** no input field is updated or rendered
+
+#### Scenario: Tab moves focus, never into a reply field
+
+- **GIVEN** a running dashboard with at least one `agent.question` in the broker's root inbox
+- **WHEN** the user presses `Tab`
+- **THEN** focus SHALL move only between the usage panel and the broker log (per "Tab moves focus between the usage panel and the broker log")
+- **AND** no question SHALL be selected and no input field SHALL be rendered
+
+#### Scenario: Vertical layout collapses to the non-inbox shape
+
+- **GIVEN** a running dashboard with the broker log hidden
+- **WHEN** the dashboard renders a frame
+- **THEN** the vertical layout contains, in order: a title chunk, the usage panel chunk, and the status line chunk
+- **AND** no prompts-section or input-field chunk is allocated
+
 ## MODIFIED Requirements
 
 ### Requirement: Dashboard entry point
@@ -167,10 +212,10 @@ On each wake-up the system SHALL refresh its model by polling the broker over HT
 
 The dashboard SHALL wait for input by polling its controlling terminal with a bounded idle timeout rather than busy-polling. The idle timeout SHALL be at least 800 milliseconds and at most 1000 milliseconds, so that an idle dashboard uses negligible CPU and still reflects a broker event within one second. Key input SHALL wake the wait immediately. The wait SHALL be bounded even when the terminal is gone: a hung-up controlling terminal SHALL be detected and SHALL cause the loop to exit rather than trap the wait indefinitely. HTTP requests SHALL have a bounded timeout so a slow broker cannot freeze the draw loop, and a slow usage read SHALL NOT delay input handling.
 
-#### Scenario: Dashboard shows a broker event within one second
+#### Scenario: Dashboard refreshes within one second of a state change
 
 - **GIVEN** a running dashboard
-- **WHEN** an agent publishes a message to the broker
+- **WHEN** an agent publishes a message to the broker, such as an `agent.status` state change
 - **THEN** the broker log displays it within 1 second
 
 #### Scenario: The log reads only new entries
@@ -236,7 +281,7 @@ The system SHALL display a title line above the usage panel containing the text 
 
 ### Requirement: Dashboard pane layout
 
-When a session has a dashboard (per `session-state`'s "Dashboard pane index persisted in session state"), the system SHALL arrange tmux panes with the dashboard in a full-width top row and the coding-agent panes in the agent grid below it. The grid is row-major, with at most `agents_per_row` per row and each row at equal widths, per `tmux-orchestration`'s "Every pane-less session uses the agent grid". This layout SHALL be applied when the session is built, re-applied when an agent is added or removed, and kept for the life of the session. When the session has no dashboard, no top row SHALL be reserved and the agent grid SHALL use the whole window.
+When a session has a dashboard (per `session-state`'s "Session records its dashboard pane and pane layout"), the system SHALL arrange tmux panes with the dashboard in a full-width top row and the coding-agent panes in the agent grid below it. The grid is row-major, with at most `agents_per_row` per row and each row at equal widths, per `tmux-orchestration`'s "Every pane-less session uses the agent grid". This layout SHALL be applied when the session is built, re-applied when an agent is added or removed, and kept for the life of the session. When the session has no dashboard, no top row SHALL be reserved and the agent grid SHALL use the whole window.
 
 #### Scenario: Dashboard takes full width at top
 
@@ -256,37 +301,6 @@ When a session has a dashboard (per `session-state`'s "Dashboard pane index pers
 - **GIVEN** a session with the broker running and no dashboard, with 3 coding-agent panes
 - **WHEN** the session is built
 - **THEN** pane 0 SHALL be the first coding agent and the single agent row SHALL span the full window height
-
-### Requirement: No prompt-inbox panel
-
-The dashboard SHALL NOT render a prompt-inbox panel for `agent.question` messages. Specifically, the dashboard layout SHALL NOT include:
-
-- A "Questions (N pending)" titled block listing pending `agent.question` messages
-- An input field for replying to questions
-- A focused-question cursor, or any keybinding (Enter, Backspace, printable characters) for selecting a question or composing a reply in the dashboard
-
-`agent.question` messages SHALL continue to flow through the broker per the `message-delivery` capability, routed to the root identity's inbox. The orchestrator — the operator's own agent session outside the tmux session, or a person — SHALL read and answer them through the bundled helpers or the MCP tools. The dashboard's role is observation only: the usage panel and the broker log.
-
-#### Scenario: Dashboard layout has no Questions panel
-
-- **GIVEN** a running dashboard with at least one `agent.question` in the broker's root inbox
-- **WHEN** the dashboard renders a frame
-- **THEN** the rendered output does NOT contain the substring `"Questions ("`
-- **AND** the rendered output does NOT contain a "Reply to" input prompt
-
-#### Scenario: Printable character keys do not enter an input buffer
-
-- **GIVEN** a running dashboard
-- **WHEN** the user presses any printable character (e.g. `a`, `1`, space) other than `q`
-- **THEN** the dashboard continues running without buffering the character
-- **AND** no input field is updated or rendered
-
-#### Scenario: Vertical layout without the broker log
-
-- **GIVEN** a running dashboard with the broker log hidden
-- **WHEN** the dashboard renders a frame
-- **THEN** the vertical layout contains, in order: a title chunk, the usage panel chunk, and the status line chunk
-- **AND** no prompts-section or input-field chunk is allocated
 
 ### Requirement: Broker log panel exists in the dashboard
 
@@ -344,7 +358,9 @@ status line.
 - **THEN** the Broker log panel segment SHALL be allotted exactly `24`
   rows
 
-#### Scenario: Usage panel keeps a positive minimum height
+#### Scenario: Agent table keeps a positive minimum height
+
+The title is kept from the roster this change removes; the usage panel takes the agent table's segment.
 
 - **GIVEN** a dashboard with the panel visible
 - **WHEN** the dashboard computes its vertical layout
@@ -368,9 +384,9 @@ hotkey (`l`) shows the panel again, so the hidden state is recoverable.
 - **THEN** the panel SHALL be hidden on the next frame, and
   pressing again SHALL restore it
 
-#### Scenario: Toggle works in a coordinated session
+#### Scenario: Toggle works in supervisor mode
 
-- **GIVEN** a dashboard in a coordinated session
+- **GIVEN** a dashboard in a coordinated (supervisor-mode) session
 - **WHEN** the user presses the toggle hotkey
 - **THEN** the panel SHALL hide and re-show as it does in a bare session
 
@@ -489,6 +505,12 @@ The dashboard SHALL compute its minimum usable size from its fixed layout constr
 - **THEN** the dashboard SHALL quit
 
 ## REMOVED Requirements
+
+### Requirement: No prompt-inbox panel
+
+**Reason**: Its scenario "Tab key is not handled" (Tab changes nothing and no focus indicator is shown) contradicts the new focus model, in which `Tab` moves focus between the usage panel and the broker log. Strict validation rejects a MODIFIED block that drops that scenario, so the requirement is replaced under a new name.
+
+**Migration**: Replaced by *Dashboard has no prompt-inbox panel*. The no-inbox rule, "Dashboard layout has no Questions panel", "Printable character keys do not enter an input buffer" and "Vertical layout collapses to the non-inbox shape" (now title, usage panel, status line) carry over; "Tab key is not handled" becomes "Tab moves focus, never into a reply field". `agent.question` handling is unchanged.
 
 ### Requirement: Agent status table rendering
 

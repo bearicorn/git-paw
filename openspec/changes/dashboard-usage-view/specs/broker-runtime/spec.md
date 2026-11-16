@@ -28,6 +28,22 @@ The dashboard pane is a non-interactive TUI process; it does NOT receive a `tmux
 - **WHEN** `git paw start` launches a session with 3 branches
 - **THEN** window 0 of the tmux session has 3 panes, all running coding CLIs
 
+#### Scenario: Broker enabled in bare-start mode adds dashboard as pane 0
+
+The title keeps its pre-opt-in wording; it now holds for a version-1 config, which implies the dashboard (`core-configuration`, "Version-1 configs keep the dashboard they implied").
+
+- **GIVEN** a config with no `version`, `[broker] enabled = true`, no `[dashboard]` table and no supervisor mode
+- **WHEN** `git paw start` launches a session with 3 branches
+- **THEN** window 0 of the tmux session has 4 panes: pane 0 running `git paw __dashboard`, panes 1-3 running coding CLIs
+
+#### Scenario: Broker enabled in supervised mode also places dashboard at pane 0
+
+- **GIVEN** a config with no `version`, `[broker] enabled = true`, `[supervisor] enabled = true` and no `[dashboard]` table
+- **WHEN** `git paw start --supervisor` launches a session with 3 branches
+- **THEN** window 0 of the tmux session has 4 panes
+- **AND** pane 0 SHALL be the dashboard (`git paw __dashboard`)
+- **AND** panes 1-3 SHALL be the coding CLIs
+
 #### Scenario: The config key enables the dashboard
 
 - **GIVEN** `[broker] enabled = true` and `[dashboard] enabled = true`

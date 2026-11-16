@@ -19,7 +19,7 @@ The current configuration schema version SHALL be 2. Version 2 SHALL NOT have a 
 | `[supervisor.correction]`, `[supervisor.conflict]` | `[drive.correction]`, `[drive.conflict]` |
 | `[supervisor] learnings` | `[drive.learnings] enabled` |
 | `[supervisor.learnings_config]` `flush_interval_seconds`, `broker_publish` | `[drive.learnings]` same keys |
-| `[supervisor] manual_approvals_log`, `branch_refresh`, `no_progress_window_seconds`, `context_bloat_threshold_k`, `budget_max_tokens`, `budget_max_cost` | `[drive]` same key |
+| `[supervisor] manual_approvals_log`, `branch_refresh`, `no_progress_window_seconds`, `context_bloat_threshold_k`, `budget_max_tokens`, `budget_max_cost`, `budget_on_exhausted` | `[drive]` same key |
 | `[supervisor] blocked_on_supervisor_window_seconds` | `[drive] blocked_on_orchestrator_window_seconds` |
 
 `default_mode` SHALL accept exactly `"coordinated"` and `"bare"`; any other value SHALL fail loading with a configuration error naming the key and both accepted values.
@@ -58,7 +58,7 @@ The current configuration schema version SHALL be 2. Version 2 SHALL NOT have a 
 
 ### Requirement: Version-1 coordination keys warn once per key family
 
-When a loaded file contains version-1 paths, git-paw SHALL print, through the shared deprecation helper, one warning per key family and file per process — the families being `default_mode`, `[orchestrator]`, `[orchestrator.gates]`, `[workers]` and `[drive]` — naming the file, each version-1 path found in that family, its version-2 path, and the deprecating release. The warnings SHALL go to stderr only and SHALL NOT change the exit code. The dropped `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` tables belong to no family: they warn once per file through the same helper as *Deprecated auto-approval tables are parsed but have no effect* states, and SHALL NOT also produce a family warning.
+When a loaded file contains version-1 paths, git-paw SHALL print, through the shared deprecation helper, one warning per key family and file per process — the families being `default_mode`, `[orchestrator]`, `[orchestrator.gates]`, `[workers]` and `[drive]` — naming the file, each version-1 path found in that family, its version-2 path, and the deprecating release. The warnings SHALL go to stderr only and SHALL NOT change the exit code. The dropped `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` tables belong to no family: they warn once per file through the same helper as *Deprecated auto-approval tables are parsed, have no effect and are not saved* (`supervisor-config`) states, and SHALL NOT also produce a family warning.
 
 #### Scenario: Two families, two warnings
 

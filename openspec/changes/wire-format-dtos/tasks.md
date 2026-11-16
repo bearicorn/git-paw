@@ -38,7 +38,7 @@
 - [ ] 7.1 Session: a pre-change file loads unchanged; a saved file's first key is `schema_version` and the rest equals the fixture; full round-trip with every optional field
 - [ ] 7.2 Newer schema: `git paw status` with a v2 file for this repo errors (not "no session"); `git paw start` fails and leaves the file byte-identical; another repo's v2 file is skipped (HOME overridden per `core-ci-hygiene`)
 - [ ] 7.3 Discovery file contains `schema_version`; `sweep.sh` discovers the session name and agents from a versioned file (extend `tests/broker_sh_session_discovery.rs` or the sweep discovery test)
-- [ ] 7.4 Envelope: the three round-trip scenarios; unknown type rejected; the emitted `type` set equals the eleven values; every variant equals its golden fixture both ways
+- [ ] 7.4 Envelope: the three round-trip scenarios; unknown type rejected; the emitted `type` set equals the eleven values; each variant's top-level layout; every variant equals its golden fixture both ways
 - [ ] 7.5 Docs check: the broker protocol reference states `broker.log` is diagnostic only and points to `GET /log` (extend the existing docs-content test for that chapter)
 - [ ] 7.6 HTTP: `schema_version` on `/status`, `/log` and `/messages` (and `git_paw` / `version` kept); drive-loop, inventory and MCP readers decode a row with `phase`; an undecodable log entry is skipped; the probe accepts a real status and rejects a substring decoy
 - [ ] 7.7 `tests/wire_script_parity.rs`: every listed `broker.sh` / `sweep.sh` publishing verb, against a recording listener, decodes and validates

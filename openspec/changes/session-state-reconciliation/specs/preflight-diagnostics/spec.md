@@ -18,11 +18,11 @@ records" requirement allows.
 - **AND** each check SHALL carry a ✓, ⚠, or ✗ status
 - **AND** every ⚠ or ✗ check SHALL include a remedy line
 
-#### Scenario: Doctor does not mutate state without --fix
+#### Scenario: Doctor does not mutate state
 
 - **GIVEN** a repository with a `.git-paw/` directory and a drifted session record
 - **WHEN** `git paw doctor` is run without `--fix`
-- **THEN** no file under `.git-paw/`, no session file, and no git worktree registration SHALL be created, modified, or deleted
+- **THEN** no file under `.git-paw/` (config, scripts, session state), no session file, and no git worktree registration SHALL be created, modified, or deleted
 
 ### Requirement: Hygiene check
 
@@ -34,11 +34,20 @@ The command SHALL verify that the required `.gitignore` entries are present, inc
 - **WHEN** `git paw doctor` is run
 - **THEN** the Hygiene group SHALL report ⚠ with a remedy to run `git paw init`
 
-#### Scenario: Hygiene carries no session checks
+#### Scenario: Stale session detected
 
-- **GIVEN** a session record that claims active but whose terminal session is gone
+- **GIVEN** session state that claims active but whose terminal session is gone
 - **WHEN** `git paw doctor` is run
-- **THEN** the drift SHALL be reported in the Session group and not in the Hygiene group
+- **THEN** the drift SHALL be reported as ⚠ in the Session group, with the remedies "`git paw doctor --fix` repairs only git-paw's own session records" and "Doctor reports session-state drift in a Session group" define (`git paw doctor --fix` then `git paw start`, or `git paw purge --stale`)
+- **AND** the Hygiene group SHALL NOT report it
+
+#### Scenario: Session whose agent panes exited
+
+- **GIVEN** session state that claims active, whose terminal session exists, and whose agent panes have all exited past the launch grace period
+- **WHEN** `git paw doctor` is run
+- **THEN** the Session group SHALL report ⚠ naming the session and stating that its agent panes exited, with a remedy naming `git paw start`
+- **AND** the finding SHALL NOT describe the terminal session as gone and SHALL NOT recommend `git paw purge --stale`
+- **AND** the Hygiene group SHALL NOT report it
 
 ## ADDED Requirements
 

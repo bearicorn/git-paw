@@ -44,26 +44,26 @@ When the tmux session is built for a coordinated session (per the `supervisor-la
 
 The layout SHALL be built using `tmux split-window -h` and `-v` with explicit percentages, then enforced via `tmux resize-pane -y <pct>` for the height proportions and the per-row equal-width rebalance described above. `select-layout tiled`, or any other whole-window auto-layout, SHALL NOT be used for the coordinated layout, because those layouts do not preserve the predictable pane-index ordering this layout relies on. `select-layout even-horizontal` MAY be used only when scoped so it rebalances a single agent row's widths without reordering pane indices or disturbing the dashboard row. No `swap-pane` SHALL be emitted.
 
-#### Scenario: 5-agent coordinated layout has 1 agent row
+#### Scenario: 5-agent supervised layout has 1 agent row
 
-- **GIVEN** a coordinated session with a dashboard, 5 agent branches and default grid settings
+- **GIVEN** a supervised (coordinated) session with a dashboard, 5 agent branches and default grid settings
 - **WHEN** the tmux layout is built
 - **THEN** pane 0 SHALL be the dashboard spanning the full window width
 - **AND** panes 1-5 SHALL be agents arranged in a single row below the dashboard
 - **AND** the dashboard row's height SHALL be 50% and the agent row's height SHALL be 50%
 
-#### Scenario: 10-agent coordinated layout has 2 agent rows
+#### Scenario: 10-agent supervised layout has 2 agent rows
 
-- **GIVEN** a coordinated session with a dashboard, 10 agent branches and default grid settings
+- **GIVEN** a supervised (coordinated) session with a dashboard, 10 agent branches and default grid settings
 - **WHEN** the tmux layout is built
 - **THEN** total row count SHALL be 3 (1 dashboard + 2 agent rows)
 - **AND** the dashboard row's height SHALL be 50%
 - **AND** each agent row's height SHALL be 25%
 - **AND** the first agent row SHALL contain panes 1-5, the second agent row SHALL contain panes 6-10
 
-#### Scenario: 20-agent coordinated layout has 4 agent rows
+#### Scenario: 20-agent supervised layout has 4 agent rows
 
-- **GIVEN** a coordinated session with a dashboard, 20 agent branches and default grid settings
+- **GIVEN** a supervised (coordinated) session with a dashboard, 20 agent branches and default grid settings
 - **WHEN** the tmux layout is built
 - **THEN** total row count SHALL be 5 (1 dashboard + 4 agent rows)
 - **AND** the dashboard row's height SHALL be 50%
@@ -76,9 +76,9 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **THEN** panes 0-4 SHALL form the first agent row and panes 5-6 the second
 - **AND** each agent row's height SHALL be 50% of the window, with no dashboard row
 
-#### Scenario: Agents beyond the cap are rejected
+#### Scenario: 26-agent supervised session is rejected
 
-- **GIVEN** default grid settings and 26 agent branches resolved
+- **GIVEN** default grid settings (no `--max-agents`, no `[layout] max_agents`) and 26 agent branches resolved
 - **WHEN** the coordinated launch flow runs
 - **THEN** the launch SHALL be rejected with a `PawError` stating the requested count (26), the maximum (25), and hints naming `--branches <subset>` and `--max-agents` / `[layout] max_agents`
 - **AND** no tmux session SHALL be created
@@ -111,25 +111,26 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **THEN** pane 0 (dashboard) SHALL remain at the full window width
 - **AND** the vertical height proportions SHALL be unchanged: the dashboard row at 50% and each agent row at `50 / agent_rows` percent
 
-#### Scenario: Full agent row stays at equal-width columns
+#### Scenario: Full agent row stays at five equal-width columns
 
-- **GIVEN** a coordinated session with `agents_per_row` agents in a single row
+- **GIVEN** a supervised (coordinated) session with default grid settings and 5 agents in a single row
 - **WHEN** the layout is applied to a live tmux window
-- **THEN** each agent pane SHALL occupy approximately `100 / agents_per_row` percent of the window width
-- **AND** no agent row SHALL contain more than `agents_per_row` panes
+- **THEN** each of the 5 agent panes SHALL occupy approximately 20% of the window width
+- **AND** no agent row SHALL contain more than 5 panes
+- **AND** with `[layout] agents_per_row = 3` and 3 agents, each agent pane SHALL instead occupy approximately one third of the window width and no agent row SHALL contain more than 3 panes
 
 ### Requirement: Every pane-less session uses the agent grid
 
 Every launch path (bare `start`, spec-driven `start` and coordinated `start`) and the recovery of a stopped session SHALL build the window with the agent-grid geometry defined by "Supervisor-mode pane layout": the dashboard as the full-width top row when the session has a dashboard, coding agents row-major below at no more than `agents_per_row` per row, each row rebalanced to equal width, and the agent cap. When the session has no dashboard, because the dashboard is not enabled or because the broker does not run, there SHALL be no top row. In that case the coding agents SHALL start at pane 0 and the agent rows SHALL share the full window height evenly. The whole-window `select-layout tiled` and `main-horizontal` layouts SHALL NOT be used to arrange coding agents. Every coding agent's pane index SHALL be its row-major position — the session's first agent index plus the agent's position — at any agent count: each split that creates an agent pane, including the one that opens a new row and the one `git paw add` performs, SHALL target the session's last pane, so the new pane takes the next index and no existing pane is renumbered.
 
-#### Scenario: Bare start with a dashboard builds the grid
+#### Scenario: Bare start builds the grid
 
 - **GIVEN** `[broker] enabled = true`, `[dashboard] enabled = true` and a bare launch
 - **WHEN** `git paw start` launches 7 branches
 - **THEN** pane 0 SHALL be the dashboard spanning the full width
 - **AND** panes 1-5 SHALL form the first agent row and panes 6-7 the second, each row at equal widths
 
-#### Scenario: Spec-driven start with a dashboard builds the grid
+#### Scenario: Spec-driven start builds the grid
 
 - **GIVEN** a spec-driven bare `git paw start --specs a b c` with the broker and the dashboard enabled
 - **WHEN** the session is built

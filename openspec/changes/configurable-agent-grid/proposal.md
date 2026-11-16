@@ -1,7 +1,7 @@
 ## Why
 
 A supervised session's agent grid is capped at 25 agents in rows of 5 by two constants
-(`supervisor/layout.rs`: `SUPERVISOR_MAX_AGENTS = 25`, `SUPERVISOR_AGENTS_PER_ROW = 5`) whose doc
+(`src/surface.rs`: `SUPERVISOR_MAX_AGENTS = 25`, `SUPERVISOR_AGENTS_PER_ROW = 5`) whose doc
 comments, error message ("Configurable max_agents is planned for v1.0.0") and spec text all promise a
 configurable layout "later". Operators on wide or very tall terminals cannot use the space; operators on
 small screens cannot ask for fewer columns. The v1.0 freeze is the wrong moment to add config keys, so
@@ -23,6 +23,9 @@ panes for an orchestrator, which no longer exist.
   re-tile and check the cap with the values the session was built with, and recovery rebuilds the same
   grid — recovery never refuses a session because the cap changed since.
 - Bare sessions use the same grid since v0.18.0's `pane-less-session-parity`, so the cap and column count apply to them too.
+- DV-19 (v0.20 dogfood): after a `remove` and two `add`s the grid left the newest pane one column
+  wide. The add re-tile sizes each row from the row's full width, so any add/remove sequence keeps
+  equal-width columns.
 
 ## Capabilities
 
@@ -33,14 +36,22 @@ panes for an orchestrator, which no longer exist.
 ### Modified Capabilities
 
 - `tmux-orchestration`: **Supervisor-mode pane layout** (cap and columns come from the effective grid
-  settings); ADDED **Agent grid dimensions are configurable**.
+  settings); **Every pane-less session uses the agent grid** (its "five per row" and "25-agent cap"
+  become the effective settings, so bare sessions follow them); ADDED **Agent grid dimensions are
+  configurable**.
 - `supervisor-launch`: **Supervisor auto-start flow** (steps 3–4 use the effective settings).
-- `git-add-remove-branch`: **Pane spawn with grid re-tiling** (the add-time cap is the session's).
+- `git-add-remove-branch`: **Pane spawn with grid re-tiling** (the add-time cap is the session's; the re-tile keeps
+  equal-width columns after any add/remove sequence, DV-19).
+
+The 25-agent / 5-column scenarios in both MODIFIED layout requirements keep their titles
+("Hard cap rejects more than 25 agents", "26-agent supervised session is rejected", "Full agent row
+stays at five equal-width columns"): they still hold under the default settings, and strict validation
+rejects a MODIFIED block that drops a scenario title.
 
 ## Impact
 
 - **Code:** `src/config/layout.rs` (`LayoutConfig { border_affordances, max_agents, agents_per_row }`,
-  validation at load), `src/supervisor/layout.rs` (`supervisor_layout(count, &GridSettings)`; constants
+  validation at load), `src/surface.rs` (`supervisor_layout(count, &GridSettings)`; constants
   become defaults), `src/tmux/command.rs` (`build_supervisor_session`, `build_add_agent_commands`,
   `build_remove_retile_commands`, `push_supervisor_resize_pass` take the column count),
   `src/tmux/layout.rs` (`agent_row_widths`, `rebalance_agent_rows`), `src/commands/{supervisor,add,remove,recover}.rs`,
@@ -78,5 +89,5 @@ and the `supervisor-launch` capability). Old terms used here:
 - the launch line "Supervisor session '…' launched" → the coordinated wording
   `supervisor-vocabulary-split` prints
 - `docs/src/user-guide/supervisor.md` → same path, retitled "Coordinated mode" (renamed at 1.0.0)
-- Kept (not user-visible): `src/supervisor/layout.rs`, `supervisor_layout`, `SUPERVISOR_*`
+- Kept (not user-visible): `src/surface.rs`, `supervisor_layout`, `SUPERVISOR_*`
   constants, `cmd_supervisor`, `build_supervisor_session`.

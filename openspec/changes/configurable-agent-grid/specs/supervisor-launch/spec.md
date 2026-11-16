@@ -33,9 +33,9 @@ The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestrat
 - **AND** panes 1 and 2 SHALL run the coding-agent CLI commands in their worktrees
 - **AND** no pane SHALL run an agent CLI whose working directory is `repo_root`
 
-#### Scenario: Cap rejects more agents than the effective maximum
+#### Scenario: Hard cap rejects more than 25 agents
 
-- **GIVEN** default grid settings and a configuration that resolves to 26 or more spec branches
+- **GIVEN** default grid settings (no `--max-agents`, no `[layout] max_agents`) and a configuration that resolves to 26 or more spec branches
 - **WHEN** `cmd_supervisor()` is called
 - **THEN** the function SHALL return a `PawError` before any tmux command runs
 - **AND** the error message SHALL state the requested count, the maximum (25), a hint suggesting `--branches <subset>` for splitting, and how to raise the cap

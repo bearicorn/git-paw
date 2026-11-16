@@ -72,8 +72,9 @@ No breaking change. The only new bytes are the version fields.
 
 - `session-state`: ADDED the versioned session wire document, newer-schema refusal, and the
   versioned per-repo discovery file.
-- `broker-protocol`: MODIFIED *Broker message envelope* (eleven types, wire type separate from
-  the model). ADDED shared HTTP wire types with a protocol `schema_version`, and helper-payload
+- `broker-protocol`: *Broker message envelope* is REMOVED and replaced by ADDED *Broker message
+  envelope and wire type* (eleven types, wire type separate from the model); strict validation
+  will not let a MODIFIED block drop the old "all seven wire-format type values" scenario. ADDED shared HTTP wire types with a protocol `schema_version`, and helper-payload
   parity.
 - `approval-pattern-surfacing`: ADDED versioned manual-decision log lines.
 - `code-architecture`: ADDED "Serialized contracts are wire types separate from the domain

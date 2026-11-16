@@ -70,9 +70,7 @@ When the session's broker answers, `git paw status` SHALL show three things on e
 - **THEN** the human worktree lines SHALL be identical to the output before this requirement
 - **AND** every worktree object SHALL contain `"agent": null`
 
-## MODIFIED Requirements
-
-### Requirement: Dashboard pane index persisted in session state
+### Requirement: Session records its dashboard pane and pane layout
 
 The `Session` struct SHALL include an optional field `dashboard_pane: Option<u32>` that records the pane index of the dashboard pane within the tmux session. The field SHALL use `#[serde(default, skip_serializing_if = "Option::is_none")]` so sessions saved without it load with `None`. Every start flow that creates a dashboard pane SHALL populate the field with `Some(0)`, in bare and coordinated sessions alike. A start flow that creates no dashboard pane SHALL leave it absent, including when the broker runs.
 
@@ -105,6 +103,18 @@ Consumers that need the first coding-agent pane index or the dashboard index SHA
 - **THEN** `dashboard_pane` SHALL be `Some(0)`
 - **AND** the first recorded coding agent's `pane_index` in the per-repo discovery file SHALL be `1`
 
+#### Scenario: A version-1 supervised broker config still records the dashboard at pane 0
+
+- **GIVEN** a config with no `version`, `[broker] enabled = true` and `[supervisor] enabled = true`, and a coordinated launch
+- **WHEN** the session state is saved
+- **THEN** `dashboard_pane` SHALL be `Some(0)`, the version-1 config implying the dashboard
+
+#### Scenario: A broker-less coordinated start records no dashboard
+
+- **GIVEN** a coordinated launch whose session runs no broker
+- **WHEN** the session state is saved
+- **THEN** `dashboard_pane` SHALL be absent and the first recorded coding agent's `pane_index` SHALL be `0`
+
 #### Scenario: A broker session without a dashboard starts agents at pane 0
 
 - **GIVEN** `[broker] enabled = true` and no dashboard enabled
@@ -132,6 +142,16 @@ Consumers that need the first coding-agent pane index or the dashboard index SHA
 - **THEN** it SHALL treat pane 2 as the first coding-agent pane
 - **AND** a saved bare session with `dashboard_pane = None` and no layout record SHALL resolve its first coding agent at pane 1 when it recorded a broker and at pane 0 when it did not
 
+## REMOVED Requirements
+
+### Requirement: Dashboard pane index persisted in session state
+
+**Reason**: The dashboard becomes opt-in and needs the broker, so a session records `dashboard_pane` only when its launch created a dashboard pane. The scenario "A broker-less supervised start still records the dashboard" contradicts that, and "Supervised start records the dashboard at pane 0" holds only when the dashboard is enabled; strict validation rejects a MODIFIED block that drops or retitles them.
+
+**Migration**: Replaced by ADDED *Session records its dashboard pane and pane layout*, which keeps the field, its serde attributes, the three round-trip scenarios and the pre-relocation fallbacks. A coordinated launch with the dashboard enabled (including a version-1 config that implies it) still records `Some(0)`; a broker-less coordinated launch records none and its agents start at pane 0. Sessions already saved keep resolving as before.
+
+## MODIFIED Requirements
+
 ### Requirement: Recovery data survives tmux crashes
 
 After a tmux crash, the persisted session SHALL contain all data needed to reconstruct the session, including whether it has a dashboard.
@@ -140,6 +160,15 @@ After a tmux crash, the persisted session SHALL contain all data needed to recon
 - **GIVEN** a saved session with worktrees and broker enabled
 - **WHEN** tmux crashes and the session is loaded from disk
 - **THEN** it SHALL have the session name, repo path, all worktree details, AND broker_port, broker_bind, broker_log_path, and `dashboard_pane` when it had a dashboard
+
+#### Scenario: Session recovery recreates the broker host and dashboard pane when broker was enabled
+- **GIVEN** a saved session with `broker_port = Some(9119)` and `broker_bind = Some("127.0.0.1")`, saved before the layout record existed (no `dashboard_pane`, no layout record), so it has a dashboard
+- **WHEN** `recover_session()` is called
+- **THEN** the rebuilt tmux session SHALL have:
+  - A detached `broker` window running `git-paw __broker`
+  - Dashboard pane in pane 0 running `git-paw __dashboard`
+  - `GIT_PAW_BROKER_URL` environment variable set to `http://127.0.0.1:9119`
+  - All original worktree panes in subsequent indices
 
 #### Scenario: Session recovery recreates the broker host and the recorded dashboard pane
 - **GIVEN** a saved session with `broker_port = Some(9119)`, `broker_bind = Some("127.0.0.1")` and `dashboard_pane = Some(0)`
@@ -156,7 +185,7 @@ After a tmux crash, the persisted session SHALL contain all data needed to recon
 - **THEN** the rebuilt tmux session SHALL have the `broker` window and `GIT_PAW_BROKER_URL`
 - **AND** no pane SHALL run `git-paw __dashboard` and the worktree panes SHALL start at pane 0
 
-#### Scenario: Session recovery uses the recorded session, not current config
+#### Scenario: Session recovery uses original broker config, not current config
 - **GIVEN** a saved session with `broker_port = Some(9119)` and `dashboard_pane = Some(0)`
 - **AND** current repo config has `broker.enabled = false` and `[dashboard] enabled = false`
 - **WHEN** `recover_session()` is called
@@ -171,9 +200,9 @@ After a tmux crash, the persisted session SHALL contain all data needed to recon
 
 Recovering a stopped session SHALL rebuild in window 0 exactly the panes the session defines: the dashboard pane when the session has a dashboard, plus one pane per recorded worktree. That is `N + 1` panes with a dashboard and `N` without one. The recovery SHALL NOT create more panes in window 0 than the session defines and SHALL NOT create an orchestrator pane, including when the stopped session was saved with an earlier layout. The detached `broker` service window is recreated separately (`broker-runtime`) and is not counted.
 
-#### Scenario: Recovery of an N-worktree session with a dashboard creates N+1 panes
+#### Scenario: Recovery of an N-worktree supervised session creates N+1 panes
 
-- **GIVEN** a stopped coordinated session with a dashboard and 3 recorded worktrees
+- **GIVEN** a stopped supervised (coordinated) session with a dashboard and 3 recorded worktrees
 - **WHEN** `git paw start` recovers it
 - **THEN** window 0 of the rebuilt tmux session SHALL have exactly 4 panes (dashboard + 3 agents)
 

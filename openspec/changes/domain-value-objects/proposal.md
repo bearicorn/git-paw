@@ -23,8 +23,8 @@ broker identity, the worktree directory is in persisted paths, and log file name
   Since v0.17.0 the claim guards the explicit `sweep.sh approve` and the drive loop's nudge and
   submit keystrokes (no component approves on its own).
 - **The `domain.rs` newtypes are barely used.** `SessionName` is built in one place and then
-  unwrapped into 91 `session_name: &str` / `session: &str` parameters (counted before v0.17.0
-  deleted `supervisor/poll.rs` and `supervisor/approve.rs`), most of them in `supervisor/drive.rs`
+  unwrapped into 150 `session_name: &str` / `session: &str` parameters (recounted on main at
+  v0.20.0, 2026-11-16; 91 when first counted before v0.17.0), most of them in `supervisor/drive.rs`
   and `tmux/`, so nothing stops a raw string from reaching a tmux target.
 
 ## What Changes
@@ -78,7 +78,7 @@ Behavior-preserving: no byte of output, path, wire or persisted state changes.
     `src/mcp/tools/publish.rs` and `src/specs/{speckit,superpowers}.rs` change;
   - `session_name: &str` becomes `&SessionName` across `src/session.rs`, the v0.18 `src/terminal/`
     port and `src/commands/`;
-  - `assets/scripts/sweep.sh` (`resolve_agent_for_path`).
+  - `assets/agent-skills/orchestrator/scripts/sweep.sh` (`resolve_agent_for_path`).
 - **Tests:**
   - the existing slug, log-name and branch-slug unit tables move onto `BranchName` unchanged;
   - new `tests/slugify_shell_parity.rs` and `tests/claim_ttl_parity.rs`;
