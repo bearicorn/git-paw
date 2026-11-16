@@ -1316,6 +1316,55 @@ Stale premises found while speccing:
   committed config carries a machine-specific path; resolve a relative `command` against the
   repository root (PK-20). The init comment points Spec Kit at `.specify/specs`, but real projects
   keep features in `specs/<NNN-feature>/` (PK-02).
+
+**From external feedback on the v0.20.0 release (2026-11-16, EF-xx).** Items are placed below;
+EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
+- **EF-28, EF-23, EF-29** — git-paw's `auto` launches Claude with `acceptEdits`, not Claude
+  Code's own `--permission-mode auto`, so an `auto` wave stalls on its first `npm test` or
+  `git commit`, and even read-only greps prompt → `approval-level-truth`.
+- **EF-26, EF-32** — recovery resumes a conversation that never started ("No conversation
+  found"), and resumed workers sit idle with no continue message → `worker-resume-recovery`.
+- **EF-33** — feedback sent to a busy worker goes unread, and nothing tells the orchestrator
+  → `broker-event-semantics`.
+- **EF-21** — after a TOML parse error, doctor reports fallback defaults as the real config
+  → `config-check-command`.
+- **EF-24, EF-27** — an upgrade from 0.19 leaves `.gitignore` short and tracked helper copies
+  that show as modified in worktrees → `upgrade-hygiene`.
+- **EF-31** — `git paw add` has no `--dry-run` → `add-dry-run`.
+
+**Specs refreshed 2026-11-16 on `feat/v0.21.0-specs`** (rebased onto v0.20.0; 25 changes, all
+`--strict` valid with 0 errors).
+- **Rebased:** the 15 original drafts now carry the scenarios v0.19.0 and v0.20.0 added. Stale
+  asset paths point at the v0.20.0 skill packages. `readme-landing-page` was dropped; it shipped
+  in v0.19.0.
+- **Folded into existing drafts:** DV-19 → `configurable-agent-grid`; PK-15 →
+  `dashboard-usage-view`; EF-21 → `config-check-command`.
+- **New drafts** covering the findings carried above and the external feedback:
+  - `broker-event-semantics`: DF-21/35/37/40/50/56, DV-08/09/10/13/15/17, PK-12/13/14/16, EF-33.
+    It can be split into three changes: commit-event truth, the verification lifecycle, and
+    delivery and activity.
+  - `approval-level-truth`: EF-28/23/29. It adds four levels, `manual < accept-edits < auto <
+    full-auto`; a version-1 `auto` value loads as `accept-edits`. It must ship with the config
+    version 2 bump.
+  - `config-portability`: DF-03, DV-01 (per-repository default broker port), PK-20, PK-02.
+  - `upgrade-hygiene`: EF-24, EF-27.
+  - `worker-resume-recovery`: EF-26, EF-32, DF-26, DV-11 (wake detection is unattended only).
+  - `add-dry-run`: EF-31.
+  - `spec-kit-wave-planning`: PK-03/04/05/08/09/17. PK-09 (broker reachable before
+    `on_create`) applies to every coordinated launch, so it may move out.
+  - `helper-consistency`: DV-05/06/07 and the menu glyph literals.
+  - `dx-error-cleanups`: the `start --force` refusal, budget error types and text, the
+    stopped-rebase lookup, config warnings as values, and DF-23. The uncommitted-spec check
+    never looked under `openspec/changes/`.
+  - `ci-test-hygiene`: the MSRV job, the flake register (including DV-18), the DV-21 process
+    leaks, and the shared pane-wait helper.
+  - `spec-hygiene`: `Test:` pointers and the scenario renames from the v0.19.0 review.
+  - `dogfood-docs`: DF-10/16/25/28/42, DV-02.
+- **Archive order matters.** These pairs MODIFY the same requirement, so the second to archive
+  rebases its delta:
+  - `configurable-agent-grid` and `dashboard-usage-view` (three requirements)
+  - `session-state-reconciliation` and `supervisor-vocabulary-split` (doctor read-only)
+  - `broker-event-semantics` and `spec-hygiene` (exit summary)
 ---
 
 ## v0.22.0 — Session recording & replay, rethought (planned)
@@ -1431,6 +1480,18 @@ because the live-session guard refuses the tmux tests (DV-14, with DF-22).
 **From the peer-4-poker run on v0.19.0 (2026-11-12):** workers launched with
 `--dangerously-skip-permissions` show "auto mode on" in Claude Code 2.1.322; the approval-flag
 mapping was verified against 2.1.220 only (PK-11). Re-verify every level's flags.
+
+**From external feedback on the v0.20.0 release (2026-11-16, EF-xx):**
+- **EF-22** — `git paw setup-cli claude-sandboxed --allowlist` refuses a custom CLI with
+  `family = "claude"`; only `claude` works, though both write the same settings file. Key the
+  setup row by family, not by name.
+- **EF-25** — a worker with its own config folder exits at Claude Code's "trust this folder"
+  dialog; git-paw reports a generic permission prompt, and `setup-cli --trust` says no CLI
+  supports it yet.
+- **EF-30** — a second first-launch dialog follows ("Allow external CLAUDE.md file imports?");
+  git-paw neither pre-answers it nor explains it.
+- Approval-level mapping (EF-28/23/29) is not here: it changes the level contract, so it lands
+  in v0.21.0 as `approval-level-truth`.
 
 ### Sequencing & process
 
