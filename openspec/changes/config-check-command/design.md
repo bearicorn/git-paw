@@ -8,6 +8,18 @@
 the repo file only, which (inferred from `skip_serializing_if`) misreports explicit empty values such as
 `[worktree.env] copy = []`. Deprecated keys are not detected anywhere.
 
+**Load errors fall back to defaults (feedback #21).** `doctor::collect_probes` loads the merged
+config and, on any error, substitutes `PawConfig::default()` (`src/doctor.rs:1820-1826`). Every later
+probe reads that default: `probe_broker` sees `enabled = false` (`src/doctor.rs:2422-2444`) and
+`check_broker` prints "disabled — the pure-manual baseline" (`src/doctor.rs:1339-1346`);
+`probe_supervisor` returns the default (`src/doctor.rs:2459-2462`) and `check_supervisor` prints
+"disabled" (`src/doctor.rs:1393-1400`); `probe_spec_system` finds no `[specs]`
+(`src/doctor.rs:2013-2016`) and `check_spec_system` prints "no spec system configured"
+(`src/doctor.rs:884-893`). The same default feeds `probe_clis`, `probe_sandbox_mode`,
+`probe_spec_cli` and `probe_spec_workflow` (`src/doctor.rs:1839-1846`). The Config ✗ is correct; the
+other groups describe a configuration nobody wrote. (`git paw init` has the same fallback,
+`src/init.rs:137-139`, `:177`; `upgrade-hygiene` covers it.)
+
 ## Goals / Non-Goals
 
 **Goals:** a deterministic, file-attributed validator usable from CI and from doctor; close doctor's
@@ -45,9 +57,28 @@ binaries reading newer configs); validating environment facts (CLI installed on 
   contract's roster. Error findings are a result (document printed, exit 1), like failing doctor
   checks.
 - **D5 — Exit codes.** 0 / 1, with `--strict` promoting warnings. Matches doctor's "worst check" rule.
+- **D6 — "Not evaluated", not defaults.** `collect_probes` keeps `Result<PawConfig, ConfigLoadError>`;
+  the config-derived probes take `Option<&PawConfig>` and return a `NotEvaluated` variant when it is
+  `None`. Each affected group renders one ⚠ whose detail starts with "not evaluated — the
+  configuration could not be loaded" and whose remedy points at the Config ✗. Groups that never read
+  the config (Environment, roster detection, Python, helper presence/mode/content, Hygiene) run as
+  today; detection runs with the roster only. ⚠ rather than a new status keeps the doctor status set
+  (and the `--json` `status` values) closed; the Config ✗ already makes the exit non-zero.
+  *Alternative:* a fourth `skipped` status — clearer, but it widens a machine contract that
+  `uniform-json-output` is freezing (open question 1).
+- **D7 — An unparseable file stops at its syntax finding.** The validator returns the parse error and
+  nothing else for that file (no key walk over a partial tree); the other file is validated on its
+  own, as D1 already does.
 
 ## Risks / Trade-offs
 
 - [Known-key table drifts from the structs] → a test enumerates every serde field (via the wire
   types or a serialize-all-fields fixture) and fails on a missing table entry.
 - [Warnings for third-party keys a consumer adds on purpose] → warnings only; `--strict` is opt-in.
+- [A "not evaluated" ⚠ hides a real problem in that group] → it is shown next to a ✗ that must be
+  fixed first; re-running doctor after the fix evaluates the group.
+
+## Open Questions
+
+1. Add a `skipped` doctor status for "not evaluated" instead of ⚠ (D6)? It must be decided before
+   `uniform-json-output` freezes the `status` values.

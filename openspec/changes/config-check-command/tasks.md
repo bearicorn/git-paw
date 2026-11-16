@@ -20,9 +20,16 @@
 - [ ] 3.1 `tests/config_check_e2e.rs` (isolated `HOME`/`XDG_CONFIG_HOME`): unknown key in global file with path; both deprecated auto-approval tables one finding each (no `elixir` or per-field finding); unknown default CLI; empty `copy = []` not flagged; syntax error names the line; files untouched (mtime + content); exit codes incl. `--strict`; `--json` lists both findings with `files`/`config_version`; `--json` with invalid TOML prints the document and exits 1
 - [ ] 3.2 `doctor_tests.rs`: deprecated `[supervisor.auto_approve]` flagged ⚠; broken global config attributed to the global path; existing Config scenarios unchanged
 
+## 3b. Doctor on a config load error (feedback #21)
+
+- [ ] 3b.1 `src/doctor.rs`: `collect_probes` keeps the load result instead of `PawConfig::default()` (`:1823-1826`); config-derived probes (`probe_broker`, `probe_supervisor`, `probe_spec_system`, `probe_spec_cli`, `probe_spec_workflow`, `probe_sandbox_mode`, `probe_cli_identities`, root-skill staleness) return `NotEvaluated` without a config; detection runs with the roster only
+- [ ] 3b.2 Each affected `check_*` renders one ⚠ "not evaluated — the configuration could not be loaded" per group, remedy pointing at the Config ✗; unit tests per group
+- [ ] 3b.3 Validator: an unparseable file yields only its syntax finding; table test with a broken repo file and a global file with an unknown key
+- [ ] 3b.4 `tests/doctor_e2e.rs`: config with `[broker] enabled = true` and a syntax error → Broker/Supervisor/Spec-system "not evaluated", no "disabled" / "no spec system" text, Environment and Hygiene still reported; `--json` statuses `warn` and exit non-zero
+
 ## 4. Docs
 
-- [ ] 4.1 `--help`; `docs/src/cli-reference.md` `config check`; `docs/src/user-guide/doctor.md` (diagnose vs validate); configuration reference intro; README command table row
+- [ ] 4.1 `--help`; `docs/src/cli-reference.md` `config check`; `docs/src/user-guide/doctor.md` (diagnose vs validate; "not evaluated" after a config error); configuration reference intro; README command table row
 
 ## 5. Gates
 

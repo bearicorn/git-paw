@@ -34,6 +34,12 @@ commands.
   belongs to config schema versioning.
 - `doctor`'s Config group runs the same validator, so it finally reports deprecated keys and the
   global file too; its remedy points at `git paw config check` for the full list.
+- **No fallback defaults after a load error** (0.20 feedback #21): when the config does not load,
+  doctor reports the error and marks the config-derived groups (Spec system, Broker, Supervisor,
+  configured CLIs, root-skill staleness) as ⚠ "not evaluated" instead of reporting the built-in
+  defaults ("broker disabled", "no spec system") as if they were the configuration. Checks that do not
+  read the config (Environment, roster on PATH, Python, helper files, Hygiene) still run. `config
+  check` reports only the syntax error for an unparseable file and still validates the other file.
 
 ## Capabilities
 
@@ -44,7 +50,9 @@ commands.
 ### Modified Capabilities
 
 - `preflight-diagnostics`: ADDED `git paw config check` requirements; **Config check** (doctor) uses
-  the shared validator and covers both files and deprecated keys.
+  the shared validator and covers both files and deprecated keys; ADDED *Doctor does not report
+  fallback defaults after a config load error*, *Configuration-independent checks run despite a
+  config load error*, *An unparseable config file yields only its syntax finding*.
 
 ## Impact
 
@@ -52,7 +60,8 @@ commands.
   `validate_file(path, raw) -> Vec<ConfigFinding>`), replacing `doctor::unknown_config_keys`'
   round-trip diff with a schema walk over the known key tree; detect's known-CLI roster for CLI names; `WorktreePortsConfig::stride_warning`;
   `src/cli.rs` (`Command::Config { Check { strict, json } }`); `src/main.rs` dispatch; `src/doctor.rs`
-  `check_config` delegates.
+  `check_config` delegates; `collect_probes` carries "config not loaded" instead of
+  `PawConfig::default()`, and the config-derived `check_*` functions render "not evaluated".
 - **Enum-variant ripple:** none.
 - **Docs:** `--help`, `docs/src/cli-reference.md` (`config check`), `docs/src/user-guide/doctor.md`
   (diagnose vs validate), configuration reference intro (how to validate), README command table.
