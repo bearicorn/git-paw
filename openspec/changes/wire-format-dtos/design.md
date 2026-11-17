@@ -152,11 +152,8 @@ broker HTTP types. Each wave is gated on golden fixtures plus `just check`. Vers
 fields land last, in one commit per edge. Rollback is a revert. Files written with
 `schema_version` still load on an older binary, because the unknown key is ignored.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. The broker version lives on the HTTP responses (recommended), not on each message.
-2. Declare `broker.log` non-contract and leave it unversioned (recommended, following
-   v0.22.0's `events.jsonl` plan), rather than adding a version header as MILESTONE's original
-   list implies. Whether v1.0.0 retires `broker.log` is that release's decision.
-3. Key name `schema_version` (recommended; matches `uniform-json-output`) or `version` (matches
-   the config key).
+1. **Broker version:** on the HTTP responses, not on each message.
+2. **`broker.log`:** declared non-contract and unversioned.
+3. **Key name:** `schema_version`, matching `uniform-json-output`. Config keeps `version`.

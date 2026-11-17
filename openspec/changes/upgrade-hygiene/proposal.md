@@ -20,6 +20,10 @@ twin of the doctor fallback that `config-check-command` fixes.
 - **Doctor flags tracked generated files.** A Hygiene ⚠ lists every tracked path under the
   directories and files `git paw init` ignores (everything git-paw writes under `.git-paw/` except
   `config.toml`), with the remedy `git rm -r --cached <paths>` and a commit.
+- **Start warns once about tracked generated files.** Doctor is not always run; the #27 user found
+  the problem through worker diffs. Each `git paw start` that launches or recovers a session prints
+  one stderr warning with the same entries and `git rm -r --cached` command as the doctor row. A
+  clean repository prints nothing, and the warning never changes the exit code.
 - **Doctor names one upgrade command.** When any finding that `git paw init` repairs is present
   (missing `.gitignore` entries, missing or stale helpers or compatibility copies, a stale
   orchestrator pointer), doctor adds one Hygiene ⚠ "repository setup is behind this git-paw version"
@@ -44,7 +48,8 @@ twin of the doctor fallback that `config-check-command` fixes.
 ### Modified Capabilities
 
 - `preflight-diagnostics`: ADDED *Tracked generated files are flagged*; ADDED *Doctor names one
-  command for an outdated repository setup*.
+  command for an outdated repository setup*; ADDED *Start warns once about tracked generated
+  files*.
 - `core-init`: ADDED *Init reconciles a repository set up by an older version*; ADDED *Init reports
   tracked generated files without untracking them*; ADDED *Init self-ignores the compatibility
   scripts directory*; ADDED *Init does not render from defaults when the config fails to load*.
@@ -53,10 +58,12 @@ twin of the doctor fallback that `config-check-command` fixes.
 
 - **Code:** `src/doctor.rs` (`probe_hygiene` gains tracked-file and upgrade-summary inputs;
   `check_hygiene` rows), `src/init.rs` (`install_packages` writes the compatibility `.gitignore`;
-  `run_init` reports tracked files and stops before rendering on a load error), one shared
+  `run_init` reports tracked files and stops before rendering on a load error),
+  `src/commands/start.rs` (one stderr warning per launch or recovery), one shared
   `tracked_generated_files(repo_root)` read through `CommandRunner` (`git ls-files`).
 - **Docs:** `docs/src/user-guide/doctor.md` (two Hygiene rows), an "Upgrading git-paw" section in
-  the user guide (run `git paw doctor`, then `git paw init`, then untrack what doctor lists),
+  the user guide (run `git paw doctor`, then `git paw init`, then untrack what doctor lists; `start`
+  also warns about tracked files),
   CHANGELOG pointer to it.
 - **Cross-version dependencies:** `config-check-command` (this release) — the doctor side of the
   "no defaults after a load error" rule; this change applies the same rule to `init`.

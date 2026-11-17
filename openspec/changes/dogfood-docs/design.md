@@ -98,11 +98,9 @@ existing `tests/orchestrator_skill_content.rs`.
 Text and tests only. Ship in any order relative to the other v0.21.0 changes. The skill re-exports
 on the next supervised launch. Rollback is a revert.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Should git-paw set `OPENSPEC_TELEMETRY=0` in the worker environment by default, the way it
-  already sets `GIT_PAW_BROKER_URL` for panes? That is a behaviour change with a privacy upside, out
-  of scope for a docs change. Raise it in its own change if wanted.
-- Does OpenSpec also honour `DO_NOT_TRACK=1`? If it does, the guide could mention it. Confirm
-  against OpenSpec's documentation while implementing; the spec requires only
-  `OPENSPEC_TELEMETRY=0`.
+- **`OPENSPEC_TELEMETRY=0` by default in workers:** no. The guide documents it; a default would be
+  its own change.
+- **`DO_NOT_TRACK=1`:** checked against OpenSpec's docs during implementation. The spec requires
+  only `OPENSPEC_TELEMETRY=0`.

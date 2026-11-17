@@ -6,8 +6,8 @@
 ## 2. Versioned documents
 
 - [ ] 2.1 Add `schema_version: 1` to every DTO; the no-session status document becomes `{"schema_version":1,"session":null}`
-- [ ] 2.2 `status`: add `terminal_alive` (same value as `tmux_running`, which is kept) and `broker` (`null`, or `{url, state}` with `running|paused|not_responding|foreign` from the same probe the human output uses)
-- [ ] 2.3 `doctor`: add a stable `id` to `CheckResult`, declared beside each check constructor (`<group-slug>.<check-slug>`), never derived from display text
+- [ ] 2.2 `status`: add `terminal_alive` (the value `tmux_running` carried) and remove `tmux_running` (BREAKING; switch the in-tree readers in `tests/session_stale_hygiene.rs`, `tests/agent_pane_liveness_e2e.rs`, `tests/cmd_golden_output.rs` and `tests/command_library.rs`); add `broker` (`null`, or `{url, state}` with `running|paused|not_responding|foreign` from the same probe the human output uses)
+- [ ] 2.3 `doctor`: add a stable `id` to `CheckResult`, declared beside each check constructor (`<group-slug>.<check-slug>`), never derived from display text; the per-check `status` serializes `skipped` for a not-evaluated check (from `config-check-command`), and the overall `status` is computed over evaluated checks only
 
 ## 3. New --json flags
 
@@ -21,17 +21,18 @@
 - [ ] 4.1 `tests/json_output_contract.rs`: walk `Cli::command()` for subcommands with `--json`, assert the set equals the roster (including `config check`, which needs `config-check-command` to have landed; until it has, the guard's expected set omits it with a comment naming that change), and assert the CLI reference documents each one; run each roster command in a temp repo (HOME overridden) and assert one object, an integer `schema_version` and no `0x1B` byte, including with `CLICOLOR_FORCE=1`
 - [ ] 4.2 Failure semantics: `status --json` outside a repo leaves stdout empty with the same stderr and exit code as human mode; `doctor --json` with a failing check prints the full document and exits non-zero
 - [ ] 4.3 Golden key-set test per roster document (names and JSON types)
-- [ ] 4.4 Status: the no-session document, both liveness keys true when alive, agents exited with the terminal session still up gives `status` `stopped` and `terminal_alive` true, stale gives `terminal_alive` false, broker `running` with the recorded URL, broker `null` when disabled, existing keys unchanged
-- [ ] 4.5 Doctor: ids are well-formed, unique, and identical across two runs; `schema_version` and the existing fields are present
+- [ ] 4.4 Status: the no-session document, `terminal_alive` true when alive, agents exited with the terminal session still up gives `status` `stopped` and `terminal_alive` true, stale gives `terminal_alive` false, `tmux_running` absent in every document, broker `running` with the recorded URL, broker `null` when disabled, the other existing keys unchanged
+- [ ] 4.5 Doctor: ids are well-formed, unique, and identical across two runs; `schema_version` and the existing fields are present; a skipped check serializes `"skipped"` and leaves the overall `status` and the exit code as the evaluated checks decide
 - [ ] 4.6 Approvals: versioned document with entry keys; an empty log gives `[]` and exit 0
 - [ ] 4.7 `add --json` (active and paused session), with a failed `add --json` leaving stdout empty; `remove --json` (default and `--keep-worktree`), with the uncommitted-work refusal leaving stdout empty
 - [ ] 4.8 `cli.rs` parse tests: `status` / `status --json`, `list-clis` / `list-clis --json`; `list-clis --json` e2e (custom CLI listed as `custom`, empty roster gives `[]`)
 
 ## 5. Docs
 
-- [ ] 5.1 `docs/src/cli-reference.md`: a "Machine-readable output" section (the contract, `schema_version`, additive rule, consumers ignore unknown keys, `tmux_running` deprecated in favor of `terminal_alive`) and each command's document
+- [ ] 5.1 `docs/src/cli-reference.md`: a "Machine-readable output" section (the contract, `schema_version`, additive rule, consumers ignore unknown keys) and each command's document; the `status` entry says `tmux_running` was removed in 0.21.0 and `terminal_alive` replaces it; the `doctor` entry lists the `skipped` check status
 - [ ] 5.2 `--help` / `long_about` for `add`, `remove` and `list-clis` show a `--json` example; README CLI table updated if it lists flags
 - [ ] 5.3 After archive: replace the generated `## Purpose` of `openspec/specs/cli-machine-output/spec.md` with the Purpose paragraph from this change's delta if the archive did not carry it over, and add the capability to the docs Specifications index (`tests/specifications_page_lists_every_capability.rs`)
+- [ ] 5.4 CHANGELOG: a breaking-change entry for the `status --json` `tmux_running` removal that names `terminal_alive` as the replacement
 
 ## 6. Gates
 

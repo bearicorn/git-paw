@@ -36,8 +36,10 @@ commands.
   global file too; its remedy points at `git paw config check` for the full list.
 - **No fallback defaults after a load error** (0.20 feedback #21): when the config does not load,
   doctor reports the error and marks the config-derived groups (Spec system, Broker, Supervisor,
-  configured CLIs, root-skill staleness) as ⚠ "not evaluated" instead of reporting the built-in
-  defaults ("broker disabled", "no spec system") as if they were the configuration. Checks that do not
+  configured CLIs, root-skill staleness) as **skipped** — a new fourth doctor status, glyph `○`,
+  JSON `"skipped"`, detail "not evaluated" — instead of reporting the built-in defaults ("broker
+  disabled", "no spec system") as if they were the configuration. A skipped check does not change
+  the overall status or the exit code; the overall `status` stays `ok`, `warn` or `fail`. Checks that do not
   read the config (Environment, roster on PATH, Python, helper files, Hygiene) still run. `config
   check` reports only the syntax error for an unparseable file and still validates the other file.
 
@@ -50,7 +52,8 @@ commands.
 ### Modified Capabilities
 
 - `preflight-diagnostics`: ADDED `git paw config check` requirements; **Config check** (doctor) uses
-  the shared validator and covers both files and deprecated keys; ADDED *Doctor does not report
+  the shared validator and covers both files and deprecated keys; MODIFIED *`git paw doctor` runs
+  read-only preflight checks* and *Exit code reflects the worst check* (the `skipped` status); ADDED *Doctor does not report
   fallback defaults after a config load error*, *Configuration-independent checks run despite a
   config load error*, *An unparseable config file yields only its syntax finding*.
 
@@ -61,7 +64,8 @@ commands.
   round-trip diff with a schema walk over the known key tree; detect's known-CLI roster for CLI names; `WorktreePortsConfig::stride_warning`;
   `src/cli.rs` (`Command::Config { Check { strict, json } }`); `src/main.rs` dispatch; `src/doctor.rs`
   `check_config` delegates; `collect_probes` carries "config not loaded" instead of
-  `PawConfig::default()`, and the config-derived `check_*` functions render "not evaluated".
+  `PawConfig::default()`, `CheckStatus` gains `Skipped` (glyph `○`, excluded from the worst-check
+  computation), and the config-derived `check_*` functions render a skipped "not evaluated" check.
 - **Enum-variant ripple:** none.
 - **Docs:** `--help`, `docs/src/cli-reference.md` (`config check`), `docs/src/user-guide/doctor.md`
   (diagnose vs validate), configuration reference intro (how to validate), README command table.
@@ -69,7 +73,10 @@ commands.
   reports versions and version findings through its `config::migrate` API and walks its `config::wire`
   types as the known-key tree; it must land first;
   `uniform-json-output` — `config check --json` follows its `cli-machine-output` contract and is already
-  on its roster (no roster delta needed); it must land first;
+  on its roster (no roster delta needed), and its doctor document lists the `skipped` check status;
+  it must land first;
+  this release's `session-state-reconciliation` also MODIFIES *`git paw doctor` runs read-only
+  preflight checks*; this delta is written on its text, so it archives first;
   v0.17.0's `classifier-retirement` removes `supervisor-config`'s common-dev-allowlist and auto-approve
   requirements, deletes the stack presets (`src/supervisor/dev_allowlist.rs`), and adds *Deprecated
   auto-approval tables are parsed but have no effect* — the deprecation findings must match that

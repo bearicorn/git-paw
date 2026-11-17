@@ -193,9 +193,9 @@ One commit per decision, the suite green after each: D2 then D1 (the guard), D3,
 audit with a baseline of zero violations, after converting the fixtures). Rollback is a revert; no
 persisted state changes.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- D7's threshold (more than three external literal sites) is a judgment call. The audit's first run
-  prints the real counts; adjust the number then if it catches too much or too little.
-- Whether `doctor` should flag a worktree that sits outside the configured placement. Out of scope
-  here; noted for `session-state-reconciliation`.
+- **D7's threshold** (more than three external literal sites) stays; the audit's first run may
+  adjust it.
+- **Worktree outside the configured placement:** not in doctor here; left to
+  `session-state-reconciliation` later.

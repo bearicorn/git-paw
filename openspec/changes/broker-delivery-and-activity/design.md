@@ -68,8 +68,7 @@ that is mid-response *and* whose capture changed since the last sample marks **a
 Rollback is a revert. No persisted state changes. Clients that ignore the publish body keep
 working.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. **Pane sampling in the broker host, or a drive-loop heartbeat?** D9 puts it in the host, so
-   attended sessions get it too. The cost is a terminal-backend dependency in `__broker`, which
-   so far runs without `$TMUX`. It could instead be its own change if the maintainer prefers.
+1. **Pane sampling:** in the broker host, as D9 says, so attended sessions get the activity
+   signal too. `__broker` takes the terminal-backend dependency.

@@ -1,6 +1,7 @@
 ## 0. Preconditions
 
 - [ ] 0.1 `config-schema-versioning` (`config::wire`, `config::migrate`) and `uniform-json-output` (`cli-machine-output`, shared output module) have landed; build on their APIs
+- [ ] 0.2 `session-state-reconciliation` is archived first (this change's *`git paw doctor` runs read-only preflight checks* delta is written on its text); if it is not, stop and sequence it
 
 ## 1. Validator (pure)
 
@@ -23,13 +24,14 @@
 ## 3b. Doctor on a config load error (feedback #21)
 
 - [ ] 3b.1 `src/doctor.rs`: `collect_probes` keeps the load result instead of `PawConfig::default()` (`:1823-1826`); config-derived probes (`probe_broker`, `probe_supervisor`, `probe_spec_system`, `probe_spec_cli`, `probe_spec_workflow`, `probe_sandbox_mode`, `probe_cli_identities`, root-skill staleness) return `NotEvaluated` without a config; detection runs with the roster only
-- [ ] 3b.2 Each affected `check_*` renders one ⚠ "not evaluated — the configuration could not be loaded" per group, remedy pointing at the Config ✗; unit tests per group
-- [ ] 3b.3 Validator: an unparseable file yields only its syntax finding; table test with a broken repo file and a global file with an unknown key
-- [ ] 3b.4 `tests/doctor_e2e.rs`: config with `[broker] enabled = true` and a syntax error → Broker/Supervisor/Spec-system "not evaluated", no "disabled" / "no spec system" text, Environment and Hygiene still reported; `--json` statuses `warn` and exit non-zero
+- [ ] 3b.2 `CheckStatus::Skipped`: glyph `○`, serialized `"skipped"`, excluded from the worst-check computation (overall status and exit code); the human summary line gains an `N ○` count after the `✗` count; unit tests for the overall status with and without skipped checks
+- [ ] 3b.3 Each affected `check_*` renders one skipped check "not evaluated — the configuration could not be loaded" per group, remedy pointing at the Config ✗; unit tests per group
+- [ ] 3b.4 Validator: an unparseable file yields only its syntax finding; table test with a broken repo file and a global file with an unknown key
+- [ ] 3b.5 `tests/doctor_e2e.rs`: config with `[broker] enabled = true` and a syntax error → Broker/Supervisor/Spec-system "not evaluated", no "disabled" / "no spec system" text, Environment and Hygiene still reported; `--json` check statuses `skipped`, overall status `fail` (from the Config ✗), exit non-zero
 
 ## 4. Docs
 
-- [ ] 4.1 `--help`; `docs/src/cli-reference.md` `config check`; `docs/src/user-guide/doctor.md` (diagnose vs validate; "not evaluated" after a config error); configuration reference intro; README command table row
+- [ ] 4.1 `--help`; `docs/src/cli-reference.md` `config check`; `docs/src/user-guide/doctor.md` (diagnose vs validate; the `○` skipped status and "not evaluated" after a config error; skipped checks never change the exit code); configuration reference intro; README command table row
 
 ## 5. Gates
 

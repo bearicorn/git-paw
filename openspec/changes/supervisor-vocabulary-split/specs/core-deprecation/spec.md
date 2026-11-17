@@ -6,7 +6,7 @@ Record every deprecated git-paw surface in one registry, warn once per use on st
 
 ### Requirement: Deprecated items are recorded in one registry
 
-git-paw SHALL record every deprecated user-visible item in a single registry in code. Each entry SHALL carry the item as users write it, its kind (flag, configuration key, skill name, wire value, or output field), the release that deprecated it, its replacement (or, for an item retired with no effect and nothing to replace it, such as the `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` tables deprecated in 0.17.0, a no-effect marker instead), and the release that removes it, or no removal release when the item stays readable for the life of the current format version. Every warning, `git paw config check` finding, `git paw doctor` row and documentation table about a deprecated item SHALL be produced from this registry, and no other list of deprecated items SHALL exist in the code.
+git-paw SHALL record every deprecated user-visible item in a single registry in code. Each entry SHALL carry the item as users write it, its kind (flag, configuration key, configuration value, skill name, wire value, or output field), the release that deprecated it, its replacement (or, for an item retired with no effect and nothing to replace it, such as the `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` tables deprecated in 0.17.0, a no-effect marker instead), and the release that removes it, or no removal release when the item stays readable for the life of the current format version. Every warning, `git paw config check` finding, `git paw doctor` row and documentation table about a deprecated item SHALL be produced from this registry, and no other list of deprecated items SHALL exist in the code. A configuration value is a value of a configuration key that is deprecated while the key itself is not (for example the version-1 approval value `"auto"`); its item SHALL name the value and the key or keys that may hold it.
 
 #### Scenario: Each entry is complete
 
@@ -23,7 +23,7 @@ git-paw SHALL record every deprecated user-visible item in a single registry in 
 
 ### Requirement: Using a deprecated item warns once through one helper
 
-When a deprecated input item is used — a flag, a configuration key, a skill name, or a wire value received by the broker — git-paw SHALL print exactly one line to stderr per item and context per process, through a single helper, of the form `warning: [<context>: ]<item> is deprecated since <release>[ and will be removed in <release>]; use <replacement> instead`, where the context names the file for a configuration key; for an entry with the no-effect marker the line SHALL end `; it has no effect and can be removed` instead of naming a replacement. Configuration keys that `core-configuration` and `supervisor-config` group into one warning line per file (a version-1 key family, or the deprecated auto-approval tables) SHALL share that one line, which names each grouped item. The warning SHALL NOT be written to stdout, SHALL NOT change the exit code, and SHALL NOT appear when the item is not used. A deprecated flag spelling SHALL be detected from the raw command-line arguments up to a `--` terminator, since the parser does not report which spelling matched. Output fields SHALL be published in the registry but SHALL NOT produce a runtime warning.
+When a deprecated input item is used — a flag, a configuration key, a configuration value, a skill name, or a wire value received by the broker — git-paw SHALL print exactly one line to stderr per item and context per process, through a single helper, of the form `warning: [<context>: ]<item> is deprecated since <release>[ and will be removed in <release>]; use <replacement> instead`, where the context names the file for a configuration key or a configuration value; for an entry with the no-effect marker the line SHALL end `; it has no effect and can be removed` instead of naming a replacement. Configuration keys or values that a capability (such as `core-configuration` or `supervisor-config`) groups into one warning line per file (a version-1 key family, or the deprecated auto-approval tables) SHALL share that one line, which names each grouped item. The warning SHALL NOT be written to stdout, SHALL NOT change the exit code, and SHALL NOT appear when the item is not used. A deprecated flag spelling SHALL be detected from the raw command-line arguments up to a `--` terminator, since the parser does not report which spelling matched. Output fields SHALL be published in the registry but SHALL NOT produce a runtime warning.
 
 #### Scenario: A deprecated flag warns once
 
@@ -42,6 +42,14 @@ When a deprecated input item is used — a flag, a configuration key, a skill na
 - **GIVEN** a repository config that declares `[supervisor.auto_approve] enabled = true`
 - **WHEN** `git paw status` runs
 - **THEN** stderr SHALL contain one line naming the file, `[supervisor.auto_approve]` and release 0.17.0, ending `it has no effect and can be removed`
+
+#### Scenario: A deprecated configuration value warns once per file
+
+- **GIVEN** a registry entry of kind configuration value
+- **AND** a repository config that sets a key to that value
+- **WHEN** the config is loaded twice in one git-paw process
+- **THEN** stderr SHALL contain exactly one line that names the repository config file, the value, its deprecating release and its replacement
+- **AND** a global config that sets the same value SHALL produce its own single line naming the global file
 
 #### Scenario: Arguments after a terminator are not inspected
 

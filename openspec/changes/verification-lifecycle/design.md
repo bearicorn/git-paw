@@ -85,11 +85,7 @@ worker's linked gitdir. The root checkout can write there; the worker's sandbox 
 Rollback is a revert. No persisted state changes. An older broker ignores the new optional
 fields.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. **Freeze on a rebase directive.** When the orchestrator asks a frozen worker to rebase,
-   feedback lifts the freeze (D5). Should `feedback-gate` keep the freeze for a gate failure the
-   orchestrator wants fixed in a fresh commit? This change says every feedback thaws.
-2. **Should `rewritten` nudge verification when the worker rebased its own branch** (on the
-   orchestrator's request)? D1 in `commit-event-truth` says no: the worker's following `done` is
-   the trigger.
+1. **Freeze on feedback:** every `agent.feedback` lifts the freeze, `feedback-gate` included (D5).
+2. **`rewritten` and verification:** no nudge. The worker's following `done` is the trigger.

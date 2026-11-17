@@ -22,7 +22,7 @@ Broker events come from four sources. All line references are at v0.20.0 (`e2137
 | DF-56 (`index.lock`) | `assets/hooks/post-commit.sh:9` | `git diff HEAD~1 --name-only` compares `HEAD~1` with the **working tree**, not with `HEAD`. It lists uncommitted files too, refreshes the index (taking `index.lock` opportunistically), and prints nothing on a root commit. |
 | DF-56 (`index.lock`) | `src/broker/watcher.rs:80-87` | `git status --porcelain` runs without `--no-optional-locks`, so every 2 s it may take `index.lock` to refresh the index. A rebase that needs the lock at that moment stops. |
 | DF-35, DV-08, DV-10 | `assets/hooks/post-commit.sh:12` | `agent_id` is always the marker's agent. An orchestrator committing with `git -C <worker-worktree>` is published as the worker. No environment marker distinguishes the orchestrator's processes today. |
-| DV-08 (second reading) | `src/broker/conflict.rs:270` | `CONFLICT_DETECTOR_SENDER = "supervisor"`: detector warnings and questions carry the orchestrator's identity, so they read as edits or rulings by it. See Open Questions. |
+| DV-08 (second reading) | `src/broker/conflict.rs:270` | `CONFLICT_DETECTOR_SENDER = "supervisor"`: detector warnings and questions carry the orchestrator's identity, so they read as edits or rulings by it. The acknowledgement filter (`:1184-1186`) and the re-entrancy guard (`:1204-1210`) both compare against this one constant. See D11. |
 | DV-09/10 | `src/broker/conflict.rs:836-850` | `record_in_flight_pair` re-warns whenever the triple's decision record is missing. |
 | DV-09/10 | `src/broker/conflict.rs:635-656` | `sweep_in_flight_pairs` deletes **acknowledged** records once their overlap has been absent for the retention (60 s floor). A recurring overlap then warns both agents again and later re-escalates. |
 | DV-09/10 | `src/broker/conflict.rs:874-883` | `acknowledge` suppresses only the escalation. |
@@ -101,13 +101,39 @@ is unreachable, it warns and continues, because removal never depends on the bro
 `git-add-remove-branch`'s "discovers removal passively" rule is about the orchestrator and the
 drive loop, which are still not signalled.
 
+### D11 — The detector gets its own sender id
+Detector feedback carries `from = "conflict-detector"` and detector questions carry
+`agent_id = "conflict-detector"`. Questions still route to the root inbox, since every
+`agent.question` does. The one constant splits in two:
+- the re-entrancy guard skips only messages from the detector id;
+- the acknowledgement filter honours `[conflict-ack]` feedback only from the root identity.
+
+Today both checks compare against `"supervisor"`, so they cannot be told apart. The requirements
+say "the root identity", so they hold before and after `supervisor-vocabulary-split`. The
+detector id is not an alias of the root, and the split's inbound normalization leaves it alone.
+
+The detector publishes in-process through `delivery::publish_message`, so `/publish` never
+sees its messages and need not accept the id. Feedback and questions already mint no roster row
+(`delivery.rs:52-60`), so the id never shows in `/status`. One thing does change: in v0.20.0 a
+forged detector feedback over HTTP claimed the root identity and so needed the authority
+credential. `conflict-detector` is not a verdict sender, so `/publish` refuses it outright with
+`400`. The learnings collector must not count the id as an agent (`learnings.rs:503`
+registers a question's `agent_id`).
+
+*Alternative:* keep `supervisor` and rely on the `[conflict-detector]` tag. Rejected: readers
+see the root identity first and take the warnings for the orchestrator's rulings.
+
 Decision numbers are kept from `broker-event-semantics`; D4, D5 and D10 are in
-`verification-lifecycle`, D6 and D9 in `broker-delivery-and-activity`.
+`verification-lifecycle`, D6 and D9 in `broker-delivery-and-activity`. D11 is new in this change.
 
 ## Risks / Trade-offs
 
 - [`--no-optional-locks` means the watcher's status may run on a stale stat cache] → it is
   correct, only slower on huge trees, and the next real git command refreshes the index.
+- [A reader matched detector output on `from = "supervisor"`] → the `[conflict-detector]` tag is
+  unchanged. The bundled skills and docs move to the new id in this change.
+- [A branch whose slug is `conflict-detector` can no longer publish] → `/publish` refuses the
+  reserved id with a clear `400`. Such a branch name is unlikely.
 
 ## Migration Plan
 
@@ -115,17 +141,13 @@ Decision numbers are kept from `broker-event-semantics`; D4, D5 and D10 are in
 2. Watcher: `--no-optional-locks` and the in-progress check.
 3. Wire: the optional `sha` and the `rewritten` status (after `wire-format-dtos` and
    `supervisor-vocabulary-split` if they have landed).
-4. Conflict detector: acknowledgement scope and lifetime, `withdraw`. Then `DELETE /watch` and
-   `remove`.
+4. Conflict detector: the `conflict-detector` sender (D11), acknowledgement scope and lifetime,
+   `withdraw`. Then `DELETE /watch` and `remove`.
 
 Rollback is a revert. No persisted state changes. An older broker ignores the new optional
 field, and an older hook body is replaced on the next `start`.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. **DV-08's second reading.** Detector messages carry `from = "supervisor"`
-   (`conflict.rs:270`), so a reader can take them for the orchestrator's own edits or rulings.
-   Should the detector get its own sender id (`conflict-detector`)? The acknowledgement filter
-   would then check the root identity, and the re-entrancy guard the detector id. This change
-   assumes the attribution in DV-08 is the orchestrator-commit case (D3). The maintainer should
-   confirm from the DV-08 transcript.
+1. **DV-08's second reading.** Yes: the detector gets its own sender id `conflict-detector`
+   (D11). The D3 orchestrator-commit fix stays as it is.

@@ -157,10 +157,7 @@ path through `git worktree list --porcelain` (*to verify*).
 
 Rollback is a revert. Repaired records are ordinary session files.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Should `--fix` drop a missing worktree's entry from a *live* session after stopping its
-   orphaned surface? Recommended: no (report only) for v0.21.0.
-2. Should `--fix` restart a dead broker host for a live session through the restart-from-pause
-   routine? Recommended: no for v0.21.0. Keep doctor a records-only repairer and revisit with
-   v0.18 broker-host dogfood evidence.
+1. **`--fix` on a live session's missing worktree:** report only in v0.21.0.
+2. **`--fix` restarting a dead broker host:** no in v0.21.0. Doctor repairs records only.

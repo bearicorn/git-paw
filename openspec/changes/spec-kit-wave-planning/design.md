@@ -192,12 +192,8 @@ background waits for that line before it publishes.
 Rollback: revert. No persisted format changes. `[specs] wave` is ignored by older binaries, as
 unknown keys are today.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Should `broker.sh` print "session still starting; retry" on a refused connection while the
-  discovery file says the session is launching? It needs a new discovery field, which would fit
-  `wire-format-dtos`.
-- Should the cap apply to Superpowers branches too? They also come from task text. Not observed in
-  the field yet.
-- Should a feature waiting on a human let `Feature` mode move on to the next feature? This design
-  says no: a stated gate wins.
+- **"Session still starting; retry" in `broker.sh`:** not now.
+- **Branch-name cap for Superpowers:** no. Spec Kit only, until seen in the field.
+- **A feature waiting on a human:** the stated gate wins. `Feature` mode does not move on.

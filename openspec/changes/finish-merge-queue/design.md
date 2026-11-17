@@ -106,9 +106,7 @@ no judgment in the path. The hand-off text may name the command; the decision st
 - [A test command that is flaky skips a good branch] → skip is non-destructive; the directive says
   "tests failed after rebase", and the orchestrator can re-run.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Offer `--rebase=textual` (merge-tree only) for consumers who accept the weaker guarantee? Default
-  stays file-disjoint.
-- Should `--verified` order by verification time instead of session order? Session order chosen as
-  deterministic; ordering judgment is expressed by naming branches explicitly.
+- **`--rebase=textual`:** not now. The only guarantee is file-disjoint.
+- **`--verified` order:** session order. Naming branches explicitly chooses another order.

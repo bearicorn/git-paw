@@ -178,6 +178,19 @@ After a successful integration (or an already-integrated branch), finish SHALL t
 - **WHEN** `git paw finish feat/x` exits with code 3
 - **THEN** the agent's surface, worktree, session entry and branch SHALL all remain
 
+### Requirement: Finish accepts an agent of a stopped session
+
+Finish SHALL accept an agent recorded in a stopped session: the session file is present and no terminal session runs. It SHALL integrate the branch and tear the agent down as for a live session, with no surface to close. A missing terminal session SHALL NOT be an error or a warning.
+
+#### Scenario: Finishing an agent after the session was stopped
+
+- **GIVEN** a session with agent `feat/x` whose worktree is clean and fast-forwardable
+- **AND** the session was stopped, so its session file remains and no terminal session runs
+- **WHEN** the operator runs `git paw finish feat/x` from the main working tree
+- **THEN** the default branch SHALL point at `feat/x`'s tip
+- **AND** the worktree SHALL be removed and the entry dropped from the session file
+- **AND** the command SHALL exit 0
+
 ### Requirement: Finish announces an advanced default branch
 
 When finish moves the default branch and the session's broker is reachable, it SHALL publish one `agent.advanced-main` message from the root identity carrying the merged branch, the new tip (12-character abbreviated SHA), the default branch name as `base`, the merge time, and a one-line summary. An unreachable or absent broker SHALL produce a single warning line and SHALL NOT change the exit status. Integrating into any other target SHALL publish nothing.

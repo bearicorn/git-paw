@@ -2,7 +2,7 @@
 
 ### Requirement: The auto level hands command judgement to the CLI's own auto mode
 
-At the `auto` level, git-paw SHALL pass only the CLI's own automatic-mode flags from *Permission flag mapping*, and the CLI SHALL decide each action. git-paw SHALL NOT pair `auto` with any rule, allow list, settings file or tool grant of its own. It SHALL NOT write or extend any CLI settings file because a worker runs at `auto`. It SHALL treat a prompt that the CLI's auto mode leaves in place exactly like any other live permission prompt: report it for a human decision and send no keystroke. Documentation SHALL describe `auto` as the agent CLI's own judgement, not git-paw's. It SHALL state that `auto` is wider than `accept-edits` and is not a sandbox, and that `accept-edits` is the default.
+At the `auto` level, git-paw SHALL pass only the CLI's own automatic-mode flags from *Permission flag mapping*, and the CLI SHALL decide each action. git-paw SHALL NOT pair `auto` with any rule, allow list, settings file or tool grant of its own. It SHALL NOT write or extend any CLI settings file because a worker runs at `auto`. It SHALL treat a prompt that the CLI's auto mode leaves in place exactly like any other live permission prompt: report it for a human decision and send no keystroke. Documentation SHALL describe `auto` as the agent CLI's own judgement, not git-paw's. It SHALL state that `auto` is the default worker approval in version 2, that it is wider than `accept-edits`, and that it is not a sandbox. It SHALL state that a version-1 file keeps `accept-edits`, both where it writes `auto` and where it sets no worker approval. It SHALL warn that when the CLI's auto mode is unavailable to the account or model, the CLI may fall back to another mode without saying so, and that `git paw doctor` does not detect this because it never invokes the CLI.
 
 #### Scenario: An auto worker carries only the CLI's mode flag
 
@@ -28,4 +28,6 @@ At the `auto` level, git-paw SHALL pass only the CLI's own automatic-mode flags 
 
 - **WHEN** the configuration reference and the security-posture page are inspected
 - **THEN** they SHALL state that `auto` launches the agent CLI's own auto mode and that the CLI, not git-paw, decides each action
-- **AND** they SHALL state that `accept-edits` is the default and launches the mode `auto` launched before 0.21.0
+- **AND** they SHALL state that `auto` is the version-2 default, is wider than `accept-edits` and is not a sandbox
+- **AND** they SHALL state that `accept-edits` launches the mode `auto` launched before 0.21.0, and that a version-1 file keeps it where it writes `auto` or sets no worker approval
+- **AND** they SHALL warn that an unavailable auto mode may fall back silently and that `git paw doctor` does not probe for it

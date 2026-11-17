@@ -24,6 +24,10 @@
 - [ ] 4.3 `DELETE /watch` route: stop the watcher, forget the target, withdraw from the tracker, answer `204` (also `204` for an unknown path)
 - [ ] 4.4 `BrokerClient::unwatch`; `commands/remove.rs` calls it after the pane kill and before `detach_worktree` (also with `--keep-worktree`), warning on failure
 - [ ] 4.5 User guide conflict-detection chapter: acknowledgement lifetime
+- [ ] 4.6 `src/broker/conflict.rs`: `CONFLICT_DETECTOR_SENDER = "conflict-detector"`; the acknowledgement filter compares `from` with the root identity constant; the re-entrancy guard compares with the detector id
+- [ ] 4.7 `src/broker/server.rs`: `/publish` answers `400` for a message whose sender is `conflict-detector`, before routing
+- [ ] 4.8 `src/broker/learnings.rs`: `record_detector_message` does not register the detector id as a known agent
+- [ ] 4.9 Coordination docs name the new sender: coordination chapter, conflict-detection chapter (the JSON example and the acknowledgement filter text), and the orchestrator and coordination skills wherever they describe detector messages
 
 ## 5. Tests (one or more per scenario)
 
@@ -32,6 +36,7 @@
 - [ ] 5.3 Wire round-trips for the artifact `sha`; old shapes decode unchanged
 - [ ] 5.4 Conflict tracker: re-entering acknowledged overlap not re-warned; acknowledgement survives 10 minutes of absence; a material change re-escalates; `withdraw` silences the departed agent
 - [ ] 5.5 `DELETE /watch` (known and unknown path); remove e2e with an overlapping peer produces no status, feedback or question for the removed agent; remove with the broker down warns and succeeds
+- [ ] 5.6 Detector sender: feedback carries `from = "conflict-detector"`; a question carries `agent_id = "conflict-detector"` and lands in the root inbox; no roster row for the id; the detector skips its own messages; a root `[conflict-ack]` is honoured; a `[conflict-ack]` from `conflict-detector` is ignored; `/publish` refuses the reserved id with `400` and changes no state
 
 ## 6. Gates
 

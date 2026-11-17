@@ -35,7 +35,7 @@ syntax error yields root skills rendered for the default broker URL and no gates
 from defaults the user did not write.
 
 **Non-Goals:** git-paw changing the index or making commits (untracking stays the user's commit);
-a version stamp file recording which release initialised the repository (open question 2); doctor
+a version stamp file recording which release initialised the repository (resolved question 2); doctor
 `--fix` (still diagnose-only).
 
 ## Decisions
@@ -63,6 +63,15 @@ After reconciling, init prints the D2 command when `tracked_generated_files` is 
 run `git rm --cached`: that stages a deletion in the user's index, which is a commit decision.
 Reporting does not count as a change for the "Already initialized" message.
 
+### D4a — Start warns once per launch
+Each `git paw start` run that launches or recovers a session calls `tracked_generated_files` once,
+in the main checkout, and prints one stderr warning with the D2 detail and remedy before attaching.
+It does not print per worktree. A clean repository or a failed git query prints nothing, and the
+warning never changes the exit code, the launch or the index. It goes to stderr, so stdout and any
+`--json` document are unchanged.
+*Alternative:* doctor only — rejected; the #27 user never ran doctor and found the problem through
+worker diffs.
+
 ### D5 — Compatibility directory self-ignores
 `install_packages` writes `.git-paw/scripts/.gitignore` with `*` through `write_managed_file`, next
 to the existing skills one. It covers repositories whose `.gitignore` lacks the entry and every agent
@@ -75,7 +84,10 @@ with the file path, and exits non-zero. A missing config is not an error (fresh 
 
 ## Risks / Trade-offs
 
-- [`git ls-files` on a huge repository] → it is limited to the `.git-paw/` pathspecs; cost is small.
+- [`git ls-files` on a huge repository] → it is limited to the `.git-paw/` pathspecs; cost is small,
+  and start runs it once per launch.
+- [The start warning repeats on every launch until the user untracks] → intended; it is one line
+  group on stderr and stops once the commit lands.
 - [A user who deliberately commits a generated file] → ⚠ only; the explicit-list design of
   `GITIGNORE_ENTRIES` already leaves any other file under `.git-paw/` alone.
 - [Init exiting non-zero on a broken config breaks a script that ran `init` blindly] → the config is
@@ -83,15 +95,13 @@ with the file path, and exits non-zero. A missing config is not an error (fresh 
 
 ## Migration Plan
 
-1. `tracked_generated_files` + doctor row + init report (D1, D2, D4).
+1. `tracked_generated_files` + doctor row + init report + start warning (D1, D2, D4, D4a).
 2. Upgrade summary row (D3).
 3. Compatibility `.gitignore` (D5) and init load-error stop (D6).
 Each step is independent and reverts on its own.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Should `git paw start` also print the tracked-files warning once per launch, since doctor is not
-   always run (the #27 user found it through worker diffs)? Recommended; left out to keep launch
-   output unchanged in this change.
-2. Record the git-paw version that last ran `init` (for a "set up by 0.19" message)? Not needed for
-   D3, which works from the observed state.
+1. **Should `git paw start` also print the tracked-files warning?** Yes: once per launch, on
+   stderr, with no change to the exit code (D4a).
+2. **Record the git-paw version that last ran `init`?** No. D3 works from the observed state.

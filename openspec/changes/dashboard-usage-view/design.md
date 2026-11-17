@@ -248,14 +248,9 @@ keyed on "has a dashboard".
 Rollback: revert. The new session and config fields are additive and ignored by older binaries,
 which would then show a dashboard again for broker sessions.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- **A public way to open the view on demand** (`git paw dashboard`, running the existing thin
-  client in any terminal). Recommendation: not now, because it adds to the CLI surface just
-  before the freeze. Revisit after dogfooding.
-- **`--no-dashboard`** for a single launch against a config that enables it. Recommendation:
-  not now. The config key covers it.
-- **Dashboard row share** when enabled (50% kept). Recommendation: keep it until dogfooding
-  shows otherwise.
-- **The v0.19 usage source is still "to verify"** (Claude transcript location and shape). This
-  change consumes the facet and does not depend on the answer.
+- **`git paw dashboard`:** not now. Revisit after dogfooding.
+- **`--no-dashboard`:** not now. The config key covers it.
+- **Row share:** 50% is kept until dogfooding shows otherwise.
+- **The v0.19 usage source:** still to verify; this change does not depend on it.

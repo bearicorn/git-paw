@@ -33,6 +33,7 @@
 - [ ] 4.5 Diverged branch → exit 3, message with commit count, nothing changed; already-integrated → teardown only
 - [ ] 4.6 `[finish] strategy = "merge-commit"` → merge commit with both parents; `--ff-only` overrides → exit 3; conflicting merge → exit 3 naming paths, no leftover merge state
 - [ ] 4.7 Dirty main working tree with target checked out → refused naming it; clean checkout follows the ref; non-checked-out target moves by CAS and no checkout switches
+- [ ] 4.7a Stopped session (session file present, no terminal): finish integrates, removes the worktree, drops the session entry, exits 0, no surface error or warning
 - [ ] 4.8 Created branch deleted when contained in target; pre-existing branch kept; unmanaged worktree left in place; refused integration tears nothing down
 - [ ] 4.9 `finish --json`: integrated document (all keys, `schema_version` 1); refused → document + exit 3; dirty → empty stdout + exit 1; roster guard includes `finish`
 - [ ] 4.10 Live broker receives one `agent.advanced-main`; no broker → one warning, exit 0

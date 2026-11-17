@@ -150,9 +150,9 @@ pattern.
 Rollback is a revert of each wave. Files written with `version = 1` still load on a reverted
 binary, because the key is unknown there and therefore ignored.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Key name: `version` (MILESTONE's wording, recommended) or `schema_version`.
-2. A newer version is a hard error (recommended) rather than warn-and-load.
-3. Full wire/model split (recommended, MILESTONE item) rather than the cheaper version-plus-
-   migration-only fallback.
+1. **Key name:** `version` in `config.toml`. JSON output and wire types use `schema_version`
+   (`uniform-json-output`, `wire-format-dtos`).
+2. **A newer version** is a hard error.
+3. **Full wire/model split**, the MILESTONE item, not the cheaper fallback.

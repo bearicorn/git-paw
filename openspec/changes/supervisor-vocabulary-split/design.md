@@ -38,7 +38,9 @@ now.
 - Ship the new names with every old name still working and warning, so 1.0.0 can remove them.
 - Never rewrite a user's file to migrate it; never change stdout or an exit code to warn.
 - One canonical root identity inside the process, so no check can be bypassed with the old spelling.
-- A deprecation mechanism that later deprecations (`--from-specs`, `tmux_running`, …) reuse.
+- A deprecation mechanism that later deprecations (`--from-specs`, the version-1 approval value
+  `"auto"`, …) reuse. `status --json` `tmux_running` is not one of them: `uniform-json-output`
+  removes it in 0.21.0, so nothing is registered for it.
 
 **Non-Goals:**
 - Renaming Rust items (`src/supervisor/`, `SupervisorConfig`, `cmd_supervisor`): not user-visible,
@@ -180,9 +182,14 @@ or nothing. Rules:
   paths (a sub-table's counterpart is the whole new sub-table);
 - a document declaring `version = 2` that contains `[supervisor]` → `ConfigError` naming the table
   and pointing at the migration table (version 2 has one spelling);
-- `init` backfills `version = 2` only into a file with no `[supervisor]` table; otherwise it leaves
-  `version` absent and prints one line pointing at `git paw config check`. Without this guard the
-  version-1 file would be stamped version 2 and then refused;
+- `init` never writes `version = 2` into an existing file that declares no version. It leaves
+  `version` absent and prints one line pointing at `git paw config check`. A file `init` creates
+  gets `version = 2`. Two reasons: a file with `[supervisor]` would be stamped version 2 and then
+  refused; and a layout-neutral file would silently widen, because the version-2 default worker
+  approval is `auto` while an unversioned file with no worker approval keeps `accept-edits`
+  (`approval-level-truth`). This REMOVES `config-schema-versioning`'s *The default config template
+  declares the current schema version*, whose init backfill would do exactly that; its template and
+  declared-version clauses move into *git-paw writes and stamps only the version-2 layout*;
 - `add-cli` / `remove-cli` already rewrite the global file through the wire type, so a global
   `[supervisor]` comes out in the version-2 layout; they print one line saying so, naming any
   deprecated auto-approval table the rewrite dropped (D13).
@@ -205,8 +212,10 @@ the 0.17.0 auto-approval tables, D13, whose line ends "it has no effect and can 
 context)` printing to stderr once per (item, context) per process; `scan_args(raw) -> Vec<&Deprecation>`
 for flag spellings, stopping at `--`. Format: `warning: [<context>: ]<item> is deprecated since
 <since>[ and will be removed in <removed_in>]; use <replacement> instead`. Kinds: flag, config key,
-skill name, wire value, output field (output fields are published, never warned — nothing "uses"
-them). Config entries have `removed_in = None`: version-1 files keep loading through 1.x
+config value, skill name, wire value, output field (output fields are published, never warned —
+nothing "uses" them). A config value is a deprecated value of a key that is itself current, such as
+the version-1 approval value `"auto"` (`approval-level-truth`). It is an input item, so it warns like
+a config key: one line per file per process, with the file as context. Config entries have `removed_in = None`: version-1 files keep loading through 1.x
 (`remove-supervisor-vocabulary`), so promising a removal would be false. A unit guard fails when
 `removed_in <= CARGO_PKG_VERSION` and the entry still exists, which forces every 1.0.0 removal to
 happen in 1.0.0. `config-check-command`'s D4 table becomes the registry's config entries; v0.24.0
@@ -311,11 +320,12 @@ Seam-first, `just check` green at each step:
 Rollback: revert. A file the new binary wrote with `version = 2` and new tables is read by an older
 binary as unknown keys (ignored) — that is the downgrade cost `config-schema-versioning` accepts.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. `default_mode` (recommended) vs `[drive] enabled` / `[orchestrator] enabled` for the old
-   `enabled` key.
-2. The D1 refinements and the two leaf changes — confirm or revert to the approved table.
-3. Wire identity: rename with normalization (recommended) vs opaque constant.
-4. Whether `status --json` `tmux_running` (`uniform-json-output`) is registered now, and with what
-   removal (it decides whether anything is scheduled for 2.0.0).
+1. The old `enabled` key becomes top-level `default_mode` (D2), as recommended.
+2. The D1 refinements and both leaf renames (`blocked_on_orchestrator_window_seconds`,
+   `[drive.learnings]`) are accepted.
+3. Wire identity: renamed to `orchestrator`, with the old spelling normalized at the wire edge (D7).
+4. `status --json` `tmux_running`: nothing is registered. `uniform-json-output` removes the field in
+   0.21.0, so there is no deprecation and nothing is scheduled for 2.0.0.
+5. The registry gains a `configuration value` kind (D5), which warns like a configuration key.

@@ -12,7 +12,8 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
 ## What Changes
 
 - **A deprecation registry and one warning helper** (new `core-deprecation`): every deprecated item
-  is recorded once (item, kind, since, replacement, removal version); using one prints a single
+  is recorded once (item, kind, since, replacement, removal version), where the kind is a flag,
+  configuration key, configuration value, skill name, wire value or output field; using one prints a single
   stderr line per item per process; stdout and exit codes never change; a build guard fails when an
   entry outlives its removal version. v0.24.0's `--from-specs` warning reuses it.
 - **Start-mode flags:** `--coordinated` and `--bare` replace `--supervisor` and `--no-supervisor`.
@@ -22,7 +23,10 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
   `[workers]` and `[drive]`. A version-1 file (every config written before this release) is migrated
   in memory and prints one deprecation warning per key family; it is never rewritten. Setting an old
   key and its new counterpart is a config error naming both; a `version = 2` file may not carry
-  `[supervisor]`. `git paw config check` and `doctor` report each old key with its new name. The
+  `[supervisor]`. `git paw init` never writes `version = 2` into an existing unversioned file (it
+  would widen the default worker approval to `auto`); it leaves `version` absent and points at
+  `git paw config check`. Files `init` creates get `version = 2`. This removes
+  `config-schema-versioning`'s init version backfill. `git paw config check` and `doctor` report each old key with its new name. The
   bundled scripts read the new keys first and fall back to the old ones. The two tables v0.17.0
   deprecated with no effect, `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`,
   are dropped by the migration, never renamed into `[workers]`; their v0.17.0 per-file warning goes
@@ -57,7 +61,9 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
 
 - `core-configuration`: ADDED schema version 2 and its key relocation, version-1 warnings, the
   old/new conflict rule, refusal of `[supervisor]` in a version-2 file, one-unit merge of the
-  coordination tables, init's version guard, and the helper scripts' key fallback.
+  coordination tables, init's version guard (no `version = 2` into an existing unversioned file),
+  and the helper scripts' key fallback; REMOVED `config-schema-versioning`'s *The default config
+  template declares the current schema version* (its init backfill would widen such a file).
 - `supervisor-config`: RENAMED + MODIFIED the enabled-mode resolution chain into start-mode terms
   (its version-1 scenarios kept: they still hold through migration and the flag aliases). The init
   prompt, the init commented block and v0.17.0's *Deprecated auto-approval tables are parsed but
@@ -114,8 +120,9 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
     *Script-read configuration keys* list changes), `wire-format-dtos` (the session and broker wire
     types carry the aliases), `uniform-json-output` (doctor ids are born `coordination.*`),
     `config-check-command` (its D4 deprecation table becomes this registry's config entries),
-    `session-state-reconciliation` (also MODIFIES *`git paw doctor` runs read-only preflight
-    checks*; archive it first — this delta is written on its text). Siblings that name `[supervisor]`
+    `session-state-reconciliation` and `config-check-command` (both also MODIFY *`git paw doctor`
+    runs read-only preflight checks*; archive them first, in that order — this delta is written on
+    `config-check-command`'s text, which adds the ○ skipped status). Siblings that name `[supervisor]`
     keys, `--supervisor` or `from: "supervisor"` (`configurable-agent-grid`, `finish-command`,
     `finish-merge-queue`, `readme-landing-page`, `worktree-shared-dep-cache`) adopt the new names
     in whichever lands second.

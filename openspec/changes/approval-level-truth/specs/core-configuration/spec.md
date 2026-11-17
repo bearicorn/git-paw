@@ -9,7 +9,15 @@ In a version-1 file `"auto"` means what is now called `accept-edits`. For any do
 
 Every other approval value and key SHALL be left as written. Like the rest of the step, this SHALL be a pure, in-memory function of the document, and SHALL NOT write, rename or touch the file. A version-2 document SHALL NOT be rewritten: in it, `"auto"` means the `Auto` level of *Permission flag mapping*.
 
-A requirement or scenario in any capability that names a version-1 path set to `"auto"` SHALL be read as naming that path's version-2 name set to `"accept-edits"`.
+The version-2 default worker approval is `auto`. A version-1 document that sets no worker approval launched the version-1 default `auto`, which is now `accept-edits`. The step SHALL therefore treat an absent worker approval in a version-1 document as `accept-edits`, never as the version-2 default. Worker approval SHALL resolve as follows:
+
+- When any loaded document sets a worker approval, the usual merge precedence SHALL decide, and an absent value SHALL never override a set one.
+- When no loaded document sets one, it SHALL be `auto` if the highest-precedence loaded document (the repository file when present, else the global file) declares `version = 2`.
+- Otherwise it SHALL be `accept-edits`: that document is version 1, or no configuration file is loaded.
+
+The orchestrator approval, when unset, SHALL inherit the resolved worker approval, as before. Upgrading git-paw SHALL therefore never widen what an existing configuration launches.
+
+A requirement or scenario in any capability that names a version-1 path set to `"auto"` SHALL be read as naming that path's version-2 name set to `"accept-edits"`. A scenario whose configuration declares no version and sets no worker approval describes a version-1 document, and its worker approval is `accept-edits`.
 
 #### Scenario: A version-1 auto worker launches exactly as before
 
@@ -37,6 +45,27 @@ A requirement or scenario in any capability that names a version-1 path set to `
 - **WHEN** its pane command is built
 - **THEN** it SHALL contain `--permission-mode auto`
 
+#### Scenario: A version-1 file with no worker approval keeps accept-edits
+
+- **GIVEN** a version-1 `.git-paw/config.toml` with `[broker] enabled = true`, no approval keys, no global config, and `default_cli = "claude"`
+- **WHEN** a worker's pane command is built
+- **THEN** it SHALL contain `--permission-mode acceptEdits` and SHALL NOT contain `--permission-mode auto`
+- **AND** it SHALL be byte-identical to the command v0.20.0 built for the same config
+- **AND** the orchestrator approval SHALL resolve to `accept-edits`
+
+#### Scenario: A version-2 file with no worker approval gets auto
+
+- **GIVEN** a `.git-paw/config.toml` with `version = 2`, no approval keys, no global config, and `default_cli = "claude"`
+- **WHEN** a worker's pane command is built
+- **THEN** it SHALL contain `--permission-mode auto`
+- **AND** the orchestrator approval SHALL resolve to `auto`
+
+#### Scenario: A set worker approval wins over a version-1 absence
+
+- **GIVEN** a global config with `version = 2` and `[workers] approval = "manual"`, and a version-1 repository config with no approval keys
+- **WHEN** the merged configuration is loaded
+- **THEN** the worker approval SHALL resolve to `manual`
+
 #### Scenario: Migration leaves the file untouched
 
 - **GIVEN** a version-1 `.git-paw/config.toml` containing `[profiles.routine] approval = "auto"`
@@ -48,6 +77,7 @@ A requirement or scenario in any capability that names a version-1 path set to `
 When a loaded version-1 file writes `"auto"` at an approval path, or an `approval_args` key `auto`, git-paw SHALL print exactly one warning line for that file per process, through the shared deprecation helper (`core-deprecation`). The line SHALL name the file, each such path, and the replacement `accept-edits`, and SHALL state that in version 2 `auto` launches the CLI's own auto mode. The registry SHALL hold one entry for this item with:
 
 - the item `"auto"` as a version-1 approval value;
+- the kind `configuration value`, which `supervisor-vocabulary-split` adds to the `core-deprecation` registry kinds;
 - the replacement `"accept-edits"`;
 - the deprecating release 0.21.0;
 - no removal release, because the item is read through migration.
@@ -73,9 +103,9 @@ When a loaded version-1 file writes `"auto"` at an approval path, or an `approva
 - **WHEN** `git paw config check` runs
 - **THEN** it SHALL report a warning for `clis.claude.approval_args.auto` naming `accept-edits` and release 0.21.0
 
-### Requirement: Rewriting or stamping a file never changes what its `auto` means
+### Requirement: Rewriting or stamping a file never widens its approvals
 
-`git paw init` SHALL NOT backfill `version = 2` into a file that writes `"auto"` at an approval path or uses an `approval_args` key `auto`. For such a file it SHALL leave `version` absent and print its one-line pointer to `git paw config check`, exactly as it does for a file with a `[supervisor]` table. When `git paw add-cli` or `git paw remove-cli` rewrites a version-1 global file, the written file SHALL carry `accept-edits` wherever the version-1 file meant it, and the rewrite notice SHALL name each approval value or key it renamed.
+`git paw init` SHALL NOT backfill `version = 2` into an existing file that declares no version. Stamping it would turn an `"auto"` at an approval path or an `approval_args` key `auto` into the wider `Auto` level, and would turn an unset worker approval from `accept-edits` into the version-2 default `auto`. For such a file `init` SHALL leave `version` absent and print its one-line pointer to `git paw config check`, exactly as it does for a file with a `[supervisor]` table. When `git paw add-cli` or `git paw remove-cli` rewrites a version-1 global file, the written file SHALL carry `accept-edits` wherever the version-1 file meant it. Where the version-1 file set no worker approval, the written file SHALL set `[workers] approval = "accept-edits"`. The rewrite notice SHALL name each approval value or key it renamed or added.
 
 #### Scenario: Init does not widen a profile by stamping the version
 
@@ -84,9 +114,23 @@ When a loaded version-1 file writes `"auto"` at an approval path, or an `approva
 - **THEN** the file SHALL still have no `version` key
 - **AND** stdout SHALL carry one line pointing at `git paw config check`
 
+#### Scenario: Init does not widen the default by stamping the version
+
+- **GIVEN** a `.git-paw/config.toml` with no `version` and only `[broker] enabled = true`
+- **WHEN** `git paw init` runs
+- **THEN** the file SHALL still have no `version` key
+- **AND** a `claude` worker SHALL still launch with `--permission-mode acceptEdits`
+
 #### Scenario: Add-cli writes the migrated value
 
 - **GIVEN** a version-1 global config with `[clis.claude] approval_args = { auto = "--permission-mode auto" }`
 - **WHEN** `git paw add-cli my-agent my-agent` rewrites it
 - **THEN** the written file SHALL declare `version = 2` and map `accept-edits` to `--permission-mode auto` under `[clis.claude].approval_args`
 - **AND** the rewrite notice SHALL name `clis.claude.approval_args.auto`
+
+#### Scenario: Add-cli keeps an unset worker approval at accept-edits
+
+- **GIVEN** a version-1 global config with one custom CLI and no approval keys
+- **WHEN** `git paw add-cli my-agent my-agent` rewrites it
+- **THEN** the written file SHALL declare `version = 2` and `[workers] approval = "accept-edits"`
+- **AND** the rewrite notice SHALL name `workers.approval`

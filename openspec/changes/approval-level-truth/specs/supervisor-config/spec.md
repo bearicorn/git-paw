@@ -7,7 +7,7 @@ The system SHALL define a `SupervisorConfig` struct with the following fields:
 - `enabled: bool` — defaults to `false` when the field or section is absent
 - `cli: Option<String>` — defaults to `None` when absent. Names the orchestrator CLI used for headless escalation invocations and for seeding the roster's `supervisor` row; not required to launch a session.
 - `test_command: Option<String>` — defaults to `None` when absent
-- `agent_approval: ApprovalLevel` — defaults to `AcceptEdits` when absent
+- `agent_approval: ApprovalLevel` — defaults to `Auto` when absent. A version-1 document's absent value reads as `AcceptEdits` instead, as `core-configuration`'s *Version-1 `auto` approval values load as `accept-edits`* defines, so an existing configuration keeps its launch command.
 - `approval: Option<ApprovalLevel>` — defaults to `None` when absent. The orchestrator's own approval level, applied to git-paw-initiated headless orchestrator invocations. When `None`, those invocations inherit `agent_approval`. The field SHALL be annotated `#[serde(default, skip_serializing_if = "Option::is_none")]` so older TOMLs parse unchanged and unset values omit on round-trip.
 
 The `ApprovalLevel` enum SHALL have four variants, ordered from narrowest to widest: `Manual`, `AcceptEdits`, `Auto`, `FullAuto`, serialized as kebab-case (`"manual"`, `"accept-edits"`, `"auto"`, `"full-auto"`). An invalid value SHALL fail loading with an error naming the value and listing all four names. The meaning of each level is defined by *Permission flag mapping*; how a version-1 file's `"auto"` is read is defined by `core-configuration`'s *Version-1 `auto` approval values load as `accept-edits`*.
@@ -26,19 +26,26 @@ The `ApprovalLevel` enum SHALL have four variants, ordered from narrowest to wid
 
 #### Scenario: SupervisorConfig with partial fields
 
-- **GIVEN** a config file with `[supervisor]` containing only `enabled = true`
+- **GIVEN** a version-1 config file with `[supervisor]` containing only `enabled = true`
 - **WHEN** the config is loaded
 - **THEN** `enabled` SHALL be `true`
 - **AND** `cli`, `test_command` SHALL be `None`
-- **AND** `agent_approval` SHALL be `AcceptEdits`
+- **AND** `agent_approval` SHALL be `AcceptEdits`, the version-1 default
 - **AND** `approval` SHALL be `None`
 
 #### Scenario: The default launches what the previous default launched
 
-- **GIVEN** a config that sets no worker approval and a `claude` worker
+- **GIVEN** a version-1 config that sets no worker approval and a `claude` worker
 - **WHEN** its pane command is built
 - **THEN** it SHALL contain `--permission-mode acceptEdits`, exactly as before this change
 - **AND** it SHALL NOT contain `--permission-mode auto`
+
+#### Scenario: The version-2 default is auto
+
+- **GIVEN** a config with `version = 2` that sets no worker approval, no global config, and a `claude` worker
+- **WHEN** the config is loaded and its pane command is built
+- **THEN** the worker approval SHALL be `Auto`
+- **AND** the pane command SHALL contain `--permission-mode auto`
 
 #### Scenario: Invalid agent_approval value is rejected
 

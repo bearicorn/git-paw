@@ -1,5 +1,66 @@
 ## MODIFIED Requirements
 
+### Requirement: `git paw doctor` runs read-only preflight checks
+
+The system SHALL provide a `git paw doctor` command that inspects the environment,
+configuration, repository, and session state and prints a grouped diagnostic report. Each check
+SHALL be reported with one of four statuses — ✓ (pass), ⚠ (warning), ✗ (failure), or ○ (skipped:
+the check was not evaluated) — and every non-✓ check SHALL print an actionable remedy. Without
+`--fix`, the command SHALL NOT mutate any file, config, session, worktree registration, or other
+persistent state. With `--fix` it SHALL mutate only what the "`git paw doctor --fix` repairs only
+git-paw's own session records" requirement allows.
+
+#### Scenario: Doctor prints a grouped report
+
+- **GIVEN** a git repository
+- **WHEN** `git paw doctor` is run
+- **THEN** it SHALL print checks grouped under Environment, CLIs, Config, Spec system, Bundled scripts, Broker, Supervisor, Session, and Hygiene
+- **AND** each check SHALL carry a ✓, ⚠, ✗, or ○ status
+- **AND** every ⚠, ✗, or ○ check SHALL include a remedy line
+
+#### Scenario: Doctor does not mutate state
+
+- **GIVEN** a repository with a `.git-paw/` directory and a drifted session record
+- **WHEN** `git paw doctor` is run without `--fix`
+- **THEN** no file under `.git-paw/` (config, scripts, session state), no session file, and no git worktree registration SHALL be created, modified, or deleted
+
+#### Scenario: A skipped check is shown with its own glyph and count
+
+- **GIVEN** a report with one ○ check
+- **WHEN** `git paw doctor` is run
+- **THEN** that check SHALL be printed with the glyph `○` and a detail starting with "not evaluated"
+- **AND** the summary line SHALL count it under `○`, not under `⚠`
+
+### Requirement: Exit code reflects the worst check
+
+The command SHALL exit with a non-zero status when any check is ✗, and with zero when all
+checks are ✓, ⚠, or ○. A ⚠ alone SHALL NOT cause a non-zero exit. A ○ (skipped) check SHALL NOT
+count toward the worst check and SHALL NOT change the exit code.
+
+#### Scenario: All checks pass
+
+- **GIVEN** an environment where every check resolves to ✓
+- **WHEN** `git paw doctor` is run
+- **THEN** the process SHALL exit 0
+
+#### Scenario: A hard failure is present
+
+- **GIVEN** an environment with at least one ✗ check
+- **WHEN** `git paw doctor` is run
+- **THEN** the process SHALL exit non-zero
+
+#### Scenario: Only warnings are present
+
+- **GIVEN** an environment with ⚠ checks but no ✗ checks
+- **WHEN** `git paw doctor` is run
+- **THEN** the process SHALL exit 0
+
+#### Scenario: Skipped checks do not change the exit code
+
+- **GIVEN** a report whose evaluated checks are all ✓ or ⚠, plus one ○ check
+- **WHEN** the exit code is computed
+- **THEN** it SHALL be 0, the code the evaluated checks alone produce
+
 ### Requirement: Config check
 
 The command SHALL report whether `.git-paw/config.toml` is present and parses, report the
@@ -145,21 +206,22 @@ With `--json`, `git paw config check` SHALL exit with the same status as the hum
 
 ### Requirement: Doctor does not report fallback defaults after a config load error
 
-When the configuration fails to load, `git paw doctor` SHALL report the load error in the Config group and SHALL report each check whose result depends on configuration values — the Spec-system, Broker and Supervisor groups, the configured-CLI rows, and root-skill staleness — as one ⚠ per group whose detail starts with "not evaluated" and whose remedy points at the config error. It SHALL NOT report values taken from built-in defaults as the configuration.
+When the configuration fails to load, `git paw doctor` SHALL report the load error in the Config group and SHALL report each check whose result depends on configuration values — the Spec-system, Broker and Supervisor groups, the configured-CLI rows, and root-skill staleness — as one ○ (skipped) check per group, not ⚠, whose detail starts with "not evaluated" and whose remedy points at the config error. It SHALL NOT report values taken from built-in defaults as the configuration.
 
 #### Scenario: A TOML error does not read as a disabled broker
 
 - **GIVEN** a repo config with `[broker] enabled = true`, `[supervisor] enabled = true`, `[specs] type = "openspec"`, and a syntax error on line 2
 - **WHEN** `git paw doctor` is run
 - **THEN** the Config group SHALL report ✗ naming the error
-- **AND** the Broker, Supervisor and Spec-system groups SHALL each report ⚠ "not evaluated"
+- **AND** the Broker, Supervisor and Spec-system groups SHALL each report ○ "not evaluated"
 - **AND** the report SHALL NOT say the broker or supervisor is disabled or that no spec system is configured
 
 #### Scenario: JSON carries the not-evaluated checks
 
 - **GIVEN** the same config
 - **WHEN** `git paw doctor --json` is run
-- **THEN** the Broker, Supervisor and Spec-system entries SHALL have status `warn` and a detail starting with "not evaluated"
+- **THEN** the Broker, Supervisor and Spec-system entries SHALL have status `skipped` and a detail starting with "not evaluated"
+- **AND** the overall `status` SHALL be `fail`, from the Config ✗, and not `skipped`
 - **AND** the process SHALL exit non-zero
 
 ### Requirement: Configuration-independent checks run despite a config load error

@@ -23,7 +23,8 @@ from the CLI shapes.
 - One documented contract that every `--json` follows, with a version.
 - Programmatic results for the commands an orchestrator scripts: `add`, `remove`,
   `list-clis`.
-- Every existing key keeps its name, type and meaning.
+- Every existing key keeps its name, type and meaning, except `status`'s `tmux_running`, which
+  `terminal_alive` replaces (D4).
 - Typed output DTOs, so a schema change is a compile-visible edit and not a `json!` literal.
 
 **Non-Goals:**
@@ -65,14 +66,20 @@ stderr.
 
 *Alternative:* a `{"schema_version":1,"error":{…}}` document on stdout. It is useful, but it
 adds a second shape every consumer must branch on, and the exit code already carries the
-signal. Deferred (open question 2).
+signal. Out of scope (resolved question 2).
 
-### D4 — `status`: `terminal_alive` beside `tmux_running`; `broker` object
-`terminal_alive` has the same value as `tmux_running`: whether the terminal session exists. That is the has-session fact, which v0.17.0's `status-and-picker-truth` keeps separate from "agent CLIs exited"; that state shows as `status: "stopped"` with `terminal_alive: true`.
+### D4 — `status`: `terminal_alive` replaces `tmux_running`; `broker` object
+`terminal_alive` carries the value `tmux_running` carried: whether the terminal session exists. That is the has-session fact, which v0.17.0's `status-and-picker-truth` keeps separate from "agent CLIs exited"; that state shows as `status: "stopped"` with `terminal_alive: true`.
 After v0.18 it comes from the `TerminalBackend`'s session liveness rather than a tmux probe.
-`tmux_running` stays, with the same value, so no consumer breaks. It is documented as
-deprecated in favor of `terminal_alive` and is a candidate for removal only under the v1.0.0
-deprecation policy.
+`tmux_running` is removed in 0.21.0 (**BREAKING**). It names one terminal implementation, and
+keeping it would freeze that name in 1.0.0. Removing it now, before the freeze, costs one rename
+for consumers; removing it later would need a major release. No deprecation entry is registered
+for it, because nothing is left to deprecate. `schema_version` stays 1: no versioned document
+ever carried `tmux_running`, because both land in this release. The MODIFIED *Liveness reflects dead agent panes*
+requirement names `terminal_alive` where it named `tmux_running`.
+
+*Alternative:* keep `tmux_running` beside `terminal_alive` as a deprecated alias. Rejected by the
+maintainer (2026-11-17): it would stay until 2.0.0.
 
 `broker` is `null` when the session recorded no broker. Otherwise it is
 `{"url": …, "state": "running" | "paused" | "not_responding" | "foreign"}`, decided by the same
@@ -86,7 +93,13 @@ Each check gains `id: "<group-slug>.<check-slug>"`, for example `environment.tmu
 `config.schema-version` or `hygiene.gitignore`. The ids are declared next to the check
 constructors and never derived from display text, so rewording a check never changes its id.
 A unit test asserts that ids are unique and match `^[a-z0-9-]+\.[a-z0-9-]+$`. `group`, `name`,
-`status`, `detail` and `remedy` are unchanged.
+`detail` and `remedy` are unchanged.
+
+A check's `status` is `ok`, `warn`, `fail` or `skipped`. `skipped` marks a check that was not
+evaluated; `config-check-command` defines when (a config load error). The document's overall
+`status` stays `ok`, `warn` or `fail`, computed over the evaluated checks only, so a skipped check
+never changes it or the exit code. `skipped` is part of schema version 1 from its first release,
+so no versioned document ever lacked it.
 
 ### D6 — `add` / `remove` / `list-clis` documents
 - `add`: `{schema_version, session, branch, agent_id, cli, worktree_path, paused}`. `agent_id`
@@ -113,8 +126,9 @@ guard pattern.
 
 - [The additive rule is violated later] → the roster guard checks presence. Schema golden tests
   per command pin the key set, so a removed key fails a test.
-- [`tmux_running` lingers forever] → it is documented as deprecated, and its removal is a
-  v1.0.0 deprecation-policy decision, not this change's.
+- [A consumer still reads `tmux_running`] → the key is gone, so the consumer sees a missing key
+  and not a wrong value. The CHANGELOG marks the removal as breaking and names `terminal_alive`.
+  In-tree readers switch in this change.
 - [A command prints a stray stdout line in JSON mode] → the contract test parses stdout as one
   JSON value and fails on trailing data.
 
@@ -122,17 +136,17 @@ guard pattern.
 
 1. Add `output.rs` and switch `status`, `approvals` and `doctor` to DTOs with no key changes;
    existing tests stay green.
-2. Add `schema_version`, `terminal_alive`, `broker`, and the doctor `id`.
+2. Add `schema_version`, `terminal_alive`, `broker`, and the doctor `id`; remove `tmux_running`
+   and switch its in-tree readers to `terminal_alive`.
 3. Add `--json` to `add`, `remove` and `list-clis`.
 4. Add the contract test and the docs.
 
-All steps are additive. Rollback is a revert.
+All steps are additive except the `tmux_running` removal in step 2. Rollback is a revert.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Keep `tmux_running` (recommended) or drop it now. Dropping it is a break for current
-   consumers.
-2. Keep a stdout error envelope out of scope (recommended) or add it before the freeze.
-3. `schema_version` (recommended) or `version` as the key. Config uses `version`, per
-   `config-schema-versioning` open question 1. If the user prefers one name everywhere, align
-   both.
+1. `tmux_running`: dropped in 0.21.0. `terminal_alive` replaces it. This is an intentional break
+   before the 1.0.0 freeze (D4).
+2. Stdout JSON error envelope: out of scope. Errors stay on stderr with an empty stdout (D3).
+3. Key name: `schema_version` in JSON output and on the wire, `version` in `config.toml`. The specs
+   already say this; no spec change.

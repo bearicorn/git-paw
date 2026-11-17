@@ -97,10 +97,9 @@ and the `launch_command` it ran: an additive change inside schema version 1. Alt
 - [A dry run on a session another process is mutating may preview a plan the real add then refuses]
   → inherent to an unlocked preview; the real add re-resolves under its lock.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Should both previews render the session-id arguments with a placeholder (for example
-  `--session-id <assigned at launch>`), so `runs:` is literally the pane command? That changes
-  `start --dry-run` output too and belongs in one change for both.
-- Should `start --dry-run --json` exist, with the same `dry_run` / `launch_command` keys per worker?
-  Out of scope here; `uniform-json-output` does not roster it.
+- **Session-id placeholder in previews:** not now. Both previews keep their current output; one
+  later change can add it to `add` and `start` together.
+- **`start --dry-run --json`:** not now. `uniform-json-output` does not roster it; it can be added
+  later as an additive document.

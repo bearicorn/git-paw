@@ -143,10 +143,8 @@ never read liveness.
 
 Rollback is a revert. No production or persisted state is involved.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Should the register entries also link a GitHub issue? Today `tracking` is free text, so an
-  issue link is optional.
-- Is DV-18's cause the shell's own prompt commands (the hypothesis under Context)? If so, `DeadPanes` should
-  start its panes with an explicit `sh -c 'exec sleep 0'` (or `/bin/sh` with no rc files) rather
-  than the user's login shell. Confirm before de-registering it.
+- **Issue links in register entries:** optional. `tracking` stays free text.
+- **DV-18's cause:** checked during implementation. If it is the shell's prompt commands,
+  `DeadPanes` starts its panes without rc files before the entry is de-registered.

@@ -45,3 +45,4 @@
 - [ ] 6.4 `just deny`
 - [ ] 6.5 `mdbook build docs/`
 - [ ] 6.6 `openspec validate session-state-reconciliation --strict`
+- [ ] 6.7 Archive before `config-check-command` and `supervisor-vocabulary-split`, which MODIFY the doctor read-only requirement on this change's text

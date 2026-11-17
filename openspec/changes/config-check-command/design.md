@@ -57,15 +57,30 @@ binaries reading newer configs); validating environment facts (CLI installed on 
   contract's roster. Error findings are a result (document printed, exit 1), like failing doctor
   checks.
 - **D5 — Exit codes.** 0 / 1, with `--strict` promoting warnings. Matches doctor's "worst check" rule.
-- **D6 — "Not evaluated", not defaults.** `collect_probes` keeps `Result<PawConfig, ConfigLoadError>`;
-  the config-derived probes take `Option<&PawConfig>` and return a `NotEvaluated` variant when it is
-  `None`. Each affected group renders one ⚠ whose detail starts with "not evaluated — the
-  configuration could not be loaded" and whose remedy points at the Config ✗. Groups that never read
+- **D6 — "Not evaluated" is a `skipped` status, not defaults.** `collect_probes` keeps
+  `Result<PawConfig, ConfigLoadError>`; the config-derived probes take `Option<&PawConfig>` and
+  return a `NotEvaluated` variant when it is `None`. Each affected group renders one check with a
+  new fourth status, `CheckStatus::Skipped`. Its detail starts with "not evaluated — the
+  configuration could not be loaded" and its remedy points at the Config ✗. Groups that never read
   the config (Environment, roster detection, Python, helper presence/mode/content, Hygiene) run as
-  today; detection runs with the roster only. ⚠ rather than a new status keeps the doctor status set
-  (and the `--json` `status` values) closed; the Config ✗ already makes the exit non-zero.
-  *Alternative:* a fourth `skipped` status — clearer, but it widens a machine contract that
-  `uniform-json-output` is freezing (open question 1).
+  today; detection runs with the roster only.
+  - *Human output:* glyph `○` (U+25CB, white circle), label "skipped". It sits beside `✓`, `⚠` and
+    `✗` as a plain single-width symbol, and reads as "nothing here" rather than as a warning. The
+    summary line gains a fourth count, `N ○`, after the `✗` count.
+  - *JSON:* the check's `status` is `"skipped"` (`uniform-json-output` lists it in the doctor
+    document).
+  - *Overall status and exit code:* a skipped check is excluded from the worst-check computation.
+    The overall `status` stays `ok`, `warn` or `fail` and is never `skipped`. A skipped check never
+    makes the exit non-zero; the Config ✗ that caused it already does.
+  - *Severity order:* `Skipped` is not a severity. It is not placed in the `Ok < Warn < Fail`
+    ordering; the overall status is the maximum over the non-skipped checks.
+  *Alternative:* a ⚠ "not evaluated" (the earlier draft). Rejected: it counts as a warning that
+  nobody can fix in that group, and a script reading `warn` cannot tell it from a real warning.
+- **D6a — The doctor status requirement is reworded on `session-state-reconciliation`'s text.**
+  That change also MODIFIES *`git paw doctor` runs read-only preflight checks* (for `--fix`). This
+  change's delta is written on its text and adds only the fourth status, so
+  `session-state-reconciliation` archives first. `supervisor-vocabulary-split` archives after this
+  change and carries the fourth status in its own copy.
 - **D7 — An unparseable file stops at its syntax finding.** The validator returns the parse error and
   nothing else for that file (no key walk over a partial tree); the other file is validated on its
   own, as D1 already does.
@@ -75,10 +90,13 @@ binaries reading newer configs); validating environment facts (CLI installed on 
 - [Known-key table drifts from the structs] → a test enumerates every serde field (via the wire
   types or a serialize-all-fields fixture) and fails on a missing table entry.
 - [Warnings for third-party keys a consumer adds on purpose] → warnings only; `--strict` is opt-in.
-- [A "not evaluated" ⚠ hides a real problem in that group] → it is shown next to a ✗ that must be
-  fixed first; re-running doctor after the fix evaluates the group.
+- [A skipped group hides a real problem] → it is shown next to a ✗ that must be fixed first;
+  re-running doctor after the fix evaluates the group.
+- [A consumer of `doctor --json` meets a fourth check status] → it lands in the same release that
+  first versions the document (`schema_version` 1), so no versioned consumer saw three values only.
+  The overall `status` keeps its three values.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Add a `skipped` doctor status for "not evaluated" instead of ⚠ (D6)? It must be decided before
-   `uniform-json-output` freezes the `status` values.
+1. A not-evaluated check reports a new `skipped` status (glyph `○`), not ⚠. The overall `status`
+   stays `ok`/`warn`/`fail`; skipped checks do not affect it or the exit code (D6).

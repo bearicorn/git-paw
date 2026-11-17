@@ -157,10 +157,7 @@ monotonic clock, which did not count the sleep.
 - [Attended `start` waits longer before attaching] → one readiness gate per worker, as the paused
   restart already does for held prompts.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Attended sessions after a sleep: should `git paw start` on an active session offer to nudge idle
-  workers, or should a `git paw nudge [<branch>|--all]` command exist? No git-paw process runs in an
-  attended session to detect the wake.
-- Should `doctor` report entries whose recorded conversation no longer exists (probe `Some(false)`),
-  or is that `session-state-reconciliation`'s job?
+- **Waking an attended session:** no nudge command and no `start` prompt in v0.21.0.
+- **Missing recorded conversations:** left to `session-state-reconciliation`.

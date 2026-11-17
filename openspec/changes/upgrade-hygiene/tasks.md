@@ -7,6 +7,8 @@
 - [ ] 1.1 `tracked_generated_files(runner, repo_root)`: `git ls-files -z` over `required_gitignore_entries()` in the main checkout, through `CommandRunner`; unit tests with a sandbox repo (tracked script found; `config.toml` never listed; untracked ignored file not listed)
 - [ ] 1.2 `src/doctor.rs`: `HygieneProbe.tracked_generated`; `check_hygiene` ⚠ row with the `git rm -r --cached <entries>` remedy; unit tests
 - [ ] 1.3 `src/init.rs`: after reconciling, print the same command when tracked files exist; never touch the index; not counted as a change
+- [ ] 1.4 `src/commands/start.rs`: on every launch or recovery path, call `tracked_generated_files` once and print one stderr warning with the doctor row's entries and remedy, before attaching; nothing when clean or when the git query fails; exit code unchanged
+- [ ] 1.5 Tests: start with two tracked helper copies and two agents → exactly one warning on stderr, none on stdout, index unchanged; clean repository → no warning; the launch's exit code is the same either way
 
 ## 2. Upgrade summary (#24)
 
@@ -21,7 +23,7 @@
 
 ## 4. Docs
 
-- [ ] 4.1 `docs/src/user-guide/doctor.md` (tracked-files and upgrade rows); "Upgrading git-paw" section (doctor → init → untrack); CHANGELOG pointer
+- [ ] 4.1 `docs/src/user-guide/doctor.md` (tracked-files and upgrade rows); "Upgrading git-paw" section (doctor → init → untrack; `start` also warns); CHANGELOG pointer
 
 ## 5. Gates
 

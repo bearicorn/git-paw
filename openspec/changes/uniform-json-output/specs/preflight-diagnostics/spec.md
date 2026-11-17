@@ -21,3 +21,20 @@
 - **GIVEN** the same environment
 - **WHEN** `git paw doctor --json` is run twice
 - **THEN** both documents SHALL list the same set of `id` values
+
+### Requirement: Doctor JSON reports a check that was not evaluated as skipped
+
+In the `git paw doctor --json` document, a check's `status` SHALL be one of `ok`, `warn`, `fail`, or `skipped`. `skipped` SHALL mark a check that was not evaluated. The overall `status` SHALL NOT be `skipped`. It SHALL be the worst status among the evaluated checks, so a skipped check SHALL NOT change it.
+
+#### Scenario: A skipped check is reported as skipped
+
+- **GIVEN** an environment in which doctor does not evaluate at least one check
+- **WHEN** `git paw doctor --json` is run
+- **THEN** each such check entry SHALL have `"status": "skipped"`
+- **AND** the overall `status` SHALL be `ok`, `warn`, or `fail`, never `skipped`
+
+#### Scenario: Skipped checks do not change the overall status
+
+- **GIVEN** a report whose evaluated checks are all `ok` or `warn` and at least one of which is `warn`, plus one `skipped` check
+- **WHEN** the overall `status` is computed
+- **THEN** it SHALL be `warn`, the value the evaluated checks alone produce

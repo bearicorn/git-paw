@@ -34,3 +34,28 @@ When any finding that `git paw init` repairs is present — a missing `.gitignor
 - **GIVEN** a repository on which this git-paw version ran `git paw init` with no later change
 - **WHEN** `git paw doctor` is run
 - **THEN** no outdated-setup ⚠ SHALL be reported
+
+### Requirement: Start warns once about tracked generated files
+
+When doctor's tracked-generated-files check would flag a file, each `git paw start` run that launches or recovers a session SHALL print one stderr warning, before attaching. It SHALL carry the same entries and `git rm -r --cached <paths>` remedy as the doctor row. With nothing tracked, or a failed git query, start SHALL print nothing for it. The warning SHALL NOT change the exit code, the launch or the index.
+
+#### Scenario: Committed helper copies are named at launch
+
+- **GIVEN** a repository where `.git-paw/scripts/broker.sh` and `.git-paw/scripts/sweep.sh` are tracked
+- **WHEN** `git paw start` launches a session with two agents
+- **THEN** stderr SHALL contain exactly one tracked-generated-files warning
+- **AND** the warning SHALL contain `git rm -r --cached .git-paw/scripts/`
+- **AND** stdout SHALL NOT contain the warning
+
+#### Scenario: A clean repository launches without the warning
+
+- **GIVEN** a repository where only `.git-paw/config.toml` is tracked under `.git-paw/`
+- **WHEN** `git paw start` launches a session
+- **THEN** stderr SHALL NOT contain a tracked-generated-files warning
+
+#### Scenario: The warning does not change the outcome
+
+- **GIVEN** a repository with tracked generated files
+- **WHEN** `git paw start` launches a session that would otherwise succeed
+- **THEN** the session SHALL launch and the exit code SHALL be the same as without tracked files
+- **AND** the index SHALL be unchanged afterwards

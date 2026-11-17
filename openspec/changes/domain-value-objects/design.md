@@ -125,7 +125,7 @@ deleted `poll.rs` and `approve.rs`, which held the rest), which v0.18 rewrites. 
 
 Every step is behavior-preserving and gated on the full suite.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. A parity-pinned mirror for the TTL (recommended), or a hidden binary query plus a fallback
-   literal.
+1. **The claim TTL:** Rust is canonical and the `sweep.sh` mirror is pinned by the parity test
+   (D3). No hidden binary query.

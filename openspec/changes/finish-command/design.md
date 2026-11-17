@@ -73,7 +73,9 @@ branch rule from `purge-unmerged-branch-safety` ("delete only if created AND mer
 branch") is parameterised to take the comparison ref; finish passes the integration target, so a branch
 finished `--into feat/pr` is deleted when created and contained in `feat/pr`. Only worktrees recorded in
 the session file are removed; a branch checked out in an unmanaged worktree is integrated and left in
-place with a note. The main working tree is never removed.
+place with a note. The main working tree is never removed. An agent of a stopped session (session
+file present, no terminal) is accepted: there is no surface to close, and the rest of the teardown
+runs unchanged.
 
 ### D5 — `[finish] strategy`
 
@@ -131,9 +133,9 @@ orchestrator needs the refusal reason without parsing stderr.
 - [Bare-session teardown depends on v0.18's GP-49 resolution] → if `supervisor-pane-removal` keeps the
   refusal, finish still integrates and removes the worktree but leaves the surface; tasks gate on it.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- Should `finish` also accept agents of a *stopped* session (session file present, no terminal)? This
-  design says yes (no surface to close); confirm.
-- Should finish verify the branch is `verified` in the broker before integrating? Not here — finish is
-  operator-invoked; verification gating belongs to the queue's `--verified` selection.
+- **Accept agents of a stopped session?** Yes. There is no surface to close; the rest of the
+  teardown runs. Specified in *Finish accepts an agent of a stopped session*.
+- **Require the branch to be `verified` before integrating?** No. Finish is operator-invoked; the
+  queue's `--verified` selection handles verification gating.

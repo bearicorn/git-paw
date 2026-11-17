@@ -9,11 +9,11 @@
 
 The system SHALL provide a `git paw doctor` command that inspects the environment,
 configuration, repository, and session state and prints a grouped diagnostic report. Each check
-SHALL be reported with one of three statuses — ✓ (pass), ⚠ (warning), or ✗ (failure) —
-and every non-✓ check SHALL print an actionable remedy. Without `--fix`, the command SHALL NOT
-mutate any file, config, session, worktree registration, or other persistent state. With
-`--fix` it SHALL mutate only what the "`git paw doctor --fix` repairs only git-paw's own session
-records" requirement allows.
+SHALL be reported with one of four statuses — ✓ (pass), ⚠ (warning), ✗ (failure), or ○ (skipped:
+the check was not evaluated) — and every non-✓ check SHALL print an actionable remedy. Without
+`--fix`, the command SHALL NOT mutate any file, config, session, worktree registration, or other
+persistent state. With `--fix` it SHALL mutate only what the "`git paw doctor --fix` repairs only
+git-paw's own session records" requirement allows.
 
 #### Scenario: Doctor prints a grouped report
 
@@ -21,14 +21,21 @@ records" requirement allows.
 - **WHEN** `git paw doctor` is run
 - **THEN** it SHALL print checks grouped under Environment, CLIs, Config, Spec system, Bundled scripts, Broker, Coordination, Session, and Hygiene
 - **AND** no group SHALL be headed Supervisor
-- **AND** each check SHALL carry a ✓, ⚠, or ✗ status
-- **AND** every ⚠ or ✗ check SHALL include a remedy line
+- **AND** each check SHALL carry a ✓, ⚠, ✗, or ○ status
+- **AND** every ⚠, ✗, or ○ check SHALL include a remedy line
 
 #### Scenario: Doctor does not mutate state
 
 - **GIVEN** a repository with a `.git-paw/` directory and a drifted session record
 - **WHEN** `git paw doctor` is run without `--fix`
 - **THEN** no file under `.git-paw/` (config, scripts, session state), no session file, and no git worktree registration SHALL be created, modified, or deleted
+
+#### Scenario: A skipped check is shown with its own glyph and count
+
+- **GIVEN** a report with one ○ check
+- **WHEN** `git paw doctor` is run
+- **THEN** that check SHALL be printed with the glyph `○` and a detail starting with "not evaluated"
+- **AND** the summary line SHALL count it under `○`, not under `⚠`
 
 ### Requirement: Coordination check
 

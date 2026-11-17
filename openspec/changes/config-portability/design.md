@@ -124,11 +124,9 @@ format.
    receipt; then the helper and `__broker-url`.
 Rollback per step. A 0.20 binary ignores `broker_url` in a receipt (unknown field).
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-1. Add a gitignored per-machine override (`.git-paw/config.local.toml`, merged last) so a machine
-   can replace a committed `default_cli` without `--cli` on every launch? Recommended as a follow-up;
-   out of scope here.
-2. Does the session receipt already carry the broker URL anywhere (task 3.1 checks)? If so, reuse it
-   instead of adding `broker_url`.
-3. Range 9120–9919 and 8 attempts are proposals; confirm they avoid common local services.
+1. **Per-machine override (`.git-paw/config.local.toml`):** a follow-up change, not v0.21.0.
+2. **Broker URL in the session receipt:** checked during implementation (task 3.1); reuse an
+   existing field if there is one.
+3. **Port range:** 9120–9919 with 8 attempts, as proposed.

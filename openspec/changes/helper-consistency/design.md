@@ -171,11 +171,8 @@ command line such as `> /dev/null`, because that is not followed by `1.`.
 One commit per decision, the suite green after each: `__pane` and D1 (approve, capture, tell), D2,
 D3, D4 (Rust readers, then `sweep.sh`). Rollback is a revert. No persisted state changes.
 
-## Open Questions
+## Resolved Questions (2026-11-17)
 
-- DV-05's original capture was not kept. The failure mode above is inferred from the code. The
-  regression test reproduces both inferred shapes, a reflowed echo and a scrolled-out earlier copy.
-  If a later dogfood capture shows a third shape, add it to that test.
-- DV-07's report does not say whether the booting worker was missing from `status` only, or also
-  from `snapshot`, which lists panes by command and title (`sweep.sh:466-480`). This change fixes
-  `status`. If `snapshot` also misses it, that is a follow-up.
+- **DV-05 capture shapes:** the regression test covers the two inferred shapes. A third shape from
+  a later dogfood capture is added to that test.
+- **DV-07 and `snapshot`:** this change fixes `status`. A `snapshot` gap, if found, is a follow-up.

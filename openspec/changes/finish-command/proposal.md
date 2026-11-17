@@ -23,7 +23,8 @@ external orchestrator (v0.18) and the GP-09 merge queue (`finish-merge-queue`) b
   compare-and-swap update. No push — PR creation stays out of scope.
 - **Teardown after success**: close the agent's surface and deregister it if it belongs to the live
   session, run `on_remove`, remove the worktree, and delete the branch only if git-paw created it and it
-  is now contained in the target.
+  is now contained in the target. An agent of a stopped session (session file present, no terminal)
+  is accepted: it is integrated and torn down with no surface to close.
 - **Announces the move**: integrating into the default branch with a live broker publishes the existing
   `agent.advanced-main` event, so the drive loop's branch refresh reacts exactly as it does today.
 - **`--json`** under the shared `cli-machine-output` contract (`schema_version`, one object, no

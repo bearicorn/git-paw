@@ -13,15 +13,15 @@ The line SHALL be built from the same resolution the pane command uses, so the t
 
 #### Scenario: A claude worker at the default level
 
-- **GIVEN** a config with no worker approval and `default_cli = "claude"`
+- **GIVEN** a version-2 config with no worker approval, no global config, and `default_cli = "claude"`
 - **WHEN** `git paw start --dry-run --branches feat/a` runs
-- **THEN** the plan SHALL show `approval: accept-edits → --permission-mode acceptEdits` below `feat/a`'s `runs:` line
+- **THEN** the plan SHALL show `approval: auto → --permission-mode auto` below `feat/a`'s `runs:` line
 
-#### Scenario: A claude worker at auto
+#### Scenario: A version-1 claude worker keeps accept-edits
 
-- **GIVEN** a version-2 config with `[workers] approval = "auto"` and `default_cli = "claude"`
+- **GIVEN** a version-1 config with no worker approval, no global config, and `default_cli = "claude"`
 - **WHEN** `git paw start --dry-run --branches feat/a` runs
-- **THEN** the plan SHALL show `approval: auto → --permission-mode auto`
+- **THEN** the plan SHALL show `approval: accept-edits → --permission-mode acceptEdits`
 
 #### Scenario: An override is attributed
 
