@@ -1373,10 +1373,11 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
   - `verification-lifecycle` and `spec-hygiene` (exit summary)
 - **Design questions resolved 2026-11-17.** Every change's `design.md` records its answers under
   "Resolved Questions". Departures from the recommendations:
-  - The version-2 default worker approval is `auto`. A config without `version = 2` keeps
-    `accept-edits`, and `git paw init` no longer stamps `version = 2` into an existing file.
+  - The default worker approval is `auto` whenever none is set, in any config version and with
+    no config file. For Claude that moves unset workers from `acceptEdits` to auto mode; the
+    CHANGELOG says so. An explicit version-1 `"auto"` still migrates to `accept-edits`.
   - `status --json` drops `tmux_running` in 0.21.0 (breaking); `terminal_alive` replaces it.
-  Additions: the `conflict-detector` sender id (reserved at `/publish`), a `skipped` doctor
+  Additions: the `conflict-detector` sender id (reserved at `/publish`, kept by decision), a `skipped` doctor
   status, a `configuration value` deprecation kind, and a tracked-files warning at `start`.
 ---
 
