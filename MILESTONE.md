@@ -1365,11 +1365,19 @@ EF-22, EF-25 and EF-30 (Claude first-launch and setup-cli family) go to v0.23.0.
     leaks, and the shared pane-wait helper.
   - `spec-hygiene`: `Test:` pointers and the scenario renames from the v0.19.0 review.
   - `dogfood-docs`: DF-10/16/25/28/42, DV-02.
-- **Archive order matters.** These pairs MODIFY the same requirement, so the second to archive
-  rebases its delta:
+- **Archive order matters.** These changes MODIFY the same requirement, so a later one rebases
+  its delta:
   - `configurable-agent-grid` and `dashboard-usage-view` (three requirements)
-  - `session-state-reconciliation` and `supervisor-vocabulary-split` (doctor read-only)
+  - `session-state-reconciliation`, then `config-check-command`, then
+    `supervisor-vocabulary-split` (doctor read-only; binding order)
   - `verification-lifecycle` and `spec-hygiene` (exit summary)
+- **Design questions resolved 2026-11-17.** Every change's `design.md` records its answers under
+  "Resolved Questions". Departures from the recommendations:
+  - The version-2 default worker approval is `auto`. A config without `version = 2` keeps
+    `accept-edits`, and `git paw init` no longer stamps `version = 2` into an existing file.
+  - `status --json` drops `tmux_running` in 0.21.0 (breaking); `terminal_alive` replaces it.
+  Additions: the `conflict-detector` sender id (reserved at `/publish`), a `skipped` doctor
+  status, a `configuration value` deprecation kind, and a tracked-files warning at `start`.
 ---
 
 ## v0.22.0 — Session recording & replay, rethought (planned)
