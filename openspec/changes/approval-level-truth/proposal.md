@@ -33,20 +33,20 @@ rules, and Claude Code's auto mode is exactly that: the CLI's own judgement.
   that is `--permission-mode auto`. Codex keeps `--sandbox workspace-write`. Every other row is
   unchanged. git-paw still makes no decision about any command, and it still escalates every
   prompt the CLI leaves in place.
-- **The version-2 default worker approval is `auto`.** A version-2 file that sets no worker
-  approval, and a fresh `git paw init`, launch the CLI's own auto mode. An unset orchestrator
-  approval inherits the worker approval, as it does today.
-- **No silent widening on upgrade.**
+- **The default worker approval is `auto`.** Whenever no loaded configuration sets the worker
+  approval, whatever the file's version and also with no configuration file at all, workers launch
+  the CLI's own auto mode. A fresh `git paw init` does too. An unset orchestrator approval inherits
+  the worker approval, as it does today, so it is `auto` too. A delegate profile still defaults to
+  `manual`.
+- **An explicit `auto` keeps its meaning on upgrade.**
   - The version-1 to version-2 configuration migration, added in this release by
     `supervisor-vocabulary-split`, rewrites every version-1 approval value `"auto"` to
-    `"accept-edits"` and every `approval_args` key `auto` to `accept-edits`, in memory.
-  - It reads an unset worker approval in a version-1 file as `accept-edits`, what version 1's
-    implicit default launched. Every existing config therefore launches byte-identical commands.
+    `"accept-edits"` and every `approval_args` key `auto` to `accept-edits`, in memory. A config
+    that wrote `auto` therefore launches byte-identical commands.
   - A version-1 file that uses `auto` warns once through the shared deprecation helper
     (`core-deprecation`), filed under a new `configuration value` kind.
-  - `git paw init` does not stamp `version = 2` onto an existing unversioned file. `add-cli` and
-    `remove-cli` write `[workers] approval = "accept-edits"` when they rewrite a version-1 global
-    file that set none.
+  - `git paw init` does not stamp `version = 2` onto a file that uses the version-1 `auto`.
+    `add-cli` and `remove-cli` write `accept-edits` where such a file said `auto`.
 - **`git paw start --dry-run` names each worker's level and its flags.** Below each `runs:` line it
   prints `approval: <level> → <flags>`, and names the `approval_args` override when one applies.
 - **`git paw doctor` gains an `approval levels` check.** For every CLI a launch can use, it lists
@@ -55,13 +55,19 @@ rules, and Claude Code's auto mode is exactly that: the CLI's own judgement.
 - **Delegates.** The `--args` widening denylist covers the flags of every level above `manual`.
   The single-writer admission rule applies to every level above `manual`, not only to `auto`.
 - **Docs** (configuration reference, supported CLIs, security posture, coordination and
-  orchestrator guides) describe the four levels, the exact flags, the new default, the migration,
+  orchestrator guides) describe the four levels, the exact flags, the new default and the
+  behaviour change it brings to users who never set an approval, the migration,
   and how to choose between `accept-edits` and `auto`. They warn that an unavailable auto mode may
   fall back silently. `doctor` does not probe for it.
 
-No breaking change for existing configuration: every version-1 file loads to the same launch
-commands. The behaviour change applies only to version-2 files. One that sets no worker approval,
-or writes `approval = "auto"`, gets Claude Code's auto mode.
+**Behaviour change for upgrading users who never set an approval.** Every existing file still
+loads. A configuration that writes an approval value launches the same commands. But one that sets
+no worker approval (version 1, version 2, or no file at all) now gets `auto`: its Claude workers
+move from `--permission-mode acceptEdits` to Claude Code's auto mode, and its headless orchestrator
+invocations follow. Codex, `agy` and `qwen` launch the same flags at both levels, so only Claude
+workers change. git-paw prints no one-time notice; the CHANGELOG and upgrade notes say so and name
+how to keep the old behaviour: `[workers] approval = "accept-edits"`, or in a version-1 file
+`[supervisor] agent_approval = "accept-edits"`.
 
 **Out of scope.** These items moved to the v0.23.0 per-CLI audit:
 - #22: setup-cli refuses a custom CLI of the Claude family.
@@ -79,16 +85,16 @@ Worker-only allow rules (alternative B in design.md) are recorded and deferred.
 ### Modified Capabilities
 
 - `supervisor-config`:
-  - MODIFIED **SupervisorConfig struct with defaults**: four levels, default `auto` (a version-1
-    file's unset value reads as `accept-edits`).
+  - MODIFIED **SupervisorConfig struct with defaults**: four levels, default `auto` in every
+    configuration version.
   - MODIFIED **Permission flag mapping**: an `accept-edits` row, Claude `auto` becomes
     `--permission-mode auto`, and the row is re-verified against Claude Code 2.1.325.
   - MODIFIED **CustomCli approval_args override field**: four keys.
 - `core-configuration`: ADDED:
-  - version-1 `auto` values, and a version-1 file's unset worker approval, migrate to
-    `accept-edits`;
-  - such a file warns once when it writes `auto`;
-  - `init` and the global-file rewrite never widen a file's approvals.
+  - version-1 `auto` values migrate to `accept-edits`; an unset worker approval takes the
+    default `auto`;
+  - such a file warns once;
+  - `init` and the global-file rewrite never change what an explicit `auto` means.
 - `cli-agent-profiles`: MODIFIED:
   - **Agent profiles are declared in `[profiles.<name>]`**: four approval values;
   - **A delegate profile's args cannot widen its permissions**: every level above `manual`;
@@ -104,8 +110,6 @@ Worker-only allow rules (alternative B in design.md) are recorded and deferred.
 - **Code:**
   - `src/config/supervisor.rs`: `ApprovalLevel` gains `AcceptEdits`, the `#[default]` stays on
     `Auto`, and `KEBAB_NAMES` has four entries.
-  - Config loading: the worker approval falls back to `accept-edits` when the highest-precedence
-    document is version 1.
   - `src/agent_cli/mod.rs`: the Claude and Codex rows, and the provider doc comment's verification
     date.
   - `src/agent_cli/profile.rs`: `widening_arg` reads every row above `manual`.
@@ -133,8 +137,7 @@ Worker-only allow rules (alternative B in design.md) are recorded and deferred.
   - Rebases over `supervisor-vocabulary-split`, which provides version 2, the v1→v2 step, the
     `[workers] approval` and `[orchestrator] approval` paths, and the deprecation registry and
     helper. That change must add the `configuration value` registry kind this entry uses. Its
-    `init` backfill rule and its "init stamps a layout-neutral file" scenario must also yield to
-    this change's rule that `init` stamps no existing unversioned file.
+    `init` backfill rule gains one exclusion here: a file that uses the version-1 `auto`.
   - Must ship in the same release as the version-2 bump. If it slips, it needs its own v2→v3 step,
     because some version-2 files will already say `auto` and mean `acceptEdits`.
   - `config-check-command` reports the version-1 `auto` through the registry. It needs no change.

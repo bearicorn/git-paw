@@ -23,10 +23,7 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
   `[workers]` and `[drive]`. A version-1 file (every config written before this release) is migrated
   in memory and prints one deprecation warning per key family; it is never rewritten. Setting an old
   key and its new counterpart is a config error naming both; a `version = 2` file may not carry
-  `[supervisor]`. `git paw init` never writes `version = 2` into an existing unversioned file (it
-  would widen the default worker approval to `auto`); it leaves `version` absent and points at
-  `git paw config check`. Files `init` creates get `version = 2`. This removes
-  `config-schema-versioning`'s init version backfill. `git paw config check` and `doctor` report each old key with its new name. The
+  `[supervisor]`. `git paw config check` and `doctor` report each old key with its new name. The
   bundled scripts read the new keys first and fall back to the old ones. The two tables v0.17.0
   deprecated with no effect, `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`,
   are dropped by the migration, never renamed into `[workers]`; their v0.17.0 per-file warning goes
@@ -61,9 +58,7 @@ with no "supervisor" in it. The user chose the split-by-concern naming on 2026-1
 
 - `core-configuration`: ADDED schema version 2 and its key relocation, version-1 warnings, the
   old/new conflict rule, refusal of `[supervisor]` in a version-2 file, one-unit merge of the
-  coordination tables, init's version guard (no `version = 2` into an existing unversioned file),
-  and the helper scripts' key fallback; REMOVED `config-schema-versioning`'s *The default config
-  template declares the current schema version* (its init backfill would widen such a file).
+  coordination tables, init's version guard, and the helper scripts' key fallback.
 - `supervisor-config`: RENAMED + MODIFIED the enabled-mode resolution chain into start-mode terms
   (its version-1 scenarios kept: they still hold through migration and the flag aliases). The init
   prompt, the init commented block and v0.17.0's *Deprecated auto-approval tables are parsed but

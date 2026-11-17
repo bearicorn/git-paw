@@ -182,14 +182,11 @@ or nothing. Rules:
   paths (a sub-table's counterpart is the whole new sub-table);
 - a document declaring `version = 2` that contains `[supervisor]` → `ConfigError` naming the table
   and pointing at the migration table (version 2 has one spelling);
-- `init` never writes `version = 2` into an existing file that declares no version. It leaves
-  `version` absent and prints one line pointing at `git paw config check`. A file `init` creates
-  gets `version = 2`. Two reasons: a file with `[supervisor]` would be stamped version 2 and then
-  refused; and a layout-neutral file would silently widen, because the version-2 default worker
-  approval is `auto` while an unversioned file with no worker approval keeps `accept-edits`
-  (`approval-level-truth`). This REMOVES `config-schema-versioning`'s *The default config template
-  declares the current schema version*, whose init backfill would do exactly that; its template and
-  declared-version clauses move into *git-paw writes and stamps only the version-2 layout*;
+- `init` backfills `version = 2` only into a file with no `[supervisor]` table; otherwise it leaves
+  `version` absent and prints one line pointing at `git paw config check`. Without this guard the
+  version-1 file would be stamped version 2 and then refused. `approval-level-truth` adds a second
+  exclusion on the same path: a file that writes the version-1 approval value `"auto"` is not
+  stamped either;
 - `add-cli` / `remove-cli` already rewrite the global file through the wire type, so a global
   `[supervisor]` comes out in the version-2 layout; they print one line saying so, naming any
   deprecated auto-approval table the rewrite dropped (D13).

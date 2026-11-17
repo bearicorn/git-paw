@@ -118,7 +118,7 @@ When the global and repository configs are merged, the `[orchestrator]`, `[worke
 
 ### Requirement: git-paw writes and stamps only the version-2 layout
 
-Every configuration git-paw serializes SHALL use the version-2 layout and declare `version = 2`; when `git paw add-cli` or `git paw remove-cli` rewrites a global file that used version-1 paths, it SHALL print one line stating that the file was rewritten with the version-2 names, and naming each deprecated auto-approval table the rewrite dropped. `git paw init` SHALL NOT write `version = 2` into an existing config file that declares no version, whether or not it contains a `[supervisor]` table; it SHALL leave `version` absent and print one line pointing at `git paw config check`. A config file that `git paw init` creates SHALL declare `version = 2`. The generated default config SHALL show the version-2 tables as commented examples and SHALL contain no `[supervisor]` text.
+Every configuration git-paw serializes SHALL use the version-2 layout and declare `version = 2`; when `git paw add-cli` or `git paw remove-cli` rewrites a global file that used version-1 paths, it SHALL print one line stating that the file was rewritten with the version-2 names, and naming each deprecated auto-approval table the rewrite dropped. `git paw init` SHALL backfill `version = 2` only into a file that contains no `[supervisor]` table; for a file that does, it SHALL leave `version` absent and print one line pointing at `git paw config check`. The generated default config SHALL show the version-2 tables as commented examples and SHALL contain no `[supervisor]` text.
 
 #### Scenario: add-cli rewrites a global supervisor table
 
@@ -141,24 +141,11 @@ Every configuration git-paw serializes SHALL use the version-2 layout and declar
 - **THEN** the file SHALL still have no `version` key and its `[supervisor]` table SHALL be byte-identical
 - **AND** stdout SHALL carry one line pointing at `git paw config check`
 
-#### Scenario: init does not stamp an unversioned layout-neutral file
+#### Scenario: init stamps a layout-neutral file
 
-- **GIVEN** an existing config with only `[broker] enabled = true` and no `version`
+- **GIVEN** an existing config with only `[broker] enabled = true`
 - **WHEN** `git paw init` runs
-- **THEN** the file SHALL still have no `version` key
-- **AND** stdout SHALL carry one line pointing at `git paw config check`
-
-#### Scenario: init stamps a file it creates
-
-- **GIVEN** a repository with no `.git-paw/config.toml`
-- **WHEN** `git paw init` runs
-- **THEN** the created file SHALL declare `version = 2`
-
-#### Scenario: init leaves a declared version alone
-
-- **GIVEN** an existing config that already declares `version = 1` or `version = 2`
-- **WHEN** `git paw init` runs
-- **THEN** the `version` line SHALL be unchanged
+- **THEN** the file SHALL gain `version = 2`
 
 #### Scenario: The template carries no supervisor table
 
@@ -190,9 +177,3 @@ The configuration reference SHALL document `default_mode`, `[orchestrator]`, `[o
 
 - **WHEN** the configuration reference's migration table is compared with the migration step's mapping
 - **THEN** every mapped path SHALL appear in the table with the same version-2 path, every dropped path SHALL appear as dropped, and the table SHALL list nothing else
-
-## REMOVED Requirements
-
-### Requirement: The default config template declares the current schema version
-**Reason**: Its init backfill would write `version = 2` into an existing unversioned file once the template declares version 2. That silently widens the file: the version-2 default worker approval is `auto`, while an unversioned file with no worker approval keeps `accept-edits` (`approval-level-truth`). The template clause and the init rules move into "git-paw writes and stamps only the version-2 layout", which never stamps an existing unversioned file.
-**Migration**: None for users. An existing unversioned file stays version 1 and keeps loading through migration; `git paw init` prints a pointer to `git paw config check`. Files `init` creates still declare `version = 2`.

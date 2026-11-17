@@ -16,7 +16,7 @@
 
 - [ ] 1.1 In `src/config/supervisor.rs`:
   - add `ApprovalLevel::AcceptEdits` between `Manual` and `Auto`;
-  - keep `#[default]` on `Auto`, the version-2 default (design D3); the version-1 fallback lives in config loading (3.1);
+  - keep `#[default]` on `Auto`, the default in every configuration version (design D3);
   - make `KEBAB_NAMES` four entries;
   - add the `kebab_name` arm;
   - update the doc comment's level descriptions.
@@ -32,11 +32,10 @@
 
 ## 3. Migration and warning
 
-- [ ] 3.1 In the v1→v2 step (`src/config/migrate.rs`), add the four rewrites from design D2 (`agent_approval`, `approval`, `profiles.*.approval`, and the `approval_args` key `auto`). Return the paths that used `auto`. Record whether a version-1 document set a worker approval.
-- [ ] 3.1a Worker approval resolution (design D3): a set value in any loaded document wins by merge precedence; otherwise `auto` when the highest-precedence loaded document is version 2; otherwise `accept-edits` (version-1 top document, or no file). An unset orchestrator approval inherits the result. Delegates keep their `manual` default.
+- [ ] 3.1 In the v1→v2 step (`src/config/migrate.rs`), add the four rewrites from design D2 (`agent_approval`, `approval`, `profiles.*.approval`, and the `approval_args` key `auto`). Return the paths that used `auto`. Leave an unset worker approval unset: it takes the default `auto` in every version and with no file (design D3). An unset orchestrator approval inherits the worker approval. Delegates keep their `manual` default.
 - [ ] 3.2 Add a `core-deprecation` registry entry for the version-1 `auto` value with the new kind `configuration value` (resolved question 4; the kind itself comes from `supervisor-vocabulary-split`), and print one helper line per file that names every collected path.
-- [ ] 3.3 `init`: stamp no existing unversioned file. Treat it like one with `[supervisor]`: no `version = 2` backfill and the one pointer line. A fresh file still declares `version = 2`. Coordinate with `supervisor-vocabulary-split`, whose "init stamps a layout-neutral file" scenario this overrides.
-- [ ] 3.4 `add-cli` and `remove-cli`: write `[workers] approval = "accept-edits"` when the version-1 global file set no worker approval. The rewrite notice names each renamed or added approval value or key.
+- [ ] 3.3 `init`: treat a file that uses the version-1 `auto` like one with `[supervisor]`, so it gets no `version = 2` backfill and the one pointer line. Any other file follows `supervisor-vocabulary-split`'s backfill rule.
+- [ ] 3.4 `add-cli` and `remove-cli`: the rewrite notice names each renamed approval value or key. An unset worker approval stays unset.
 - [ ] 3.5 Template comment (`src/config/mod.rs:1280`): list the four levels, name `auto` as the default, and give the Claude flags of `accept-edits` and `auto`.
 
 ## 4. Showing the truth
@@ -53,23 +52,23 @@
   - the #28 override keeps launching `--permission-mode auto`;
   - the file's bytes and mtime are unchanged;
   - a version-2 document is not rewritten;
-  - default resolution: a version-1 file with no worker approval launches `acceptEdits` byte for byte, a version-2 file with none launches `--permission-mode auto`, no file gives `accept-edits`, a set global `manual` wins over a version-1 repository file with nothing set, and the orchestrator inherits each result.
+  - default resolution: a version-1 file with no worker approval, a version-2 file with none, and no file all launch `--permission-mode auto`; a set global `manual` wins over a version-1 repository file with nothing set; the orchestrator inherits each result.
 - [ ] 5.4 Warning: one line per file naming every path, nothing on stdout, exit code unchanged, and no line when approvals are unset. `config check` finding.
-- [ ] 5.5 `init` does not stamp a file that has `[profiles.*] approval = "auto"`, nor one with only `[broker] enabled = true`. `add-cli` writes `accept-edits` for a renamed value and for an unset worker approval, and gives the notice.
+- [ ] 5.5 `init` does not stamp a file that has `[profiles.*] approval = "auto"`. `add-cli` writes `accept-edits` for a renamed value and gives the notice, and leaves an unset worker approval unset.
 - [ ] 5.6 Profiles: `accept-edits` loads. A delegate denylist entry from an `accept-edits` override is denied. An `accept-edits` delegate is a writer.
-- [ ] 5.7 Dry-run: version-2 default (`auto`), version-1 default (`accept-edits`), override tag, no-flags wording, per-profile level.
-- [ ] 5.8 Doctor: rows and marks for a version-2 and a version-1 default, the auto hint, override tag, ⚠ for a level in effect with no flags, JSON.
+- [ ] 5.7 Dry-run: the default (`auto`) for a version-1 and a version-2 file, a version-1 explicit `auto` (`accept-edits`), override tag, no-flags wording, per-profile level.
+- [ ] 5.8 Doctor: rows and marks for the default, the auto hint for an `accept-edits` worker, override tag, ⚠ for a level in effect with no flags, JSON.
 - [ ] 5.9 Safety: an `auto` worker carries no `--allowedTools` or `--settings`. Starting at `auto` creates no `.claude/` and no record. A prompt in an `auto` pane is escalated with no keystroke (extend `tests/cli_setup_launch_guards.rs` and the drive-loop escalation tests).
-- [ ] 5.10 Update the escalation hand-off tests (`src/supervisor/escalation.rs:1194-1349,1696`) so that `accept-edits` keeps `acceptEdits` and a version-2 `auto`, set or by default, gives `--permission-mode auto -p`.
+- [ ] 5.10 Update the escalation hand-off tests (`src/supervisor/escalation.rs:1194-1349,1696`) so that `accept-edits` keeps `acceptEdits` and `auto`, set in version 2 or by default, gives `--permission-mode auto -p`.
 
 ## 6. Docs
 
-- [ ] 6.1 `docs/src/configuration/README.md`: the four levels with an exact-flags table, `auto` as the version-2 default, the version-1 rule (an unset or `auto` worker approval stays `accept-edits`), the default-resolution order, and the migration-table row for the version-1 `auto`.
+- [ ] 6.1 `docs/src/configuration/README.md`: the four levels with an exact-flags table, `auto` as the default in every version, the version-1 rule (an explicit `auto` stays `accept-edits`), the migration-table row for the version-1 `auto`, and an upgrade note: a configuration that sets no worker approval moves Claude workers from `acceptEdits` to Claude auto mode; keep the old behaviour with `[workers] approval = "accept-edits"` (or `[supervisor] agent_approval = "accept-edits"` in a version-1 file).
 - [ ] 6.2 `docs/src/supported-clis.md`: per-family flags for the four levels, with the verification date.
 - [ ] 6.3 `docs/src/user-guide/security-posture.md`: `auto` is the default, the CLI's own judgement, wider than `accept-edits`, and not a sandbox. If the CLI's auto mode is unavailable it may fall back silently, and `doctor` does not probe for it. git-paw still answers no prompt.
 - [ ] 6.4 `coordination.md` and `supervisor.md`: how to choose between `accept-edits` and `auto` for an unattended wave (#23, #29). `agent-profiles.md`: the four values, and delegates at `auto`. `doctor.md`: the new check.
 - [ ] 6.5 Worker-only rules today (design D7): the `[clis.claude-worker] args = "--settings …"` recipe, published only if the D6 gate confirmed `--settings` alongside `--setting-sources`. Otherwise leave it out.
-- [ ] 6.6 CHANGELOG: the new level, `auto` now means the CLI's auto mode in version-2 files and is their default, and version-1 files are unchanged (including an unset worker approval) and warn when they write `auto`.
+- [ ] 6.6 CHANGELOG: the new level; `auto` now means the CLI's auto mode in version-2 files; an explicit version-1 `auto` is unchanged and warns. Under a **Changed** (behaviour change) entry: `auto` is now the default worker approval in every version, so upgrading users who never set an approval get Claude workers in Claude auto mode instead of `acceptEdits` (Codex, `agy` and `qwen` are unchanged); to keep the old behaviour set `[workers] approval = "accept-edits"`, or `[supervisor] agent_approval = "accept-edits"` in a version-1 file.
 
 ## 7. Close-out
 

@@ -81,11 +81,13 @@ single writer (`src/delegate.rs:309-315`), but the spec text names only `auto`.
 
 **Goals:**
 - An approval level's name says what it launches. `auto` means the CLI's own automatic mode.
-- No existing configuration launches a different command after the upgrade.
+- No configuration that sets an approval value launches a different command after the upgrade.
+  The one deliberate exception is the default: a configuration that sets no worker approval moves
+  from `accept-edits` to `auto` (D3), and the CHANGELOG and upgrade notes say so.
 - `start --dry-run` and `doctor` show the exact flags per level, so nobody has to read source or
   docs to find out (#28).
-- A wave in a new version-2 configuration runs routine dev commands without git-paw approving
-  anything or writing rules (#23, #29), because `auto` is the default.
+- A wave runs routine dev commands without git-paw approving anything or writing rules (#23,
+  #29), because `auto` is the default.
 - The level names are final before v1.0.0 freezes them.
 
 **Non-Goals:**
@@ -148,16 +150,15 @@ defines. They run on documents that declare `version = 1` or no version:
 - `[profiles.*] approval = "auto"` becomes `"accept-edits"`.
 - every `[clis.*].approval_args` key `auto` is renamed to `accept-edits`, keeping its value.
 
-The step stays pure and in memory, and never touches the file. It also reads an unset worker
-approval in a version-1 document as `accept-edits`, not as the version-2 default `auto` (D3).
+The step stays pure and in memory, and never touches the file. It rewrites only values a document
+writes. An unset worker approval is not rewritten: it takes the default `auto` (D3).
 
 This keeps the vocabulary split's "unchanged meaning" promise. A version-1 *value* `auto` meant
 `acceptEdits`, and it still launches `acceptEdits`. One reading rule is added so that existing
 scenarios stay true without being rewritten: a requirement that names a version-1 path set to
 `"auto"` (for example `cli-provider`'s `agent_approval = "auto"` → `--permission-mode acceptEdits`,
 or `session-state`'s resume scenario) is read as that path's version-2 name set to
-`"accept-edits"`. A scenario whose config declares no version and sets no worker approval is a
-version-1 document, so its worker approval stays `accept-edits` and needs no rewrite either.
+`"accept-edits"`.
 
 **The #28 user's own file.** It has `approval_args = { auto = "--permission-mode auto" }` and a
 worker level of `auto`. Both migrate to `accept-edits`, and the worker still launches
@@ -182,33 +183,33 @@ has:
 released binary writes `version = 2` with `approval = "auto"` meaning `acceptEdits`, the rewrite
 needs its own v2→v3 step. That is recorded in tasks as a merge-order gate.
 
-### D3 — The version-2 default is `auto`; a version-1 file keeps `accept-edits`
+### D3 — The default worker approval is `auto`
 
 Maintainer decision, 2026-11-17. The `#[default]` stays on `Auto`, which now means the CLI's own
-auto mode. A fresh `git paw init` and a version-2 file with no worker approval launch it. This is
-the point of the change: a new user's wave runs routine commands without stalling (#23, #29).
+auto mode. Whenever no loaded configuration sets the worker approval, it is `auto`, whatever the
+file's version and also with no configuration file at all. A fresh `git paw init` launches it too.
+This is the point of the change: a wave runs routine commands without stalling (#23, #29). At
+least for Claude Code, auto mode is the right default for workers.
 
-An existing user's launch must not widen. Version 1's implicit default was `auto`, which launched
-`acceptEdits`. So the version-1 reading of an unset worker approval is `accept-edits`, and the
-loaded worker approval resolves like this:
+There is no version-dependent rule. Merge precedence decides between documents as before, and an
+absent value never overrides a set one.
 
-1. If any loaded document sets a worker approval, merge precedence decides as before. An absent
-   value never overrides a set one. This matters for a version-2 global file with `manual` and a
-   version-1 repository file with nothing set: the result stays `manual`.
-2. Otherwise, if the highest-precedence loaded document (the repository file, else the global
-   file) declares `version = 2`, the worker approval is `auto`.
-3. Otherwise it is `accept-edits`. That covers a version-1 top document and the case with no
-   configuration file at all. Neither of those users chose version 2.
-
-The rule is not a per-document rewrite to an explicit `accept-edits`. Such a rewrite would let a
-version-1 repository file with nothing set override a global `manual` and widen it.
+**This is a behaviour change for upgrading users who never set an approval.** Version 1's implicit
+default was `auto`, which launched `acceptEdits`. After the upgrade, such a Claude worker launches
+`--permission-mode auto` instead. Per the D1 table, `auto` and `accept-edits` differ only for
+Claude: Codex, `agy` and `qwen` launch the same flags, so nothing else changes. An *explicit*
+version-1 `"auto"` is different: the user chose it, so it keeps its meaning and migrates to
+`accept-edits` (D2). The CHANGELOG and the upgrade notes state the change and how to keep the old
+behaviour: write `[workers] approval = "accept-edits"` in a version-2 file, or the version-1 key
+`[supervisor] agent_approval = "accept-edits"` in a version-1 file. git-paw prints no
+one-time notice for it; `start --dry-run` and doctor show the level in effect.
 
 **Orchestrator default.** `[orchestrator] approval` keeps its existing default: unset, it inherits
-the resolved worker approval. In a version-2 file with neither set, headless orchestrator
-invocations therefore run at `auto` (`--permission-mode auto -p` for Claude, D6 step 6). In a
-version-1 file they stay at `accept-edits`. This keeps `supervisor-vocabulary-split`'s "unchanged
-meaning, type and default" for the moved key, and it needs no second default rule. A separate
-orchestrator default would make the pair disagree in a file that sets neither.
+the resolved worker approval. With neither set, headless orchestrator invocations therefore run at
+`auto` (`--permission-mode auto -p` for Claude, D6 step 6). This keeps
+`supervisor-vocabulary-split`'s "unchanged meaning, type and default" for the moved key, and it
+needs no second default rule. A separate orchestrator default would make the pair disagree in a
+file that sets neither.
 
 **Delegate default.** A delegate profile's approval still defaults to `manual`. It does not follow
 the worker default.
@@ -216,25 +217,21 @@ the worker default.
 The `init` template comment lists the four levels, names `auto` as the default, and has one line
 each on what `accept-edits` and `auto` launch for Claude.
 
-### D4 — `init` and the rewriting commands never widen a file's approvals
+### D4 — `init` and the rewriting commands never change what an explicit `auto` means
 
 `supervisor-vocabulary-split` lets `git paw init` backfill `version = 2` into any file without a
-`[supervisor]` table. Under D2 and D3, stamping `version = 2` on an existing unversioned file can
-widen it in two ways. An `auto` at `[profiles.*] approval` or an `approval_args` key would turn
-from `accept-edits` into `auto`. An unset worker approval would turn from `accept-edits` into the
-version-2 default `auto`. Every version-1 file lacks `[workers]`, so the second case covers every
-unversioned file. Therefore:
+`[supervisor]` table. A version-1 file can have no `[supervisor]` table and still use `auto` at
+`[profiles.*] approval` or an `approval_args` key. Stamping `version = 2` on it would turn
+`accept-edits` into `auto` and widen it. An unset worker approval is not at risk: it is `auto`
+before and after the stamp (D3). Therefore:
 
-- `init` stamps no existing unversioned file. It treats one the way it treats a file with
+- `init` treats a file that uses the version-1 `auto` the same way it treats one with
   `[supervisor]`: it leaves `version` absent and prints its one pointer line to
-  `git paw config check`. A fresh file from `init` still declares `version = 2`.
-  This overrides `supervisor-vocabulary-split`'s backfill rule and its "init stamps a
-  layout-neutral file" scenario. That change must be amended to match before both merge.
+  `git paw config check`. Any other file follows `supervisor-vocabulary-split`'s backfill rule.
 - `add-cli` and `remove-cli` serialize the in-memory model, so the global file they rewrite says
-  `accept-edits` where the version-1 file said `auto`. When the version-1 file set no worker
-  approval, the rewritten file sets `[workers] approval = "accept-edits"`. The launch is
-  unchanged. Their existing one-line rewrite notice also names the approval values they renamed
-  or added.
+  `accept-edits` where the version-1 file said `auto`, and the launch is unchanged. Their existing
+  one-line rewrite notice also names the approval values it renamed. An unset worker approval
+  stays unset.
 
 ### D5 — Show the truth: dry-run line and doctor check (alternative C)
 
@@ -315,16 +312,18 @@ gate confirms `--settings` is honoured alongside `--setting-sources`.
 
 ## Risks / Trade-offs
 
-- **Auto mode is AI-judged, and it is the version-2 default.** `auto` lets the CLI run commands
-  that its own model-based rules allow. That is a wider posture than `accept-edits`, and it is
-  not a sandbox. A new user gets it without choosing it. → Existing files keep `accept-edits`
-  (D3). The security-posture page states the difference. `start --dry-run` and doctor show which
-  level is in effect. `manual` and `accept-edits` stay one line away. git-paw still escalates
+- **Auto mode is AI-judged, and it is the default.** `auto` lets the CLI run commands that its
+  own model-based rules allow. That is a wider posture than `accept-edits`, and it is not a
+  sandbox. A user who sets no approval gets it without choosing it. → The security-posture page
+  states the difference. `start --dry-run` and doctor show which level is in effect.
+  `[workers] approval = "accept-edits"` or `"manual"` is one line away. git-paw still escalates
   every prompt and answers none.
-- **Default depends on the file's version.** An unset worker approval means `accept-edits` in a
-  version-1 file and `auto` in a version-2 file. A user with no configuration file also gets
-  `accept-edits`. → The configuration reference states the rule, and the dry-run line and doctor
-  show the result per worker.
+- **Upgrading users who never set an approval get a wider Claude mode.** Their Claude workers
+  move from `acceptEdits` to Claude auto mode with no file change and no runtime notice. Codex,
+  `agy` and `qwen` workers launch the same flags. → The CHANGELOG and upgrade notes call it out
+  as a behaviour change and name how to keep the old behaviour (`[workers] approval =
+  "accept-edits"`, or the version-1 key `[supervisor] agent_approval = "accept-edits"`). The dry-run line
+  and doctor show the level per worker.
 - **Same string, two meanings across versions.** `auto` in a version-1 file means
   `accept-edits`, and in a version-2 file it means auto mode. A snippet copied from old docs into a
   version-2 file gets the wider mode. → The warning, the `config check` finding, the migration
@@ -343,18 +342,22 @@ gate confirms `--settings` is honoured alongside `--setting-sources`.
 ## Migration Plan
 
 1. Land after `config-schema-versioning` and `supervisor-vocabulary-split`, in the same release.
-2. No user action is needed. Version-1 files launch identical commands, including those that set
-   no worker approval, and warn when they use `auto`.
-3. A version-2 file gets `auto` by default. To opt in from a version-1 file, migrate it and write
-   `[workers] approval = "auto"` or leave it unset, or set `auto` on a profile.
+2. Version-1 files that write `auto` launch identical commands and warn. A configuration that sets
+   no worker approval, of any version or none at all, gets `auto`: Claude workers move from
+   `--permission-mode acceptEdits` to `--permission-mode auto`. The CHANGELOG and upgrade notes
+   say so.
+3. To keep the old behaviour, write `[workers] approval = "accept-edits"` in a version-2 file, or
+   `[supervisor] agent_approval = "accept-edits"` in a version-1 file.
 4. **Rollback.** A version-2 file with `accept-edits` fails to load on v0.20.0. That is already
    true of every version-2 file, because `config-schema-versioning` refuses newer versions, so
    this adds no new rollback hazard.
 
 ## Resolved Questions (2026-11-17)
 
-1. **Default worker approval.** `auto` in version 2 (D3). A version-1 file keeps `accept-edits`,
-   both where it writes `auto` and where it sets no worker approval (D2, D3).
+1. **Default worker approval.** `auto`, unconditionally: whenever no loaded configuration sets the
+   worker approval, whatever its version, and with no configuration file (D3). An unset
+   orchestrator approval follows it. An explicit version-1 value `"auto"`, and an `approval_args`
+   key `auto`, still migrate to `accept-edits`, because an explicit choice keeps its meaning (D2).
 2. **Silent fallback when auto mode is unavailable.** The docs warn. Doctor does not probe: it
    stays read-only and never invokes a CLI.
 3. **`manual` → `--permission-mode manual`.** Deferred to the v0.23.0 per-CLI audit, because it

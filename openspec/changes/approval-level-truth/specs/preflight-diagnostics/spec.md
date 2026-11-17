@@ -13,14 +13,14 @@ The check SHALL be built from the same resolution the launch builder uses. When 
 
 #### Scenario: Every level is listed with its flags
 
-- **GIVEN** a version-2 config with `default_cli = "claude"`, no worker approval and no global config
+- **GIVEN** a config with `default_cli = "claude"`, no worker approval and no global config
 - **WHEN** `git paw doctor` runs
 - **THEN** the `approval levels` check SHALL list for `claude`: `manual` no flags, `accept-edits` `--permission-mode acceptEdits`, `auto` `--permission-mode auto` marked in effect for workers, and `full-auto` `--dangerously-skip-permissions`
 - **AND** it SHALL report ✓
 
-#### Scenario: A version-1 default is shown as accept-edits with the auto hint
+#### Scenario: An accept-edits worker is shown with the auto hint
 
-- **GIVEN** a version-1 config with `default_cli = "claude"`, no worker approval and no global config
+- **GIVEN** a version-1 config with `default_cli = "claude"`, `[supervisor] agent_approval = "auto"` and no global config
 - **WHEN** `git paw doctor` runs
 - **THEN** the `claude` rows SHALL mark `accept-edits` in effect for workers
 - **AND** its detail SHALL say that `auto` launches the CLI's own auto mode
